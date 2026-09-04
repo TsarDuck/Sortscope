@@ -1580,8 +1580,7 @@ export default function Home() {
     } else {
       const previousValues = [...practiceValues];
       const nextValues = [...practiceValues];
-      const [moved] = nextValues.splice(fromIndex, 1);
-      nextValues.splice(toIndex, 0, moved);
+      [nextValues[fromIndex], nextValues[toIndex]] = [nextValues[toIndex], nextValues[fromIndex]];
       setPracticeValues(nextValues);
       if (!evaluatePracticeMove(nextValues, practicePartitionOrder)) {
         schedulePracticeUndo(previousValues, practicePartitionOrder);
@@ -2344,7 +2343,9 @@ export default function Home() {
             <p className="practice-lab__help">
               {isMedianPractice
                 ? "Choose the lower median to create two near-even outlier-guard halves. A wrong choice clears itself so you can try again."
-                : "Pick up a block and drag it into place, or select one block and then select its destination. Each move is checked immediately."}
+                : isPartitionPractice
+                  ? "Pick up a partition and drag it into its new position, or select one and then select its destination. Each arrangement is checked immediately."
+                  : "Select or drag either of the two values to swap them. The result—not which value you started with—is checked immediately."}
             </p>
             <div
               className="practice-board"
