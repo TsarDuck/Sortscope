@@ -414,7 +414,7 @@ const ALGORITHM_DETAILS: Record<
       "Mean partition sort repeatedly cuts the current row into balanced groups: first 2 groups, then 4, then 8, and so on. It computes each group’s arithmetic mean—the sum divided by the number of values—and moves whole groups so lower means are left of higher means.",
       "A low group mean is only a clue, not proof that every value in that group belongs before every value in another group. That is why the process keeps splitting. Once every group contains one value, its mean is the value itself, so arranging the group means is guaranteed to arrange the row.",
     ],
-    complexity: ["ROUNDS O(log n)", "GUARANTEE SINGLETON ROUND", "SPACE O(n)"],
+    complexity: ["ROUNDS O(log n)", "RANKING O(n²) WORST", "SPACE O(n)"],
     cardTitle: "MEAN PARTITION SORT",
     cardTag: "experimental · group-based",
     steps: [
@@ -523,8 +523,14 @@ function getWorkEstimate(metrics: {
   comparisons: number;
   rankComparisons: number;
   writes: number;
+  meanComputationOperations?: number;
 }) {
-  return metrics.comparisons + metrics.rankComparisons + metrics.writes;
+  return (
+    metrics.comparisons +
+    metrics.rankComparisons +
+    metrics.writes +
+    (metrics.meanComputationOperations ?? 0)
+  );
 }
 
 function buildInsertionSteps(source: number[]): SortStep[] {
@@ -1963,8 +1969,10 @@ export default function Home() {
               <p>
                 Every deterministic algorithm receives the same shuffled sequence of 1 through n.
                 These totals combine comparisons and writes, so they are operation estimates rather
-                than timers. Bogo Sort stays out of this chart because its expected work grows
-                factorially, even though the live visualizer allows it up to 256 values.
+                than timers. Mean Partition also counts every value read and rewritten during each
+                grouping round, plus its group-ranking comparisons. Bogo Sort stays out of this chart
+                because its expected work grows factorially, even though the live visualizer allows it
+                up to 256 values.
               </p>
             </div>
             <label className="benchmark-select">

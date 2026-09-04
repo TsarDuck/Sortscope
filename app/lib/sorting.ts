@@ -58,6 +58,7 @@ export type SortMetrics = {
   writes: number;
   rounds: number;
   finalValues: number[];
+  meanComputationOperations?: number;
 };
 
 export type BogoSession = {
@@ -1637,8 +1638,9 @@ export function analyzeMeanPartitionSort(source: number[]): SortMetrics {
   let groupCount = 2;
   let rounds = 0;
   let meansCalculated = 0;
+  let meanComputationOperations = 0;
   let rankComparisons = 0;
-  let valuesReordered = 0;
+  let outputWrites = 0;
 
   if (working.length <= 1) {
     return {
@@ -1647,6 +1649,7 @@ export function analyzeMeanPartitionSort(source: number[]): SortMetrics {
       writes: 0,
       rounds: 0,
       finalValues: working,
+      meanComputationOperations: 0,
     };
   }
 
@@ -1654,24 +1657,25 @@ export function analyzeMeanPartitionSort(source: number[]): SortMetrics {
     rounds += 1;
     const chunks = buildMeanChunks(working, groupCount);
     meansCalculated += chunks.length;
+    // Every round reads and sums every active value, then divides once per group.
+    meanComputationOperations += working.length + chunks.length;
     const ranking = rankMeanChunks(chunks);
     rankComparisons += ranking.comparisons;
     const rankedChunks = ranking.chunks;
 
-    valuesReordered += rankedChunks.reduce(
-      (total, chunk, nextIndex) =>
-        total + (chunk.originalIndex === nextIndex ? 0 : chunk.values.length),
-      0,
-    );
+    // The current implementation materializes a new row of every value after
+    // each ranking, even if some groups happened to remain in place.
+    outputWrites += working.length;
     working = rankedChunks.flatMap((chunk) => chunk.values);
 
     if (isNonDecreasing(working) || groupCount >= sourceValues.length) {
       return {
         comparisons: meansCalculated,
         rankComparisons,
-        writes: valuesReordered,
+        writes: outputWrites,
         rounds,
         finalValues: working,
+        meanComputationOperations,
       };
     }
 

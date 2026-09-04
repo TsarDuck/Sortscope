@@ -68,6 +68,17 @@ test("mean partition sort handles duplicates, negatives, and already ordered row
   }
 });
 
+test("mean partition workload includes every grouping read and rebuilt output", () => {
+  const sorted = analyzeMeanPartitionSort([1, 2, 3, 4]);
+  const reverse = analyzeMeanPartitionSort([4, 3, 2, 1]);
+
+  assert.equal(sorted.meanComputationOperations, 6);
+  assert.equal(sorted.writes, 4);
+  assert.equal(reverse.meanComputationOperations, 14);
+  assert.equal(reverse.writes, 8);
+  assert.ok(reverse.rankComparisons > sorted.rankComparisons);
+});
+
 test("cocktail, selection, heap, quick, and merge sort finish in numeric order without mutating the source", () => {
   const builders = [
     buildCocktailSteps,
