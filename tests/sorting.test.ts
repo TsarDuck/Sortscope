@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   BOGO_MAX_ATTEMPTS,
+  advanceBogoSession,
   analyzeCocktailSort,
   analyzeHeapSort,
   analyzeInsertionSort,
@@ -17,6 +18,8 @@ import {
   buildMergeSortSteps,
   buildQuickSortSteps,
   buildSelectionSteps,
+  createBogoSession,
+  getBogoSessionStep,
   isNonDecreasing,
   partitionBalanced,
 } from "../app/lib/sorting";
@@ -143,6 +146,20 @@ test("bogo sort either succeeds by shuffle or reports its safety limit honestly"
   assert.equal(isNonDecreasing(finalValues(limited)), false);
   assert.equal(largeLimited.at(-1)?.phase, "limited");
   assert.equal(finalValues(largeLimited).length, 256);
+});
+
+test("bogo sessions can yield between attempts without losing their selected limit", () => {
+  const success = createBogoSession([2, 1], 4);
+  advanceBogoSession(success, () => 0);
+
+  const limited = createBogoSession([2, 1], 3);
+  while (!limited.done) advanceBogoSession(limited, () => 0.999);
+
+  assert.equal(success.attemptLimit, 4);
+  assert.equal(getBogoSessionStep(success).phase, "complete");
+  assert.deepEqual(getBogoSessionStep(success).values, [1, 2]);
+  assert.equal(limited.attempts, 3);
+  assert.equal(getBogoSessionStep(limited).phase, "limited");
 });
 
 test("dense algorithms retain a bounded number of useful render snapshots", () => {

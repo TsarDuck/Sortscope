@@ -60,6 +60,17 @@ export type SortMetrics = {
   finalValues: number[];
 };
 
+export type BogoSession = {
+  values: number[];
+  attemptLimit: number;
+  attempts: number;
+  comparisons: number;
+  writes: number;
+  done: boolean;
+  limited: boolean;
+  initiallySorted: boolean;
+};
+
 type MeanChunk = {
   id: number;
   values: number[];
@@ -740,6 +751,81 @@ function shuffleInPlace(values: number[], random: () => number) {
   }
 
   return writes;
+}
+
+export function createBogoSession(
+  source: number[],
+  attemptLimit = BOGO_MAX_ATTEMPTS,
+): BogoSession {
+  const values = [...source];
+  const initialCheck = countSortedCheck(values);
+
+  return {
+    values,
+    attemptLimit: Math.max(1, Math.floor(attemptLimit)),
+    attempts: 0,
+    comparisons: initialCheck.comparisons,
+    writes: 0,
+    done: initialCheck.sorted,
+    limited: false,
+    initiallySorted: initialCheck.sorted,
+  };
+}
+
+export function advanceBogoSession(
+  session: BogoSession,
+  random: () => number = Math.random,
+) {
+  if (session.done) return;
+
+  session.attempts += 1;
+  session.writes += shuffleInPlace(session.values, random);
+  const check = countSortedCheck(session.values);
+  session.comparisons += check.comparisons;
+
+  if (check.sorted) {
+    session.done = true;
+    return;
+  }
+
+  if (session.attempts >= session.attemptLimit) {
+    session.done = true;
+    session.limited = true;
+  }
+}
+
+export function getBogoSessionStep(session: BogoSession): SortStep {
+  if (session.done && !session.limited) {
+    return makeStep(session.values, {
+      pass: session.attempts,
+      phase: "complete",
+      comparisons: session.comparisons,
+      writes: session.writes,
+      sortedCount: session.values.length,
+      message: session.initiallySorted
+        ? "By chance, the starting row is already ordered."
+        : "Shuffle " + session.attempts + " finally landed on an ordered row.",
+    });
+  }
+
+  if (session.done && session.limited) {
+    return makeStep(session.values, {
+      pass: session.attempts,
+      phase: "limited",
+      comparisons: session.comparisons,
+      writes: session.writes,
+      message:
+        "Safety stop after " + session.attemptLimit + " shuffles. Bogo Sort can take indefinitely; try a new row or another algorithm.",
+    });
+  }
+
+  return makeStep(session.values, {
+    pass: session.attempts,
+    phase: "shuffle",
+    comparisons: session.comparisons,
+    writes: session.writes,
+    message: "Shuffle " + session.attempts + ": still not ordered, so try again.",
+  });
 }
 
 export function buildCocktailSteps(source: number[]): SortStep[] {

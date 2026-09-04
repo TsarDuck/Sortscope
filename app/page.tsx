@@ -1,8 +1,17 @@
 "use client";
 
-import { type CSSProperties, useEffect, useMemo, useRef, useState } from "react";
+import {
+  type CSSProperties,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import {
   BOGO_MAX_ATTEMPTS,
+  type BogoSession,
+  advanceBogoSession,
   analyzeCocktailSort,
   analyzeHeapSort,
   analyzeInsertionSort,
@@ -10,14 +19,15 @@ import {
   analyzeMergeSort,
   analyzeQuickSort,
   analyzeSelectionSort,
-  buildBogoSteps,
   buildCocktailSteps,
   buildHeapSortSteps,
   buildMeanPartitionSteps,
   buildMergeSortSteps,
   buildQuickSortSteps,
   buildSelectionSteps,
+  createBogoSession,
   formatMean,
+  getBogoSessionStep,
 } from "./lib/sorting";
 
 type AlgorithmId =
@@ -102,7 +112,10 @@ const BENCHMARK_ALGORITHMS = [
 ] as const;
 type BenchmarkAlgorithm = (typeof BENCHMARK_ALGORITHMS)[number]["key"];
 type BenchmarkWork = Record<BenchmarkAlgorithm, number>;
-const BOGO_ATTEMPT_LABEL = BOGO_MAX_ATTEMPTS.toLocaleString("en-US");
+const BOGO_MIN_ATTEMPTS = 1_000;
+const BOGO_SMALL_ARRAY_MAX_ATTEMPTS = 1_000_000_000;
+const BOGO_MID_ARRAY_MAX_ATTEMPTS = 100_000_000;
+const BOGO_LARGE_ARRAY_MAX_ATTEMPTS = 1_000_000;
 const INITIAL_VALUES = [
   17, 5, 22, 8, 19, 3, 14, 24, 1, 12, 7, 20, 10, 23, 4, 16, 9, 21, 2, 18,
   6, 15, 11, 13,
@@ -116,6 +129,17 @@ const BOGO_CONFETTI = Array.from({ length: 64 }, (_, index) => ({
   color: BOGO_CONFETTI_COLORS[index % BOGO_CONFETTI_COLORS.length],
   shape: index % 3,
 }));
+
+function getBogoAttemptMaximum(size: number) {
+  if (size < DEFAULT_ARRAY_SIZE) return BOGO_SMALL_ARRAY_MAX_ATTEMPTS;
+  if (size <= 144) return BOGO_MID_ARRAY_MAX_ATTEMPTS;
+
+  const scale = (size - 144) / (256 - 144);
+  return Math.round(
+    BOGO_MID_ARRAY_MAX_ATTEMPTS *
+      (BOGO_LARGE_ARRAY_MAX_ATTEMPTS / BOGO_MID_ARRAY_MAX_ATTEMPTS) ** scale,
+  );
+}
 
 const ALGORITHM_DETAILS: Record<
   AlgorithmId,
@@ -258,8 +282,8 @@ const ALGORITHM_DETAILS: Record<
     stageDescription: "random attempt",
     eyebrow: "CHAOS EXPERIMENT",
     learnTitle: "Let chance do the sorting.",
-    learnCopy: "Bogo sort checks whether the row is ordered. If not, it randomly shuffles every value and tries again. It works at every array size here, but stops after " + BOGO_ATTEMPT_LABEL + " attempts so the visualizer stays responsive.",
-    complexity: ["BEST O(n)", "EXPECTED O(n · n!)", "LIMIT " + BOGO_ATTEMPT_LABEL + " TRIES"],
+    learnCopy: "Bogo sort checks whether the row is ordered. If not, it randomly shuffles every value and tries again. It works at every array size here, but stops at the maximum shuffle count you set.",
+    complexity: ["BEST O(n)", "EXPECTED O(n · n!)", "LIMIT YOU SET"],
     cardTitle: "BOGO SORT",
     cardTag: "randomized · capped demo",
     steps: [
@@ -603,6 +627,7 @@ export default function Home() {
   const [arraySizeInput, setArraySizeInput] = useState(String(DEFAULT_ARRAY_SIZE));
   const [speed, setSpeed] = useState(DEFAULT_SPEED);
   const [speedInput, setSpeedInput] = useState(String(DEFAULT_SPEED));
+  const [bogoAttemptLimit, setBogoAttemptLimit] = useState(BOGO_MAX_ATTEMPTS);
   const [benchmarkPattern, setBenchmarkPattern] =
     useState<BenchmarkPattern>("random");
   const [originalValues, setOriginalValues] = useState(INITIAL_VALUES);
@@ -610,13 +635,21 @@ export default function Home() {
   const [steps, setSteps] = useState<SortStep[]>([]);
   const [stepIndex, setStepIndex] = useState(0);
   const [runState, setRunState] = useState<RunState>("ready");
+  const [bogoLiveStep, setBogoLiveStep] = useState<SortStep | null>(null);
   const [bogoCelebration, setBogoCelebration] = useState(false);
   const [soundVolume, setSoundVolume] = useState(50);
   const audioContextRef = useRef<AudioContext | null>(null);
   const lastToneTimeRef = useRef(0);
+  const meanBarElementsRef = useRef(new Map<number, HTMLDivElement>());
+  const meanBarPositionsRef = useRef(new Map<number, number>());
+  const bogoSessionRef = useRef<BogoSession | null>(null);
+  const [meanSlideOffsets, setMeanSlideOffsets] = useState<Record<number, number>>({});
+  const [meanSlideStage, setMeanSlideStage] = useState<"idle" | "prepare" | "animate">("idle");
   const prefersReducedMotion = usePrefersReducedMotion();
   const isMeanPartition = algorithm === "mean-partition";
   const isBogo = algorithm === "bogo";
+  const bogoAttemptMaximum = getBogoAttemptMaximum(arraySize);
+  const bogoSliderStep = Math.max(BOGO_MIN_ATTEMPTS, Math.round(bogoAttemptMaximum / 10_000));
   const soundEnabled = soundVolume > 0;
   const algorithmDetails = ALGORITHM_DETAILS[algorithm];
   const algorithmLabel = algorithmDetails.label;
@@ -624,7 +657,7 @@ export default function Home() {
   const totalStages = isMeanPartition
     ? Math.max(1, Math.ceil(Math.log2(Math.max(originalValues.length, 1))))
     : isBogo
-      ? BOGO_MAX_ATTEMPTS
+      ? bogoAttemptLimit
       : algorithm === "merge"
         ? Math.max(1, Math.ceil(Math.log2(Math.max(originalValues.length, 1))))
         : algorithm === "heap"
@@ -689,8 +722,11 @@ export default function Home() {
   );
 
   const currentStep = useMemo(
-    () => steps[stepIndex] ?? createInitialStep(values, algorithm),
-    [algorithm, stepIndex, steps, values],
+    () =>
+      isBogo && bogoLiveStep
+        ? bogoLiveStep
+        : steps[stepIndex] ?? createInitialStep(values, algorithm),
+    [algorithm, bogoLiveStep, isBogo, stepIndex, steps, values],
   );
   const visibleValues = currentStep.values;
   const mergePassFrameCounts = useMemo(() => {
@@ -715,12 +751,74 @@ export default function Home() {
     return () => window.clearTimeout(timer);
   }, [currentStep.phase, isBogo, runState]);
 
+  useLayoutEffect(() => {
+    const captureMeanBarPositions = () => {
+      const positions = new Map<number, number>();
+
+      visibleValues.forEach((value) => {
+        const bar = meanBarElementsRef.current.get(value);
+        if (bar) positions.set(value, bar.getBoundingClientRect().left);
+      });
+
+      return positions;
+    };
+
+    if (!isMeanPartition || prefersReducedMotion) {
+      meanBarPositionsRef.current = captureMeanBarPositions();
+      setMeanSlideOffsets({});
+      setMeanSlideStage("idle");
+      return;
+    }
+
+    const nextPositions = captureMeanBarPositions();
+    if (currentStep.phase !== "reorder") {
+      meanBarPositionsRef.current = nextPositions;
+      return;
+    }
+
+    const offsets: Record<number, number> = {};
+    let hasMovement = false;
+
+    nextPositions.forEach((nextLeft, value) => {
+      const previousLeft = meanBarPositionsRef.current.get(value);
+      if (previousLeft === undefined) return;
+
+      const offset = previousLeft - nextLeft;
+      if (Math.abs(offset) < 1) return;
+      offsets[value] = offset;
+      hasMovement = true;
+    });
+
+    meanBarPositionsRef.current = nextPositions;
+    if (!hasMovement) return;
+
+    setMeanSlideOffsets(offsets);
+    setMeanSlideStage("prepare");
+
+    let settleFrame: number | undefined;
+    let releaseTimer: number | undefined;
+    const startFrame = window.requestAnimationFrame(() => {
+      settleFrame = window.requestAnimationFrame(() => {
+        setMeanSlideOffsets({});
+        setMeanSlideStage("animate");
+        releaseTimer = window.setTimeout(() => setMeanSlideStage("idle"), meanSlideDuration);
+      });
+    });
+
+    return () => {
+      window.cancelAnimationFrame(startFrame);
+      if (settleFrame !== undefined) window.cancelAnimationFrame(settleFrame);
+      if (releaseTimer !== undefined) window.clearTimeout(releaseTimer);
+    };
+  }, [currentStep.pass, currentStep.phase, isMeanPartition, prefersReducedMotion, visibleValues]);
+
   const isLocked = runState === "running" || runState === "paused";
   const isLargeArray = originalValues.length > DEFAULT_ARRAY_SIZE;
   const playbackDensity = isBogo ? 48 : 1;
   const speedDelay = 720 - speed * 7.13;
-  const minimumFrameDelay =
-    isMeanPartition ? 110 : isLargeArray && !isBogo ? 16 : 7;
+  const meanSlideDuration = Math.round(Math.max(520, 1_050 - speed * 5.3));
+  const meanStaticDelay = Math.max(190, 620 - speed * 4);
+  const minimumFrameDelay = isLargeArray && !isBogo ? 16 : 7;
   const usesEvenMergePacing =
     algorithm === "merge" &&
     currentStep.phase !== "ready" &&
@@ -729,7 +827,11 @@ export default function Home() {
   const mergeFramesInCurrentPass = mergePassFrameCounts.get(currentStep.pass) ?? 1;
   const delay = prefersReducedMotion
     ? 18
-    : usesEvenMergePacing
+    : isMeanPartition
+      ? currentStep.phase === "reorder"
+        ? meanSlideDuration + 120
+        : meanStaticDelay
+      : usesEvenMergePacing
       ? Math.max(minimumFrameDelay, mergePassDuration / mergeFramesInCurrentPass)
       : Math.max(minimumFrameDelay, speedDelay / playbackDensity);
   const shouldInterpolateDenseBars =
@@ -739,9 +841,20 @@ export default function Home() {
         "--bar-transition-duration": String(Math.min(260, Math.max(90, delay * 0.75))) + "ms",
       } as CSSProperties)
     : undefined;
+  const meanTransitionStyle = isMeanPartition
+    ? ({ "--mean-slide-duration": String(meanSlideDuration) + "ms" } as CSSProperties)
+    : undefined;
+  const barTransitionStyle = isMeanPartition
+    ? ({
+        ...(denseBarTransitionStyle ?? {}),
+        "--mean-slide-duration": String(meanSlideDuration) + "ms",
+      } as CSSProperties)
+    : denseBarTransitionStyle;
   const progress =
     runState === "complete"
       ? 100
+      : isBogo
+        ? Math.round((currentStep.pass / Math.max(bogoAttemptLimit, 1)) * 100)
       : steps.length > 1
         ? Math.round((stepIndex / (steps.length - 1)) * 100)
         : 0;
@@ -790,8 +903,8 @@ export default function Home() {
     const oscillator = context.createOscillator();
     const gain = context.createGain();
     const duration = step.phase === "swap" || step.phase === "merge" ? 0.05 : 0.032;
-    const basePeakGain = step.phase === "swap" ? 0.07 : 0.048;
-    const peakGain = basePeakGain * (soundVolume / 100);
+    const basePeakGain = step.phase === "swap" ? 0.14 : 0.096;
+    const peakGain = basePeakGain * (soundVolume / 100) ** 2;
 
     oscillator.type = step.phase === "swap" || step.phase === "shift" ? "triangle" : "sine";
     oscillator.frequency.setValueAtTime(180 + normalizedValue * 700, now);
@@ -816,7 +929,7 @@ export default function Home() {
       const gain = context.createGain();
       const startTime = now + index * 0.1;
       const duration = index === notes.length - 1 ? 0.38 : 0.14;
-      const peakGain = 0.055 * (soundVolume / 100);
+      const peakGain = 0.11 * (soundVolume / 100) ** 2;
 
       oscillator.type = index === notes.length - 1 ? "triangle" : "sine";
       oscillator.frequency.setValueAtTime(frequency, startTime);
@@ -850,7 +963,40 @@ export default function Home() {
   }, [currentStep, runState, soundEnabled, stepIndex]);
 
   useEffect(() => {
-    if (runState !== "running" || steps.length === 0) return;
+    if (!isBogo || runState !== "running") return;
+
+    const session = bogoSessionRef.current;
+    if (!session) return;
+
+    let cancelled = false;
+    let timer: number | undefined;
+
+    const runBatch = () => {
+      if (cancelled || bogoSessionRef.current !== session) return;
+
+      const deadline = performance.now() + 8;
+      do {
+        advanceBogoSession(session);
+      } while (!session.done && performance.now() < deadline);
+
+      setBogoLiveStep(getBogoSessionStep(session));
+      if (session.done) {
+        setRunState("complete");
+        return;
+      }
+
+      timer = window.setTimeout(runBatch, 0);
+    };
+
+    timer = window.setTimeout(runBatch, 0);
+    return () => {
+      cancelled = true;
+      if (timer !== undefined) window.clearTimeout(timer);
+    };
+  }, [isBogo, runState]);
+
+  useEffect(() => {
+    if (isBogo || runState !== "running" || steps.length === 0) return;
 
     const timer = window.setTimeout(() => {
       const nextIndex = stepIndex + 1;
@@ -866,11 +1012,13 @@ export default function Home() {
     }, delay);
 
     return () => window.clearTimeout(timer);
-  }, [delay, runState, stepIndex, steps]);
+  }, [delay, isBogo, runState, stepIndex, steps]);
 
   function createNewArray(size = arraySize) {
     const nextValues = makeRandomArray(size);
     setBogoCelebration(false);
+    bogoSessionRef.current = null;
+    setBogoLiveStep(null);
     setOriginalValues(nextValues);
     setValues(nextValues);
     setSteps([]);
@@ -880,6 +1028,8 @@ export default function Home() {
 
   function resetArray() {
     setBogoCelebration(false);
+    bogoSessionRef.current = null;
+    setBogoLiveStep(null);
     setValues([...originalValues]);
     setSteps([]);
     setStepIndex(0);
@@ -891,8 +1041,14 @@ export default function Home() {
     setSoundVolume(nextVolume);
   }
 
+  function setMeanBarRef(value: number, element: HTMLDivElement | null) {
+    if (element) meanBarElementsRef.current.set(value, element);
+  }
+
   function handleAlgorithmChange(nextAlgorithm: AlgorithmId) {
     setBogoCelebration(false);
+    bogoSessionRef.current = null;
+    setBogoLiveStep(null);
     setAlgorithm(nextAlgorithm);
     setValues([...originalValues]);
     setSteps([]);
@@ -913,6 +1069,19 @@ export default function Home() {
 
     if (soundEnabled) ensureAudioContext();
     setBogoCelebration(false);
+    if (algorithm === "bogo") {
+      const session = createBogoSession(originalValues, bogoAttemptLimit);
+      bogoSessionRef.current = session;
+      setValues([...originalValues]);
+      setSteps([]);
+      setStepIndex(0);
+      setBogoLiveStep(session.done ? getBogoSessionStep(session) : null);
+      setRunState(session.done ? "complete" : "running");
+      return;
+    }
+
+    bogoSessionRef.current = null;
+    setBogoLiveStep(null);
     const sequence =
       algorithm === "mean-partition"
         ? buildMeanPartitionSteps(originalValues)
@@ -926,9 +1095,7 @@ export default function Home() {
                 ? buildQuickSortSteps(originalValues)
                 : algorithm === "merge"
                   ? buildMergeSortSteps(originalValues)
-                  : algorithm === "bogo"
-                    ? buildBogoSteps(originalValues)
-                    : buildInsertionSteps(originalValues);
+                  : buildInsertionSteps(originalValues);
     setValues([...originalValues]);
     setSteps(sequence);
     setStepIndex(0);
@@ -937,6 +1104,10 @@ export default function Home() {
 
   function handleArraySizeChange(nextSize: number) {
     const clampedSize = Math.min(maximumArraySize, Math.max(minimumArraySize, Math.round(nextSize)));
+    const nextBogoAttemptMaximum = getBogoAttemptMaximum(clampedSize);
+    if (bogoAttemptLimit > nextBogoAttemptMaximum) {
+      setBogoAttemptLimit(nextBogoAttemptMaximum);
+    }
     setArraySize(clampedSize);
     setArraySizeInput(String(clampedSize));
     createNewArray(clampedSize);
@@ -977,6 +1148,14 @@ export default function Home() {
       return;
     }
     handleSpeedChange(candidate);
+  }
+
+  function handleBogoAttemptLimitChange(nextLimit: number) {
+    const clampedLimit = Math.min(
+      bogoAttemptMaximum,
+      Math.max(BOGO_MIN_ATTEMPTS, Math.round(nextLimit)),
+    );
+    setBogoAttemptLimit(clampedLimit);
   }
 
   const primaryLabel =
@@ -1057,24 +1236,45 @@ export default function Home() {
             </div>
 
             <div className="controls" aria-label="Visualizer controls">
-              <label className="control-field control-field--algorithm">
-                <span className="control-label">Algorithm</span>
-                <select
-                  value={algorithm}
-                  onChange={(event) => handleAlgorithmChange(event.target.value as AlgorithmId)}
-                  disabled={isLocked}
-                  aria-label="Sorting algorithm"
-                >
-                  <option value="insertion">Insertion sort</option>
-                  <option value="cocktail">Cocktail sort</option>
-                  <option value="selection">Selection sort</option>
-                  <option value="heap">Heap sort</option>
-                  <option value="quick">Quick sort</option>
-                  <option value="merge">Merge sort</option>
-                  <option value="bogo">Bogo sort ({BOGO_ATTEMPT_LABEL}-shuffle cap)</option>
-                  <option value="mean-partition">Mean partition sort</option>
-                </select>
-              </label>
+              <div className="algorithm-controls">
+                <label className="control-field control-field--algorithm">
+                  <span className="control-label">Algorithm</span>
+                  <select
+                    value={algorithm}
+                    onChange={(event) => handleAlgorithmChange(event.target.value as AlgorithmId)}
+                    disabled={isLocked}
+                    aria-label="Sorting algorithm"
+                  >
+                    <option value="insertion">Insertion sort</option>
+                    <option value="cocktail">Cocktail sort</option>
+                    <option value="selection">Selection sort</option>
+                    <option value="heap">Heap sort</option>
+                    <option value="quick">Quick sort</option>
+                    <option value="merge">Merge sort</option>
+                    <option value="mean-partition">Mean partition sort</option>
+                    <option value="bogo">Bogo sort</option>
+                  </select>
+                </label>
+
+                {isBogo && (
+                  <label className="control-field control-field--range bogo-attempt-limit">
+                    <span className="control-label">
+                      Max shuffles
+                      <strong>{bogoAttemptLimit.toLocaleString("en-US")}</strong>
+                    </span>
+                    <input
+                      type="range"
+                      min={BOGO_MIN_ATTEMPTS}
+                      max={bogoAttemptMaximum}
+                      step={bogoSliderStep}
+                      value={bogoAttemptLimit}
+                      onChange={(event) => handleBogoAttemptLimitChange(Number(event.target.value))}
+                      disabled={isLocked}
+                      aria-label="Maximum Bogo Sort shuffles"
+                    />
+                  </label>
+                )}
+              </div>
 
               <label className="control-field control-field--range">
                 <span className="control-label">
@@ -1187,7 +1387,11 @@ export default function Home() {
             <div className="chart-stage" role="img" aria-label={"Array values: " + displayValues + ". " + currentStep.message}>
               <div className="chart-grid" aria-hidden="true" />
               {isMeanPartition && currentStep.groups && (
-                <div className="mean-bands" aria-hidden="true">
+                <div
+                  className={"mean-bands mean-bands--" + meanSlideStage}
+                  style={meanTransitionStyle}
+                  aria-hidden="true"
+                >
                   {currentStep.groups.map((group) => {
                     const left = (group.start / Math.max(visibleValues.length, 1)) * 100;
                     const width =
@@ -1195,7 +1399,7 @@ export default function Home() {
                     return (
                       <div
                         className="mean-band"
-                        key={String(group.id) + "-" + String(group.rank)}
+                        key={String(group.id)}
                         style={{ left: String(left) + "%", width: String(width) + "%" }}
                       >
                         {currentStep.groups && currentStep.groups.length <= 8 && (
@@ -1217,9 +1421,10 @@ export default function Home() {
                   "bars " +
                   (isLargeArray ? "bars--dense " : "") +
                   (algorithm === "merge" ? "bars--merge " : "") +
+                  (isMeanPartition ? "bars--mean bars--mean-" + meanSlideStage + " " : "") +
                   (shouldInterpolateDenseBars ? "bars--smooth" : "")
                 }
-                style={denseBarTransitionStyle}
+                style={barTransitionStyle}
                 aria-hidden="true"
               >
                 {visibleValues.map((value, index) => {
@@ -1235,8 +1440,18 @@ export default function Home() {
                       (index === group.end - 1 ? "bar-slot--group-end" : "")
                     : "";
                   const height = (shownValue / largestValue) * 100;
+                  const meanSlideOffset = isMeanPartition ? meanSlideOffsets[value] : undefined;
+                  const meanSlotStyle =
+                    meanSlideOffset === undefined
+                      ? undefined
+                      : ({ transform: "translateX(" + meanSlideOffset + "px)" } as CSSProperties);
                   return (
-                    <div className={"bar-slot " + groupClass} key={String(index) + "-" + String(originalValues.length)}>
+                    <div
+                      className={"bar-slot " + groupClass}
+                      key={isMeanPartition ? "mean-" + String(value) : String(index) + "-" + String(originalValues.length)}
+                      ref={isMeanPartition ? (element) => setMeanBarRef(value, element) : undefined}
+                      style={meanSlotStyle}
+                    >
                       <div
                         className={"bar " + getBarClass(index, currentStep, algorithm)}
                         style={{ height: String(height) + "%" }}

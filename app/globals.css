@@ -259,6 +259,12 @@ button:disabled {
   gap: 8px;
 }
 
+.algorithm-controls {
+  display: grid;
+  gap: 12px;
+  min-width: 142px;
+}
+
 .control-field--algorithm {
   min-width: 142px;
 }
@@ -607,6 +613,18 @@ input:focus-visible {
   transition: background 360ms ease-out;
 }
 
+.bars--mean .bar-slot {
+  transition: transform var(--mean-slide-duration, 520ms) cubic-bezier(.22, .9, .3, 1);
+}
+
+.bars--mean.bars--mean-prepare .bar-slot {
+  transition: none;
+}
+
+.bars--mean.bars--mean-animate .bar-slot {
+  will-change: transform;
+}
+
 .bar-slot--group-start::before {
   position: absolute;
   z-index: 2;
@@ -755,6 +773,9 @@ input:focus-visible {
   height: 20px;
   overflow: hidden;
   border-left: 1px solid rgba(130, 211, 255, 0.78);
+  transition:
+    left var(--mean-slide-duration, 520ms) cubic-bezier(.22, .9, .3, 1),
+    width var(--mean-slide-duration, 520ms) cubic-bezier(.22, .9, .3, 1);
 }
 
 .mean-band:last-child {
@@ -1533,6 +1554,11 @@ input:focus-visible {
 
   .control-field--algorithm {
     min-width: 100%;
+  }
+
+  .algorithm-controls {
+    width: 100%;
+    min-width: 0;
   }
 
   .control-field--range {
