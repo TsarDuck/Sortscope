@@ -609,10 +609,7 @@ export default function Home() {
                     ? (index === group.start ? "bar-slot--group-start " : "") +
                       (index === group.end - 1 ? "bar-slot--group-end" : "")
                     : "";
-                  const height = Math.max(
-                    3,
-                    Math.round((shownValue / largestValue) * 100),
-                  );
+                  const height = (shownValue / largestValue) * 100;
                   return (
                     <div className={"bar-slot " + groupClass} key={String(index) + "-" + String(originalValues.length)}>
                       <div
