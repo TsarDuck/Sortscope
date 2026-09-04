@@ -3,16 +3,20 @@ import test from "node:test";
 import {
   BOGO_MAX_ATTEMPTS,
   analyzeCocktailSort,
+  analyzeHeapSort,
   analyzeInsertionSort,
   analyzeMeanPartitionSort,
   analyzeMergeSort,
   analyzeQuickSort,
+  analyzeSelectionSort,
   buildBogoSteps,
   buildCocktailSteps,
+  buildHeapSortSteps,
   buildInsertionSteps,
   buildMeanPartitionSteps,
   buildMergeSortSteps,
   buildQuickSortSteps,
+  buildSelectionSteps,
   isNonDecreasing,
   partitionBalanced,
 } from "../app/lib/sorting";
@@ -61,8 +65,14 @@ test("mean partition sort handles duplicates, negatives, and already ordered row
   }
 });
 
-test("cocktail, quick, and merge sort finish in numeric order without mutating the source", () => {
-  const builders = [buildCocktailSteps, buildQuickSortSteps, buildMergeSortSteps];
+test("cocktail, selection, heap, quick, and merge sort finish in numeric order without mutating the source", () => {
+  const builders = [
+    buildCocktailSteps,
+    buildSelectionSteps,
+    buildHeapSortSteps,
+    buildQuickSortSteps,
+    buildMergeSortSteps,
+  ];
   const sources = [
     [5, 1, 4, 2, 3],
     [4, 4, -1, 3, 0],
@@ -130,12 +140,27 @@ test("bogo sort either succeeds by shuffle or reports its safety limit honestly"
   assert.equal(finalValues(largeLimited).length, 256);
 });
 
+test("dense algorithms retain a bounded number of useful render snapshots", () => {
+  const source = Array.from({ length: 256 }, (_, index) => 256 - index);
+  const cocktail = buildCocktailSteps(source);
+  const bogo = buildBogoSteps(source, 100, () => 0.999);
+  const heap = buildHeapSortSteps(source);
+
+  assert.ok(cocktail.length < 1_300);
+  assert.ok(bogo.length < 30);
+  assert.ok(heap.length < 600);
+  assert.deepEqual(finalValues(cocktail), [...source].reverse());
+  assert.deepEqual(finalValues(heap), [...source].reverse());
+});
+
 test("sorting metric analyzers preserve a clean 1 through 256 final line", () => {
   const source = Array.from({ length: 256 }, (_, index) => 256 - index);
   const expected = Array.from({ length: 256 }, (_, index) => index + 1);
 
   assert.deepEqual(analyzeInsertionSort(source).finalValues, expected);
   assert.deepEqual(analyzeCocktailSort(source).finalValues, expected);
+  assert.deepEqual(analyzeSelectionSort(source).finalValues, expected);
+  assert.deepEqual(analyzeHeapSort(source).finalValues, expected);
   assert.deepEqual(analyzeQuickSort(source).finalValues, expected);
   assert.deepEqual(analyzeMergeSort(source).finalValues, expected);
   assert.deepEqual(analyzeMeanPartitionSort(source).finalValues, expected);

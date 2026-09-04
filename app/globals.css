@@ -496,6 +496,11 @@ input:focus-visible {
   box-shadow: 0 0 10px #68cae5;
 }
 
+.phase-chip--heapify span {
+  background: #78b6ff;
+  box-shadow: 0 0 10px #78b6ff;
+}
+
 .phase-chip--complete span {
   background: var(--lime);
   box-shadow: 0 0 10px var(--lime);
@@ -539,6 +544,7 @@ input:focus-visible {
 
 .bars--dense {
   gap: 1px;
+  contain: layout paint;
 }
 
 .bars--dense .bar-slot {
@@ -547,6 +553,9 @@ input:focus-visible {
 
 .bars--dense .bar {
   border-radius: 2px 2px 0 0;
+  box-shadow: none;
+  transition: background 80ms ease;
+  transform: none;
 }
 
 .bar-slot--group-start::before {
@@ -655,6 +664,13 @@ input:focus-visible {
 .bar--merge {
   background: linear-gradient(180deg, #79e3e8, #458fca);
   box-shadow: 0 0 20px rgba(88, 217, 245, 0.28);
+}
+
+.bar--heap {
+  z-index: 2;
+  background: linear-gradient(180deg, #9acbff, #6382d8);
+  box-shadow: 0 0 20px rgba(119, 182, 255, 0.3);
+  transform: translateY(-4px);
 }
 
 .bar--shuffle {
@@ -819,6 +835,10 @@ input:focus-visible {
 
 .legend__swatch--merge {
   background: #68cae5;
+}
+
+.legend__swatch--heap {
+  background: #7db8ff;
 }
 
 .legend__swatch--shuffle {
@@ -1098,7 +1118,7 @@ input:focus-visible {
 }
 
 .benchmark-bar {
-  width: min(18%, 24px);
+  width: min(11%, 18px);
   min-height: 3px;
   border-radius: 5px 5px 0 0;
   transition: height 240ms ease;
@@ -1117,6 +1137,16 @@ input:focus-visible {
 .benchmark-bar--cocktail {
   background: linear-gradient(180deg, #ffb891, #e77a5e);
   box-shadow: 0 0 16px rgba(255, 146, 120, 0.2);
+}
+
+.benchmark-bar--selection {
+  background: linear-gradient(180deg, #ffcf91, #d9924d);
+  box-shadow: 0 0 16px rgba(255, 188, 105, 0.2);
+}
+
+.benchmark-bar--heap {
+  background: linear-gradient(180deg, #8fc8ff, #5e79d1);
+  box-shadow: 0 0 16px rgba(112, 166, 255, 0.2);
 }
 
 .benchmark-bar--quick {
@@ -1161,6 +1191,14 @@ input:focus-visible {
 
 .benchmark-legend__swatch--cocktail {
   background: #f09372;
+}
+
+.benchmark-legend__swatch--selection {
+  background: #e6a45d;
+}
+
+.benchmark-legend__swatch--heap {
+  background: #78a9f0;
 }
 
 .benchmark-legend__swatch--quick {
@@ -1229,6 +1267,14 @@ input:focus-visible {
 
 .benchmark-current i b.benchmark-current__cocktail {
   background: linear-gradient(90deg, #ffb08f, #e5795c);
+}
+
+.benchmark-current i b.benchmark-current__selection {
+  background: linear-gradient(90deg, #ffd193, #dc9650);
+}
+
+.benchmark-current i b.benchmark-current__heap {
+  background: linear-gradient(90deg, #91c8ff, #637ed4);
 }
 
 .benchmark-current i b.benchmark-current__quick {
@@ -1566,7 +1612,7 @@ input:focus-visible {
   }
 
   .benchmark-bar {
-    width: 42%;
+    width: 11%;
   }
 
   .benchmark-current {

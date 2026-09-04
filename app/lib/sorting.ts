@@ -1,6 +1,8 @@
 export type AlgorithmId =
   | "insertion"
   | "cocktail"
+  | "selection"
+  | "heap"
   | "quick"
   | "merge"
   | "bogo"
@@ -17,6 +19,7 @@ export type StepPhase =
   | "reorder"
   | "swap"
   | "sweep"
+  | "heapify"
   | "merge"
   | "shuffle"
   | "limited"
@@ -74,6 +77,8 @@ export function createInitialStep(
   const messages: Record<AlgorithmId, string> = {
     insertion: "The first value starts as a sorted one-item prefix.",
     cocktail: "The row will sweep forward and backward, swapping neighbors.",
+    selection: "Find the smallest remaining value and place it at the front.",
+    heap: "Build a max heap, then repeatedly move its largest value to the end.",
     quick: "Choose a pivot, partition around it, then repeat on each side.",
     merge: "Split the row into runs, then merge ordered neighbors.",
     bogo: "Shuffle the whole row until chance happens to order it.",
@@ -471,6 +476,253 @@ function countSortedCheck(values: number[]) {
   return { sorted: true, comparisons };
 }
 
+export function buildSelectionSteps(source: number[]): SortStep[] {
+  const steps = [createInitialStep(source, "selection")];
+  const values = [...source];
+  const settled = new Set<number>();
+  const compactFrames = values.length > 64;
+  let comparisons = 0;
+  let writes = 0;
+
+  for (let start = 0; start < values.length - 1; start += 1) {
+    let minimum = start;
+    const pass = start + 1;
+
+    steps.push(
+      makeStep(values, {
+        pass,
+        phase: "select",
+        inserting: start,
+        key: values[start],
+        comparisons,
+        writes,
+        settled: getSettledIndices(settled),
+        message: "Pass " + pass + ": search for the smallest remaining value.",
+      }),
+    );
+
+    for (let scan = start + 1; scan < values.length; scan += 1) {
+      comparisons += 1;
+      if (!compactFrames) {
+        steps.push(
+          makeStep(values, {
+            pass,
+            phase: "compare",
+            comparing: scan,
+            shifting: minimum,
+            inserting: start,
+            comparisons,
+            writes,
+            settled: getSettledIndices(settled),
+            message: "Compare the next value with the current minimum.",
+          }),
+        );
+      }
+
+      if (values[scan] < values[minimum]) {
+        minimum = scan;
+        if (!compactFrames) {
+          steps.push(
+            makeStep(values, {
+              pass,
+              phase: "select",
+              comparing: scan,
+              inserting: start,
+              key: values[minimum],
+              comparisons,
+              writes,
+              settled: getSettledIndices(settled),
+              message: values[minimum] + " is the new smallest remaining value.",
+            }),
+          );
+        }
+      }
+    }
+
+    if (minimum !== start) {
+      [values[start], values[minimum]] = [values[minimum], values[start]];
+      writes += 2;
+      steps.push(
+        makeStep(values, {
+          pass,
+          phase: "swap",
+          comparing: minimum,
+          shifting: start,
+          comparisons,
+          writes,
+          settled: getSettledIndices(settled),
+          message: "Place the smallest remaining value at the front.",
+        }),
+      );
+    } else {
+      steps.push(
+        makeStep(values, {
+          pass,
+          phase: "insert",
+          inserting: start,
+          comparisons,
+          writes,
+          settled: getSettledIndices(settled),
+          message: "The front value was already the smallest remaining value.",
+        }),
+      );
+    }
+
+    settled.add(start);
+  }
+
+  if (values.length > 0) settled.add(values.length - 1);
+  steps.push(
+    makeStep(values, {
+      pass: Math.max(values.length - 1, 0),
+      phase: "complete",
+      comparisons,
+      writes,
+      sortedCount: values.length,
+      settled: getSettledIndices(settled),
+      message: "Each pass selected the next smallest value, so the row is ordered.",
+    }),
+  );
+
+  return steps;
+}
+
+export function buildHeapSortSteps(source: number[]): SortStep[] {
+  const steps = [createInitialStep(source, "heap")];
+  const values = [...source];
+  const settled = new Set<number>();
+  const compactFrames = values.length > 64;
+  let pass = 0;
+  let comparisons = 0;
+  let writes = 0;
+
+  function siftDown(rootIndex: number, heapSize: number, message: string) {
+    let root = rootIndex;
+
+    while (true) {
+      const left = root * 2 + 1;
+      if (left >= heapSize) return;
+      const right = left + 1;
+      let largest = left;
+
+      if (right < heapSize) {
+        comparisons += 1;
+        if (values[right] > values[left]) largest = right;
+      }
+
+      comparisons += 1;
+      if (values[root] >= values[largest]) return;
+
+      if (!compactFrames) {
+        steps.push(
+          makeStep(values, {
+            pass,
+            phase: "heapify",
+            comparing: root,
+            shifting: largest,
+            comparisons,
+            writes,
+            settled: getSettledIndices(settled),
+            message,
+          }),
+        );
+      }
+
+      [values[root], values[largest]] = [values[largest], values[root]];
+      writes += 2;
+      if (!compactFrames) {
+        steps.push(
+          makeStep(values, {
+            pass,
+            phase: "swap",
+            comparing: root,
+            shifting: largest,
+            comparisons,
+            writes,
+            settled: getSettledIndices(settled),
+            message: "Swap to restore the max-heap shape.",
+          }),
+        );
+      }
+      root = largest;
+    }
+  }
+
+  if (values.length > 1) {
+    pass = 1;
+    steps.push(
+      makeStep(values, {
+        pass,
+        phase: "select",
+        inserting: 0,
+        comparisons,
+        writes,
+        message: "Build a max heap so the largest value reaches the root.",
+      }),
+    );
+    for (let root = Math.floor(values.length / 2) - 1; root >= 0; root -= 1) {
+      siftDown(root, values.length, "Compare a parent with its largest child.");
+    }
+    steps.push(
+      makeStep(values, {
+        pass,
+        phase: "heapify",
+        inserting: 0,
+        comparisons,
+        writes,
+        message: "The heap is ready: its largest value is at the root.",
+      }),
+    );
+  }
+
+  for (let end = values.length - 1; end > 0; end -= 1) {
+    pass += 1;
+    [values[0], values[end]] = [values[end], values[0]];
+    writes += 2;
+    settled.add(end);
+    steps.push(
+      makeStep(values, {
+        pass,
+        phase: "swap",
+        comparing: 0,
+        shifting: end,
+        comparisons,
+        writes,
+        settled: getSettledIndices(settled),
+        message: "Move the heap's largest value into its final position.",
+      }),
+    );
+
+    siftDown(0, end, "Sift the new root down through the remaining heap.");
+    steps.push(
+      makeStep(values, {
+        pass,
+        phase: "heapify",
+        inserting: 0,
+        comparisons,
+        writes,
+        settled: getSettledIndices(settled),
+        message: "Restore the heap before extracting its next largest value.",
+      }),
+    );
+  }
+
+  if (values.length > 0) settled.add(0);
+  steps.push(
+    makeStep(values, {
+      pass,
+      phase: "complete",
+      comparisons,
+      writes,
+      sortedCount: values.length,
+      settled: getSettledIndices(settled),
+      message: "Successive heap extractions have ordered the full row.",
+    }),
+  );
+
+  return steps;
+}
+
 function shuffleInPlace(values: number[], random: () => number) {
   let writes = 0;
 
@@ -494,7 +746,13 @@ export function buildCocktailSteps(source: number[]): SortStep[] {
   const values = [...source];
   const settled = new Set<number>();
   const compactFrames = values.length > 64;
-  const visualInterval = Math.max(1, Math.ceil(values.length / 16));
+  // Keep the orange sweep readable without retaining thousands of full array
+  // snapshots for a 256-value row. The interval targets roughly 500 sweep
+  // frames across the entire dense run, rather than per directional pass.
+  const visualInterval = Math.max(
+    1,
+    Math.ceil((values.length * Math.max(values.length - 1, 1)) / 1000),
+  );
   let lower = 0;
   let upper = values.length - 1;
   let pass = 0;
@@ -936,6 +1194,8 @@ export function buildBogoSteps(
   const values = [...source];
   let comparisons = 0;
   let writes = 0;
+  const snapshotInterval =
+    values.length > 128 ? 50 : values.length > 64 ? 25 : values.length > 24 ? 10 : 5;
 
   const initialCheck = countSortedCheck(values);
   comparisons += initialCheck.comparisons;
@@ -957,7 +1217,7 @@ export function buildBogoSteps(
     writes += shuffleInPlace(values, random);
     const check = countSortedCheck(values);
     comparisons += check.comparisons;
-    const shouldShowShuffle = attempt <= 20 || attempt % 5 === 0;
+    const shouldShowShuffle = attempt <= 20 || attempt % snapshotInterval === 0;
 
     if (check.sorted) {
       steps.push(
@@ -1071,6 +1331,79 @@ export function analyzeCocktailSort(source: number[]): SortMetrics {
     rankComparisons: 0,
     writes,
     rounds,
+    finalValues: values,
+  };
+}
+
+export function analyzeSelectionSort(source: number[]): SortMetrics {
+  const values = [...source];
+  let comparisons = 0;
+  let writes = 0;
+
+  for (let start = 0; start < values.length - 1; start += 1) {
+    let minimum = start;
+    for (let scan = start + 1; scan < values.length; scan += 1) {
+      comparisons += 1;
+      if (values[scan] < values[minimum]) minimum = scan;
+    }
+
+    if (minimum !== start) {
+      [values[start], values[minimum]] = [values[minimum], values[start]];
+      writes += 2;
+    }
+  }
+
+  return {
+    comparisons,
+    rankComparisons: 0,
+    writes,
+    rounds: Math.max(values.length - 1, 0),
+    finalValues: values,
+  };
+}
+
+export function analyzeHeapSort(source: number[]): SortMetrics {
+  const values = [...source];
+  let comparisons = 0;
+  let writes = 0;
+
+  function siftDown(rootIndex: number, heapSize: number) {
+    let root = rootIndex;
+
+    while (true) {
+      const left = root * 2 + 1;
+      if (left >= heapSize) return;
+      const right = left + 1;
+      let largest = left;
+
+      if (right < heapSize) {
+        comparisons += 1;
+        if (values[right] > values[left]) largest = right;
+      }
+
+      comparisons += 1;
+      if (values[root] >= values[largest]) return;
+      [values[root], values[largest]] = [values[largest], values[root]];
+      writes += 2;
+      root = largest;
+    }
+  }
+
+  for (let root = Math.floor(values.length / 2) - 1; root >= 0; root -= 1) {
+    siftDown(root, values.length);
+  }
+
+  for (let end = values.length - 1; end > 0; end -= 1) {
+    [values[0], values[end]] = [values[end], values[0]];
+    writes += 2;
+    siftDown(0, end);
+  }
+
+  return {
+    comparisons,
+    rankComparisons: 0,
+    writes,
+    rounds: values.length > 1 ? values.length : 0,
     finalValues: values,
   };
 }

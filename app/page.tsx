@@ -4,21 +4,27 @@ import { useEffect, useMemo, useState } from "react";
 import {
   BOGO_MAX_ATTEMPTS,
   analyzeCocktailSort,
+  analyzeHeapSort,
   analyzeInsertionSort,
   analyzeMeanPartitionSort,
   analyzeMergeSort,
   analyzeQuickSort,
+  analyzeSelectionSort,
   buildBogoSteps,
   buildCocktailSteps,
+  buildHeapSortSteps,
   buildMeanPartitionSteps,
   buildMergeSortSteps,
   buildQuickSortSteps,
+  buildSelectionSteps,
   formatMean,
 } from "./lib/sorting";
 
 type AlgorithmId =
   | "insertion"
   | "cocktail"
+  | "selection"
+  | "heap"
   | "quick"
   | "merge"
   | "bogo"
@@ -35,6 +41,7 @@ type StepPhase =
   | "reorder"
   | "swap"
   | "sweep"
+  | "heapify"
   | "merge"
   | "shuffle"
   | "limited"
@@ -75,6 +82,8 @@ const BENCHMARK_SIZES = [16, 32, 64, 128, 256];
 const BENCHMARK_ALGORITHMS = [
   { key: "insertion", label: "Insertion sort", className: "insertion" },
   { key: "cocktail", label: "Cocktail sort", className: "cocktail" },
+  { key: "selection", label: "Selection sort", className: "selection" },
+  { key: "heap", label: "Heap sort", className: "heap" },
   { key: "quick", label: "Quick sort", className: "quick" },
   { key: "merge", label: "Merge sort", className: "merge" },
   { key: "meanPartition", label: "Mean partition sort", className: "mean" },
@@ -152,9 +161,47 @@ const ALGORITHM_DETAILS: Record<
       "Reverse direction to settle the smallest remaining value.",
     ],
   },
+  selection: {
+    label: "Selection sort",
+    number: "03",
+    heroCopy: "Find the smallest remaining value, place it next, and grow the sorted left edge one choice at a time.",
+    controlTitle: "Select the next minimum",
+    stageLabel: "selection",
+    stageDescription: "minimum placement",
+    eyebrow: "THE BIG IDEA",
+    learnTitle: "Choose the next spot deliberately.",
+    learnCopy: "Selection sort scans the unsorted part of the row for its smallest value, then swaps that value into the next open position. It makes few swaps, but still has to keep looking through the rest of the row.",
+    complexity: ["BEST O(n²)", "AVERAGE O(n²)", "SPACE O(1)"],
+    cardTitle: "SELECTION SORT",
+    cardTag: "in-place · choice-based",
+    steps: [
+      "Start at the first unsorted position.",
+      "Scan the remaining values for the smallest one.",
+      "Swap that minimum into the next sorted spot.",
+    ],
+  },
+  heap: {
+    label: "Heap sort",
+    number: "04",
+    heroCopy: "Build a max heap, move its largest value to the end, then restore the heap and repeat.",
+    controlTitle: "Extract values from a max heap",
+    stageLabel: "heap pass",
+    stageDescription: "heap extraction",
+    eyebrow: "THE BIG IDEA",
+    learnTitle: "Keep the largest value on top.",
+    learnCopy: "Heap sort arranges the active values into a max heap, where the largest value sits at the root. It swaps that root to the sorted right edge, then sifts a new root down to rebuild the heap.",
+    complexity: ["TIME O(n log n)", "IN-PLACE YES", "SPACE O(1)"],
+    cardTitle: "HEAP SORT",
+    cardTag: "in-place · heap-based",
+    steps: [
+      "Build a max heap from the whole row.",
+      "Move the root—the largest value—to the right edge.",
+      "Sift the new root down and extract again.",
+    ],
+  },
   quick: {
     label: "Quick sort",
-    number: "03",
+    number: "05",
     heroCopy: "Choose a pivot, split smaller and larger values around it, then repeat on each side.",
     controlTitle: "Partition around a pivot",
     stageLabel: "partition",
@@ -173,7 +220,7 @@ const ALGORITHM_DETAILS: Record<
   },
   merge: {
     label: "Merge sort",
-    number: "04",
+    number: "06",
     heroCopy: "Build larger ordered runs by repeatedly merging pairs of smaller ordered runs.",
     controlTitle: "Merge ordered runs",
     stageLabel: "merge pass",
@@ -192,7 +239,7 @@ const ALGORITHM_DETAILS: Record<
   },
   bogo: {
     label: "Bogo sort",
-    number: "05",
+    number: "07",
     heroCopy: "Shuffle the whole row and hope it lands in order—a deliberately impractical sorting experiment.",
     controlTitle: "Shuffle and hope",
     stageLabel: "shuffle",
@@ -211,7 +258,7 @@ const ALGORITHM_DETAILS: Record<
   },
   "mean-partition": {
     label: "Mean partition sort",
-    number: "06",
+    number: "08",
     heroCopy: "Split the newly arranged row into 2, 4, 8, and more balanced groups, then rank every group by its average.",
     controlTitle: "Rank groups by their mean",
     stageLabel: "round",
@@ -484,6 +531,29 @@ function getBarClass(
     return "bar--idle";
   }
 
+  if (algorithm === "selection") {
+    if (step.phase === "complete" || step.settled?.includes(index)) return "bar--sorted";
+    if (step.phase === "swap" && (index === step.comparing || index === step.shifting)) {
+      return "bar--swap";
+    }
+    if (index === step.comparing || index === step.shifting) return "bar--compare";
+    if (index === step.inserting) return "bar--key";
+    return "bar--idle";
+  }
+
+  if (algorithm === "heap") {
+    if (step.phase === "complete" || step.settled?.includes(index)) return "bar--sorted";
+    if (step.phase === "heapify" && (index === step.comparing || index === step.shifting)) {
+      return "bar--heap";
+    }
+    if (step.phase === "swap" && (index === step.comparing || index === step.shifting)) {
+      return "bar--swap";
+    }
+    if (index === step.inserting) return "bar--key";
+    if (index === step.comparing || index === step.shifting) return "bar--compare";
+    return "bar--idle";
+  }
+
   if (index === step.gapIndex) return "bar--gap";
   if (index === step.inserting) return "bar--insert";
   if (index === step.shifting) return "bar--shift";
@@ -505,6 +575,7 @@ function getPhaseLabel(phase: StepPhase) {
     reorder: "Rank groups",
     swap: "Swap values",
     sweep: "Sweep",
+    heapify: "Restore heap",
     merge: "Merge runs",
     shuffle: "Shuffle",
     limited: "Safety stop",
@@ -538,6 +609,8 @@ export default function Home() {
       ? BOGO_MAX_ATTEMPTS
       : algorithm === "merge"
         ? Math.max(1, Math.ceil(Math.log2(Math.max(originalValues.length, 1))))
+        : algorithm === "heap"
+          ? Math.max(1, originalValues.length)
         : Math.max(originalValues.length - 1, 0);
   const minimumArraySize = 4;
   const maximumArraySize = 256;
@@ -547,6 +620,8 @@ export default function Home() {
         const benchmarkValues = makeBenchmarkArray(size, benchmarkPattern);
         const insertion = analyzeInsertionSort(benchmarkValues);
         const cocktail = analyzeCocktailSort(benchmarkValues);
+        const selection = analyzeSelectionSort(benchmarkValues);
+        const heap = analyzeHeapSort(benchmarkValues);
         const quick = analyzeQuickSort(benchmarkValues);
         const merge = analyzeMergeSort(benchmarkValues);
         const meanPartition = analyzeMeanPartitionSort(benchmarkValues);
@@ -556,6 +631,8 @@ export default function Home() {
           work: {
             insertion: getWorkEstimate(insertion),
             cocktail: getWorkEstimate(cocktail),
+            selection: getWorkEstimate(selection),
+            heap: getWorkEstimate(heap),
             quick: getWorkEstimate(quick),
             merge: getWorkEstimate(merge),
             meanPartition: getWorkEstimate(meanPartition),
@@ -572,6 +649,8 @@ export default function Home() {
     const benchmarkValues = makeBenchmarkArray(arraySize, benchmarkPattern);
     const insertion = analyzeInsertionSort(benchmarkValues);
     const cocktail = analyzeCocktailSort(benchmarkValues);
+    const selection = analyzeSelectionSort(benchmarkValues);
+    const heap = analyzeHeapSort(benchmarkValues);
     const quick = analyzeQuickSort(benchmarkValues);
     const merge = analyzeMergeSort(benchmarkValues);
     const meanPartition = analyzeMeanPartitionSort(benchmarkValues);
@@ -579,6 +658,8 @@ export default function Home() {
     return {
       insertion: getWorkEstimate(insertion),
       cocktail: getWorkEstimate(cocktail),
+      selection: getWorkEstimate(selection),
+      heap: getWorkEstimate(heap),
       quick: getWorkEstimate(quick),
       merge: getWorkEstimate(merge),
       meanPartition: getWorkEstimate(meanPartition),
@@ -593,6 +674,7 @@ export default function Home() {
     () => steps[stepIndex] ?? createInitialStep(values, algorithm),
     [algorithm, stepIndex, steps, values],
   );
+  const visibleValues = currentStep.values;
 
   useEffect(() => {
     if (!isBogo || runState !== "complete" || currentStep.phase !== "complete") {
@@ -611,16 +693,22 @@ export default function Home() {
       ? 1
       : Math.max(1, Math.ceil(originalValues.length / 48));
   const speedDelay = 720 - speed * 7.13;
+  const finalSequencePass = steps.at(-1)?.pass ?? totalStages;
+  const isReadableEndgame =
+    (algorithm === "quick" || algorithm === "merge") &&
+    currentStep.phase !== "complete" &&
+    currentStep.pass >= Math.max(1, finalSequencePass - 1);
+  const endgameMultiplier = isReadableEndgame ? 1.75 : 1;
   const delay = prefersReducedMotion
     ? 18
-    : Math.max(7, speedDelay / playbackDensity);
+    : Math.max(7, speedDelay / playbackDensity) * endgameMultiplier;
   const progress =
     runState === "complete"
       ? 100
       : steps.length > 1
         ? Math.round((stepIndex / (steps.length - 1)) * 100)
         : 0;
-  const displayValues = values.join(", ");
+  const displayValues = visibleValues.join(", ");
   const largestValue = Math.max(...originalValues, 1);
   const liveStatus =
     currentStep.phase === "limited"
@@ -646,7 +734,6 @@ export default function Home() {
       }
 
       setStepIndex(nextIndex);
-      setValues(steps[nextIndex].values);
       if (nextIndex === steps.length - 1) {
         setRunState("complete");
       }
@@ -699,13 +786,17 @@ export default function Home() {
         ? buildMeanPartitionSteps(originalValues)
         : algorithm === "cocktail"
           ? buildCocktailSteps(originalValues)
-          : algorithm === "quick"
-            ? buildQuickSortSteps(originalValues)
-            : algorithm === "merge"
-              ? buildMergeSortSteps(originalValues)
-              : algorithm === "bogo"
-                ? buildBogoSteps(originalValues)
-                : buildInsertionSteps(originalValues);
+          : algorithm === "selection"
+            ? buildSelectionSteps(originalValues)
+            : algorithm === "heap"
+              ? buildHeapSortSteps(originalValues)
+              : algorithm === "quick"
+                ? buildQuickSortSteps(originalValues)
+                : algorithm === "merge"
+                  ? buildMergeSortSteps(originalValues)
+                  : algorithm === "bogo"
+                    ? buildBogoSteps(originalValues)
+                    : buildInsertionSteps(originalValues);
     setValues([...originalValues]);
     setSteps(sequence);
     setStepIndex(0);
@@ -805,6 +896,8 @@ export default function Home() {
                 >
                   <option value="insertion">Insertion sort</option>
                   <option value="cocktail">Cocktail sort</option>
+                  <option value="selection">Selection sort</option>
+                  <option value="heap">Heap sort</option>
                   <option value="quick">Quick sort</option>
                   <option value="merge">Merge sort</option>
                   <option value="bogo">Bogo sort ({BOGO_ATTEMPT_LABEL}-shuffle cap)</option>
@@ -879,9 +972,9 @@ export default function Home() {
               {isMeanPartition && currentStep.groups && (
                 <div className="mean-bands" aria-hidden="true">
                   {currentStep.groups.map((group) => {
-                    const left = (group.start / Math.max(values.length, 1)) * 100;
+                    const left = (group.start / Math.max(visibleValues.length, 1)) * 100;
                     const width =
-                      ((group.end - group.start) / Math.max(values.length, 1)) * 100;
+                      ((group.end - group.start) / Math.max(visibleValues.length, 1)) * 100;
                     return (
                       <div
                         className="mean-band"
@@ -903,7 +996,7 @@ export default function Home() {
                 </div>
               )}
               <div className={"bars " + (originalValues.length > 64 ? "bars--dense" : "")} aria-hidden="true">
-                {values.map((value, index) => {
+                {visibleValues.map((value, index) => {
                   const isGap = index === currentStep.gapIndex;
                   const shownValue = isGap && currentStep.key !== null ? currentStep.key : value;
                   const group = isMeanPartition
@@ -970,6 +1063,20 @@ export default function Home() {
                     <span><i className="legend__swatch legend__swatch--compare" />neighbors checked</span>
                     <span><i className="legend__swatch legend__swatch--swap" />swap</span>
                     <span><i className="legend__swatch legend__swatch--sorted" />settled edge</span>
+                  </>
+                ) : algorithm === "selection" ? (
+                  <>
+                    <span><i className="legend__swatch legend__swatch--idle" />unsorted</span>
+                    <span><i className="legend__swatch legend__swatch--key" />next position</span>
+                    <span><i className="legend__swatch legend__swatch--compare" />minimum search</span>
+                    <span><i className="legend__swatch legend__swatch--sorted" />selected minimum</span>
+                  </>
+                ) : algorithm === "heap" ? (
+                  <>
+                    <span><i className="legend__swatch legend__swatch--idle" />active heap</span>
+                    <span><i className="legend__swatch legend__swatch--key" />heap root</span>
+                    <span><i className="legend__swatch legend__swatch--heap" />sifting values</span>
+                    <span><i className="legend__swatch legend__swatch--sorted" />extracted value</span>
                   </>
                 ) : (
                   <>
@@ -1045,7 +1152,7 @@ export default function Home() {
               <p className="eyebrow">EFFICIENCY LAB</p>
               <h2 id="comparison-title">Compare the work behind the motion.</h2>
               <p>
-                Every practical algorithm receives the same shuffled sequence of 1 through n.
+                Every deterministic algorithm receives the same shuffled sequence of 1 through n.
                 These totals combine comparisons and writes, so they are operation estimates rather
                 than timers. Bogo Sort stays out of this chart because its expected work grows
                 factorially, even though the live visualizer allows it up to 256 values.
@@ -1068,7 +1175,7 @@ export default function Home() {
           <div
             className="benchmark-chart"
             role="img"
-            aria-label={"Estimated work for insertion, cocktail, quick, merge, and mean partition sort on " + benchmarkPattern + " arrays from 16 through 256 values."}
+            aria-label={"Estimated work for insertion, cocktail, selection, heap, quick, merge, and mean partition sort on " + benchmarkPattern + " arrays from 16 through 256 values."}
           >
             <div className="benchmark-chart__scale">
               <span>{formatCount(benchmarkMaximum)} work units</span>
