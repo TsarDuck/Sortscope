@@ -1676,8 +1676,11 @@ export default function Home() {
     const duration = isImpact ? 0.046 : 0.028;
     const basePeakGain = isImpact ? 0.22 : 0.15;
     const peakGain = basePeakGain * (soundVolume / 100) ** 2.5;
-    const semitone = Math.round(normalizedValue * 24);
-    const frequency = 174.61 * 2 ** (semitone / 12);
+    // Keep even the smallest value above the muddy low register found on many
+    // laptop speakers. A shorter upper range still preserves the value-to-pitch
+    // relationship without making high values piercing.
+    const semitone = Math.round(normalizedValue * 19);
+    const frequency = 261.63 * 2 ** (semitone / 12);
 
     // Use the same short, quantized triangle voice that makes Selection Sort's
     // moves feel crisp. Quantized pitches keep rapid comparisons legible rather
@@ -1706,14 +1709,17 @@ export default function Home() {
     const filter = context.createBiquadFilter();
     const gain = context.createGain();
     const motion = ((attempt * 0.61803398875) % 1 + 1) % 1;
-    const frequency = 145 + motion * 330;
+    const frequency = 220 + motion * 360;
     const peakGain = 0.17 * (soundVolume / 100) ** 2.15;
 
     oscillator.type = "triangle";
     oscillator.frequency.setValueAtTime(frequency, now);
-    oscillator.frequency.exponentialRampToValueAtTime(frequency * 0.72, now + 0.07);
+    oscillator.frequency.exponentialRampToValueAtTime(
+      Math.max(220, frequency * 0.78),
+      now + 0.07,
+    );
     filter.type = "bandpass";
-    filter.frequency.setValueAtTime(750 + motion * 500, now);
+    filter.frequency.setValueAtTime(900 + motion * 500, now);
     filter.Q.value = 1.1;
     gain.gain.setValueAtTime(0.0001, now);
     gain.gain.exponentialRampToValueAtTime(peakGain, now + 0.004);
