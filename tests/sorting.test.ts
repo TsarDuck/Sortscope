@@ -121,7 +121,7 @@ test("dense cocktail and merge frames keep their visual focus scoped", () => {
       (step) => (step.rangeEnd ?? 0) - (step.rangeStart ?? 0) < 8,
     ),
   );
-  assert.ok(finalMergeFrames.length >= 10);
+  assert.ok(finalMergeFrames.length >= 20);
   assert.equal(finalMergeFrames.at(-1)?.inserting, 255);
 });
 

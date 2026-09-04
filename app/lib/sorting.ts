@@ -1098,7 +1098,7 @@ export function buildMergeSortSteps(source: number[]): SortStep[] {
       let leftIndex = 0;
       let rightIndex = 0;
       let destination = left;
-      const visualWriteInterval = Math.max(1, Math.ceil((right - left) / 12));
+      const visualWriteInterval = Math.max(1, Math.ceil((right - left) / 24));
 
       function recordCompactMergeWrite() {
         if (

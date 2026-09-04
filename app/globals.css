@@ -590,6 +590,18 @@ input:focus-visible {
   transition: height var(--bar-transition-duration, 160ms) cubic-bezier(.23, 1, .32, 1), background 100ms ease;
 }
 
+.bars--merge.bars--dense .bar {
+  transition: none;
+}
+
+.bars--merge.bars--dense.bars--smooth .bar {
+  transition: height var(--bar-transition-duration, 160ms) cubic-bezier(.23, 1, .32, 1);
+}
+
+.bars--merge.bars--dense .bar--sorted {
+  transition: background 360ms ease-out;
+}
+
 .bar-slot--group-start::before {
   position: absolute;
   z-index: 2;

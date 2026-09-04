@@ -1,6 +1,6 @@
 "use client";
 
-import { type CSSProperties, useEffect, useMemo, useState } from "react";
+import { type CSSProperties, useEffect, useMemo, useRef, useState } from "react";
 import {
   BOGO_MAX_ATTEMPTS,
   analyzeCocktailSort,
@@ -75,6 +75,18 @@ type SortStep = {
   rangeStart?: number;
   rangeEnd?: number;
 };
+
+const AUDIBLE_PHASES: StepPhase[] = [
+  "compare",
+  "shift",
+  "insert",
+  "swap",
+  "sweep",
+  "heapify",
+  "merge",
+  "shuffle",
+  "reorder",
+];
 
 const DEFAULT_ARRAY_SIZE = 24;
 const DEFAULT_SPEED = 62;
@@ -599,6 +611,9 @@ export default function Home() {
   const [stepIndex, setStepIndex] = useState(0);
   const [runState, setRunState] = useState<RunState>("ready");
   const [bogoCelebration, setBogoCelebration] = useState(false);
+  const [soundEnabled, setSoundEnabled] = useState(true);
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const lastToneTimeRef = useRef(0);
   const prefersReducedMotion = usePrefersReducedMotion();
   const isMeanPartition = algorithm === "mean-partition";
   const isBogo = algorithm === "bogo";
@@ -743,6 +758,68 @@ export default function Home() {
           ? algorithmLabel + " is working through " + stageLabel + " " + currentStep.pass + " of " + totalStages + "."
           : "Ready to demonstrate " + algorithmLabel + ".";
 
+  function ensureAudioContext() {
+    if (!audioContextRef.current) {
+      audioContextRef.current = new AudioContext();
+    }
+
+    if (audioContextRef.current.state === "suspended") {
+      void audioContextRef.current.resume();
+    }
+
+    return audioContextRef.current;
+  }
+
+  function playSortingTone(step: SortStep) {
+    const context = audioContextRef.current;
+    if (!context || context.state !== "running" || step.values.length === 0) return;
+
+    const now = context.currentTime;
+    const cooldown = isBogo ? 0.12 : isLargeArray ? 0.045 : 0.028;
+    if (now - lastToneTimeRef.current < cooldown) return;
+    lastToneTimeRef.current = now;
+
+    const activeIndex = Math.min(
+      step.values.length - 1,
+      Math.max(0, step.inserting ?? step.comparing ?? step.shifting ?? 0),
+    );
+    const activeValue = step.values[activeIndex] ?? step.key ?? 1;
+    const normalizedValue = Math.min(1, Math.max(0, activeValue / largestValue));
+    const oscillator = context.createOscillator();
+    const gain = context.createGain();
+    const duration = step.phase === "swap" || step.phase === "merge" ? 0.05 : 0.032;
+    const peakGain = step.phase === "swap" ? 0.035 : 0.024;
+
+    oscillator.type = step.phase === "swap" || step.phase === "shift" ? "triangle" : "sine";
+    oscillator.frequency.setValueAtTime(180 + normalizedValue * 700, now);
+    gain.gain.setValueAtTime(0.0001, now);
+    gain.gain.exponentialRampToValueAtTime(peakGain, now + 0.004);
+    gain.gain.exponentialRampToValueAtTime(0.0001, now + duration);
+    oscillator.connect(gain);
+    gain.connect(context.destination);
+    oscillator.start(now);
+    oscillator.stop(now + duration + 0.01);
+  }
+
+  useEffect(() => {
+    return () => {
+      void audioContextRef.current?.close();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (
+      !soundEnabled ||
+      runState !== "running" ||
+      stepIndex === 0 ||
+      !AUDIBLE_PHASES.includes(currentStep.phase)
+    ) {
+      return;
+    }
+
+    playSortingTone(currentStep);
+  }, [currentStep, runState, soundEnabled, stepIndex]);
+
   useEffect(() => {
     if (runState !== "running" || steps.length === 0) return;
 
@@ -780,6 +857,11 @@ export default function Home() {
     setRunState("ready");
   }
 
+  function handleSoundToggle() {
+    if (!soundEnabled) ensureAudioContext();
+    setSoundEnabled(!soundEnabled);
+  }
+
   function handleAlgorithmChange(nextAlgorithm: AlgorithmId) {
     setBogoCelebration(false);
     setAlgorithm(nextAlgorithm);
@@ -800,6 +882,7 @@ export default function Home() {
       return;
     }
 
+    if (soundEnabled) ensureAudioContext();
     setBogoCelebration(false);
     const sequence =
       algorithm === "mean-partition"
@@ -1043,6 +1126,14 @@ export default function Home() {
                 <button className="text-button" type="button" onClick={resetArray}>
                   Reset
                 </button>
+                <button
+                  className="text-button"
+                  type="button"
+                  onClick={handleSoundToggle}
+                  aria-pressed={soundEnabled}
+                >
+                  Sound: {soundEnabled ? "on" : "off"}
+                </button>
               </div>
             </div>
           </div>
@@ -1091,6 +1182,7 @@ export default function Home() {
                 className={
                   "bars " +
                   (isLargeArray ? "bars--dense " : "") +
+                  (algorithm === "merge" ? "bars--merge " : "") +
                   (shouldInterpolateDenseBars ? "bars--smooth" : "")
                 }
                 style={denseBarTransitionStyle}
