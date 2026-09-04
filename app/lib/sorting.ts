@@ -86,6 +86,7 @@ type MeanChunk = {
 
 export const BOGO_MAX_ATTEMPTS = 1_000_000;
 const COMPACT_FRAME_THRESHOLD = 24;
+const MAX_RANGE_GUARD_PASSES = 2;
 
 export function createInitialStep(
   values: number[],
@@ -101,7 +102,7 @@ export function createInitialStep(
     merge: "Split the row into runs, then merge ordered neighbors.",
     bogo: "Shuffle the whole row until chance happens to order it.",
     "mean-partition": "The row will be repeatedly split into mean-ranked groups.",
-    "range-guard-mean": "The row will rank mean groups, then guard small overlapping ranges.",
+    "range-guard-mean": "The row will rank mean groups, then use a short median guard for small overlaps.",
   };
 
   return {
@@ -211,8 +212,23 @@ function compareMeans(left: MeanChunk, right: MeanChunk) {
 }
 
 function rankMeanChunks(chunks: MeanChunk[]) {
-  const ranked = [...chunks];
   let comparisons = 0;
+  let alreadyOrdered = true;
+  let strictlyReversed = chunks.length > 1;
+
+  for (let index = 1; index < chunks.length; index += 1) {
+    const order = compareMeans(chunks[index - 1], chunks[index]);
+    comparisons += 1;
+    if (order > 0) alreadyOrdered = false;
+    // Equal means must preserve the incoming order, so only a strictly
+    // decreasing run can be reversed as a stable fast path.
+    if (order <= 0) strictlyReversed = false;
+  }
+
+  if (alreadyOrdered) return { chunks: [...chunks], comparisons };
+  if (strictlyReversed) return { chunks: [...chunks].reverse(), comparisons };
+
+  const ranked = [...chunks];
 
   ranked.sort((left, right) => {
     comparisons += 1;
@@ -249,6 +265,20 @@ function getRefinementBlockSize(length: number) {
 
 function hasRefinementEligibleGroups(chunks: MeanChunk[], blockSize: number) {
   return chunks.length > 0 && chunks.every((chunk) => chunk.values.length <= blockSize);
+}
+
+function shouldUseRangeGuardPass(
+  guardPassesUsed: number,
+  chunks: MeanChunk[],
+  overlappingChunkIds: Set<number>,
+) {
+  if (overlappingChunkIds.size === 0) return false;
+  if (guardPassesUsed === 0) return true;
+
+  // A follow-up pass is worthwhile only when the remaining crossing is local.
+  // If most groups still overlap, return immediately to the inexpensive mean
+  // rounds rather than turning the guard into a late-stage global algorithm.
+  return overlappingChunkIds.size <= Math.max(2, Math.ceil(chunks.length / 4));
 }
 
 function getOverlappingChunkIds(chunks: MeanChunk[]) {
@@ -293,18 +323,45 @@ function getOverlappingChunkIds(chunks: MeanChunk[]) {
   return overlapping;
 }
 
-function splitMeanChunk(chunk: MeanChunk, useMeanPivot: boolean) {
-  if (chunk.values.length <= 1) return [chunk.values];
-
-  if (useMeanPivot) {
-    const mean = chunk.sum / chunk.values.length;
-    const lower = chunk.values.filter((value) => value <= mean);
-    const upper = chunk.values.filter((value) => value > mean);
-
-    if (lower.length > 0 && upper.length > 0) return [lower, upper];
+function splitGuardedMedianChunk(chunk: MeanChunk) {
+  if (chunk.values.length <= 1) {
+    return { childValues: [chunk.values], operations: 0 };
   }
 
-  return partitionBalanced(chunk.values, 2);
+  // The guard only works on small blocks. Selecting an exact median produces
+  // near-even children, so one cleanup pass removes more outlier mixing than a
+  // potentially skewed mean pivot and leaves the following cheap mean rounds
+  // with less work to do.
+  const ranked = [...chunk.values];
+  let comparisons = 0;
+  ranked.sort((left, right) => {
+    comparisons += 1;
+    return left - right;
+  });
+  const median = ranked[Math.floor((ranked.length - 1) / 2)];
+  const lower: number[] = [];
+  const upper: number[] = [];
+
+  for (const value of chunk.values) {
+    if (value <= median) {
+      lower.push(value);
+    } else {
+      upper.push(value);
+    }
+  }
+
+  if (lower.length > 0 && upper.length > 0) {
+    return {
+      childValues: [lower, upper],
+      // comparator work plus one pivot comparison and one output write per value
+      operations: comparisons + chunk.values.length * 2,
+    };
+  }
+
+  return {
+    childValues: partitionBalanced(chunk.values, 2),
+    operations: comparisons + chunk.values.length,
+  };
 }
 
 function splitForNextMeanRound(
@@ -329,24 +386,23 @@ function splitForNextMeanRound(
   const selectedIndexes = new Set(
     eligibleChunks.slice(0, Math.max(0, additionalGroups)).map(({ index }) => index),
   );
+  let refinementOperations = 0;
+  let refinementSplits = 0;
   let childValues = currentChunks.flatMap((chunk, index) => {
     const shouldRefine =
       useRefinement &&
       overlappingChunkIds.has(chunk.id) &&
       chunk.values.length <= refinementBlockSize;
-    return selectedIndexes.has(index)
-      ? splitMeanChunk(chunk, shouldRefine)
-      : [[...chunk.values]];
-  });
-  let refinementSplits = currentChunks.filter(
-    (chunk, index) =>
-      selectedIndexes.has(index) &&
-      useRefinement &&
-      overlappingChunkIds.has(chunk.id) &&
-      chunk.values.length <= refinementBlockSize,
-  ).length;
+    if (!selectedIndexes.has(index)) return [[...chunk.values]];
+    if (!shouldRefine) return partitionBalanced(chunk.values, 2);
 
-  // Strict mean pivots can create singleton children early. Split the largest
+    const split = splitGuardedMedianChunk(chunk);
+    refinementSplits += 1;
+    refinementOperations += split.operations;
+    return split.childValues;
+  });
+
+  // Strict guard pivots can create singleton children early. Split the largest
   // remaining group as needed so the 2, 4, 8… round schedule still advances.
   while (childValues.length < targetGroupCount) {
     let largestIndex = -1;
@@ -367,7 +423,7 @@ function splitForNextMeanRound(
     ];
   }
 
-  return { childValues, refinementSplits };
+  return { childValues, refinementSplits, refinementOperations };
 }
 
 export function buildInsertionSteps(
@@ -601,6 +657,8 @@ export function buildRangeGuardMeanSteps(source: number[]): SortStep[] {
   let round = 0;
   let meansCalculated = 0;
   let valuesReordered = 0;
+  let guardPassesUsed = 0;
+  let rangeGuardClosed = false;
 
   if (values.length <= 1) {
     steps.push({
@@ -623,8 +681,17 @@ export function buildRangeGuardMeanSteps(source: number[]): SortStep[] {
   while (true) {
     round += 1;
     const targetGroupCount = Math.min(values.length, chunks.length * 2);
-    const useRefinement = hasRefinementEligibleGroups(chunks, refinementBlockSize);
-    const overlappingChunkIds = useRefinement ? getOverlappingChunkIds(chunks) : new Set<number>();
+    const canUseRangeGuard =
+      !rangeGuardClosed &&
+      guardPassesUsed < MAX_RANGE_GUARD_PASSES &&
+      hasRefinementEligibleGroups(chunks, refinementBlockSize);
+    const overlappingChunkIds = canUseRangeGuard
+      ? getOverlappingChunkIds(chunks)
+      : new Set<number>();
+    const useRefinement =
+      canUseRangeGuard &&
+      shouldUseRangeGuardPass(guardPassesUsed, chunks, overlappingChunkIds);
+    if (canUseRangeGuard && !useRefinement) rangeGuardClosed = true;
     const split = splitForNextMeanRound(
       chunks,
       targetGroupCount,
@@ -632,9 +699,11 @@ export function buildRangeGuardMeanSteps(source: number[]): SortStep[] {
       overlappingChunkIds,
       refinementBlockSize,
     );
-    const captureBounds = split.childValues.every(
-      (group) => group.length <= refinementBlockSize,
-    );
+    if (useRefinement) guardPassesUsed += 1;
+    const captureBounds =
+      !rangeGuardClosed &&
+      guardPassesUsed < MAX_RANGE_GUARD_PASSES &&
+      split.childValues.every((group) => group.length <= refinementBlockSize);
     const nextChunks = split.childValues.map((group, index) =>
       createMeanChunk(group, index, index, captureBounds),
     );
@@ -644,11 +713,18 @@ export function buildRangeGuardMeanSteps(source: number[]): SortStep[] {
       split.refinementSplits > 0
         ? "Round " +
           round +
-          ": the overlap guard splits " +
+          ": overlap guard pass " +
+          guardPassesUsed +
+          " of " +
+          MAX_RANGE_GUARD_PASSES +
+          " splits " +
           split.refinementSplits +
           " small " +
           (split.refinementSplits === 1 ? "group" : "groups") +
-          " around their own means."
+          " at their medians; " +
+          (guardPassesUsed === MAX_RANGE_GUARD_PASSES
+            ? "later rounds return to mean ranking."
+            : "a second pass runs only for a small residual overlap.")
         : "Round " +
           round +
           ": split the row into " +
@@ -2141,6 +2217,8 @@ export function analyzeRangeGuardMeanSort(source: number[]): SortMetrics {
   let refinementOperations = 0;
   let rankComparisons = 0;
   let outputWrites = 0;
+  let guardPassesUsed = 0;
+  let rangeGuardClosed = false;
 
   if (sourceValues.length <= 1) {
     return {
@@ -2157,8 +2235,17 @@ export function analyzeRangeGuardMeanSort(source: number[]): SortMetrics {
   while (true) {
     rounds += 1;
     const targetGroupCount = Math.min(sourceValues.length, chunks.length * 2);
-    const useRefinement = hasRefinementEligibleGroups(chunks, refinementBlockSize);
-    const overlappingChunkIds = useRefinement ? getOverlappingChunkIds(chunks) : new Set<number>();
+    const canUseRangeGuard =
+      !rangeGuardClosed &&
+      guardPassesUsed < MAX_RANGE_GUARD_PASSES &&
+      hasRefinementEligibleGroups(chunks, refinementBlockSize);
+    const overlappingChunkIds = canUseRangeGuard
+      ? getOverlappingChunkIds(chunks)
+      : new Set<number>();
+    const useRefinement =
+      canUseRangeGuard &&
+      shouldUseRangeGuardPass(guardPassesUsed, chunks, overlappingChunkIds);
+    if (canUseRangeGuard && !useRefinement) rangeGuardClosed = true;
     const split = splitForNextMeanRound(
       chunks,
       targetGroupCount,
@@ -2166,9 +2253,11 @@ export function analyzeRangeGuardMeanSort(source: number[]): SortMetrics {
       overlappingChunkIds,
       refinementBlockSize,
     );
-    const captureBounds = split.childValues.every(
-      (group) => group.length <= refinementBlockSize,
-    );
+    if (useRefinement) guardPassesUsed += 1;
+    const captureBounds =
+      !rangeGuardClosed &&
+      guardPassesUsed < MAX_RANGE_GUARD_PASSES &&
+      split.childValues.every((group) => group.length <= refinementBlockSize);
     const nextChunks = split.childValues.map((group, index) =>
       createMeanChunk(group, index, index, captureBounds),
     );
@@ -2179,10 +2268,11 @@ export function analyzeRangeGuardMeanSort(source: number[]): SortMetrics {
       // Min/max values are gathered during the same group scan once groups are small.
       refinementOperations += sourceValues.length * 2;
     }
-    if (useRefinement) {
+    if (canUseRangeGuard) {
       // Prefix/suffix range checks find only the blocks that truly overlap.
-      refinementOperations += chunks.length * 3 + split.refinementSplits;
+      refinementOperations += chunks.length * 3;
     }
+    refinementOperations += split.refinementOperations;
     const ranking = rankMeanChunks(nextChunks);
     rankComparisons += ranking.comparisons;
     const rankedChunks = ranking.chunks;

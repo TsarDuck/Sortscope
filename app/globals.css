@@ -1284,6 +1284,35 @@ input:focus-visible {
   font-size: 0.72rem;
 }
 
+.practice-block--median {
+  min-width: 80px;
+  padding: 15px 16px;
+  border-color: rgba(220, 163, 245, 0.36);
+  background: linear-gradient(180deg, rgba(224, 168, 245, 0.18), rgba(115, 69, 162, 0.2));
+  cursor: pointer;
+  touch-action: auto;
+}
+
+.practice-block--median:active {
+  cursor: pointer;
+}
+
+.practice-block--median span {
+  display: block;
+  color: #f2d4ff;
+  font-size: 1.13rem;
+  font-weight: 900;
+}
+
+.practice-block--median strong {
+  display: block;
+  margin-top: 5px;
+  color: #d79af2;
+  font-size: 0.61rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
 .practice-lab__actions {
   display: flex;
   grid-column: 1 / -1;
@@ -1372,6 +1401,14 @@ input:focus-visible {
   color: #929cbe;
   font-size: 0.72rem;
   line-height: 1.5;
+}
+
+.benchmark-chart__order {
+  margin: -5px 0 13px;
+  color: #b7c0e0;
+  font-size: 0.66rem;
+  font-weight: 800;
+  letter-spacing: 0.035em;
 }
 
 .benchmark-matrix {

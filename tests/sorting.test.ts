@@ -56,7 +56,7 @@ test("mean partition sort refines blocks until it reaches numeric order", () => 
   assert.equal(isNonDecreasing(finalValues(steps)), true);
 });
 
-test("range-guard mean saves its overlap guard for adaptive small groups", () => {
+test("range-guard median saves its overlap guard for adaptive small groups", () => {
   const source = [1, 16, 2, 15, 3, 14, 4, 13, 5, 12, 6, 11, 7, 10, 8, 9];
   const steps = buildRangeGuardMeanSteps(source);
   const splitSteps = steps.filter((step) => step.phase === "split");
@@ -66,9 +66,22 @@ test("range-guard mean saves its overlap guard for adaptive small groups", () =>
   assert.match(splitSteps[2].message, /overlap guard/);
   assert.deepEqual(finalValues(steps), [...source].sort((left, right) => left - right));
   assert.ok((analyzeRangeGuardMeanSort(source).refinementOperations ?? 0) > 0);
+
+  const guardStepIndexes = splitSteps
+    .map((step, index) => (step.message.includes("overlap guard") ? index : -1))
+    .filter((index) => index >= 0);
+  assert.ok(guardStepIndexes.length >= 1);
+  assert.ok(guardStepIndexes.length <= 2);
+  const firstGuardGroups = splitSteps[guardStepIndexes[0]].groups ?? [];
+  assert.ok(firstGuardGroups.every((group) => group.end - group.start <= 2));
+  assert.ok(
+    splitSteps
+      .slice((guardStepIndexes.at(-1) ?? -1) + 1)
+      .every((step) => !step.message.includes("overlap guard")),
+  );
 });
 
-test("mean partition remains the simple baseline while range-guard mean refines overlaps", () => {
+test("mean partition remains the simple baseline while range-guard median refines overlaps", () => {
   const source = [1, 16, 2, 15, 3, 14, 4, 13, 5, 12, 6, 11, 7, 10, 8, 9];
   const baseline = buildMeanPartitionSteps(source);
   const guarded = buildRangeGuardMeanSteps(source);

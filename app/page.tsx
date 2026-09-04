@@ -91,7 +91,15 @@ type PartitionPracticeStep = {
   kind: "partitions";
 };
 
-type PracticeStep = BlockPracticeStep | PartitionPracticeStep;
+type MedianPracticeStep = {
+  prompt: string;
+  values: number[];
+  targetMedian: number;
+  hint: string;
+  kind: "median";
+};
+
+type PracticeStep = BlockPracticeStep | PartitionPracticeStep | MedianPracticeStep;
 
 type SortStep = {
   values: number[];
@@ -137,7 +145,7 @@ const BENCHMARK_ALGORITHMS = [
   { key: "quick", label: "Quick sort", className: "quick" },
   { key: "merge", label: "Merge sort", className: "merge" },
   { key: "meanPartition", label: "Mean partition sort", className: "mean" },
-  { key: "rangeGuardMean", label: "Range-Guard Mean sort", className: "range-guard" },
+  { key: "rangeGuardMean", label: "Range-Guard Median sort", className: "range-guard" },
 ] as const;
 type BenchmarkAlgorithm = (typeof BENCHMARK_ALGORITHMS)[number]["key"];
 type BenchmarkWork = Record<BenchmarkAlgorithm, number>;
@@ -170,22 +178,32 @@ function getBogoAttemptMaximum(size: number) {
   );
 }
 
-function getTheoreticalWork(algorithm: BenchmarkAlgorithm, size: number) {
+function getTheoreticalWork(
+  algorithm: BenchmarkAlgorithm,
+  size: number,
+  pattern: BenchmarkPattern,
+) {
   const n = Math.max(size, 2);
   const logN = Math.log2(n);
   const pairWork = (n * (n - 1)) / 2;
 
   switch (algorithm) {
     case "bubble":
+      return pairWork * (pattern === "reverse" ? 2 : pattern === "nearly-sorted" ? 0.14 : 1);
     case "cocktail":
+      return pairWork * (pattern === "reverse" ? 1.5 : pattern === "nearly-sorted" ? 0.12 : 0.82);
     case "selection":
       return pairWork;
     case "insertion":
-      return pairWork * 0.75;
+      return pairWork * (pattern === "reverse" ? 2 : pattern === "nearly-sorted" ? 0.1 : 0.75);
     case "heap":
       return 2.6 * n * logN;
     case "quick":
-      return 1.7 * n * logN;
+      return pattern === "random"
+        ? 1.7 * n * logN
+        : pattern === "reverse"
+          ? pairWork * 1.25
+          : pairWork;
     case "merge":
       return 2 * n * logN;
     case "meanPartition":
@@ -193,8 +211,9 @@ function getTheoreticalWork(algorithm: BenchmarkAlgorithm, size: number) {
       // summed group-ranking work grows quadratically at large n.
       return (2 / 3) * n * n + 2 * n * logN;
     case "rangeGuardMean":
-      // The range guard waits for small groups and uses a fast group rank.
-      return 4.4 * n * logN;
+      // One or two small median guard passes are bounded; all remaining rounds
+      // use fast mean ranking.
+      return 3.4 * n * logN;
   }
 }
 
@@ -526,55 +545,50 @@ const ALGORITHM_DETAILS: Record<
     ],
   },
   "range-guard-mean": {
-    label: "Range-Guard Mean sort",
+    label: "Range-Guard Median sort",
     number: "10",
-    heroCopy: "Rank broad groups by average, then guard small overlapping ranges so outliers separate smoothly and efficiently.",
-    controlTitle: "Rank groups, then guard overlaps",
+    heroCopy: "Rank broad groups by average, use one short median cleanup for outliers, then return to fast mean ranking.",
+    controlTitle: "Use a short median guard, then mean-rank",
     stageLabel: "round",
-    stageDescription: "range-guard grouping",
+    stageDescription: "bounded median guard",
     eyebrow: "THE BIG IDEA",
-    learnTitle: "Keep broad passes cheap; expose outliers late.",
+    learnTitle: "Clean up outliers briefly, then go back to averages.",
     learnCopy: [
-      "Range-Guard Mean sort begins with the same broad 2, 4, 8… mean-ranked groups as Mean Partition Sort. It uses a faster group-ranking path, and it deliberately avoids extra range checks while groups are still large.",
-      "Once every group is roughly one quarter of the original row or smaller—capped at 16 values—the range guard records each group’s minimum and maximum. Only groups whose value ranges cross another group are split around their own mean. That exposes hidden low and high outliers without paying for strict refinement in the early wide passes.",
+      "Range-Guard Median sort begins with the same broad 2, 4, 8… mean-ranked groups as Mean Partition Sort. It uses a faster group-ranking path and deliberately does no range work while groups are still large.",
+      "Once groups are roughly one quarter of the original row or smaller—capped at 16 values—the guard checks their minimum and maximum. Crossing groups get one median split, with a second only if a small, stubborn overlap remains. A median makes near-even halves, so a single extreme value cannot make a lopsided 15-versus-1 split. The guard then turns off and ordinary mean grouping finishes the job exactly at singleton groups.",
     ],
     complexity: ["PASSES O(log n)", "WORK O(n log n)", "SPACE O(n)"],
-    cardTitle: "RANGE-GUARD MEAN SORT",
-    cardTag: "adaptive · range-aware",
+    cardTitle: "RANGE-GUARD MEDIAN SORT",
+    cardTag: "adaptive · bounded cleanup",
     steps: [
       "Split the current row into 2, 4, 8… balanced groups.",
       "Calculate and quickly rank the average of every group.",
-      "At small groups, detect overlapping value ranges and split only those outlier groups.",
-      "Rank all groups; singleton-group means are the values themselves.",
+      "At small groups, use one or two median guard passes only for overlapping outlier groups.",
+      "Return to mean ranking; singleton-group means are the values themselves.",
     ],
     examples: [
-      { values: "[1, 100] μ=50.5 | [49, 50] μ=49.5", detail: "The second group has the lower average, even though 100 is still inside the first group." },
-      { values: "[49, 50 | 1, 100]", detail: "The broad mean pass ranks 49.5 before 50.5; this is fast, but not yet a proof of order." },
-      { values: "49–50 overlaps 1–100", detail: "At the small-group threshold, the range guard exposes the crossing and splits the overlapping groups around their means." },
-      { values: "[1] [49] [50] [100]", detail: "At singleton groups, each mean equals its value, so ranking the groups gives the exact numeric order." },
+      { values: "[1, 100, 101, 102] | [48, 49, 50, 51]", detail: "Broad means can hide the 1 inside the first high-average group, so the row needs a targeted cleanup." },
+      { values: "median([1, 100, 101, 102]) = 100", detail: "The lower median makes near-even sides: [1, 100] and [101, 102], instead of a lopsided mean split." },
+      { values: "one or two guard passes", detail: "Only ranges that still cross are refined. The guard then shuts off instead of inspecting every later group." },
+      { values: "mean groups → singleton means", detail: "Ordinary mean ranking resumes; the singleton pass still guarantees exact numeric order." },
     ],
     practice: [
       {
-        kind: "partitions",
-        prompt: "Drag the lower-mean partition to the left of the higher-mean partition.",
-        partitions: [
-          { id: "high", values: [1, 100], mean: 50.5 },
-          { id: "low", values: [49, 50], mean: 49.5 },
-        ],
-        targetOrder: ["low", "high"],
-        hint: "49.5 is lower than 50.5, so its whole group ranks first.",
+        kind: "median",
+        prompt: "The overlap guard has isolated [1, 100, 101, 102]. Tap its lower median—the value that makes the two guard halves as even as possible.",
+        values: [1, 100, 101, 102],
+        targetMedian: 100,
+        hint: "Sort mentally: 1, 100, 101, 102. For this even-sized block, use the lower middle value.",
       },
       {
         kind: "partitions",
-        prompt: "After the range guard has made singleton groups, rank their displayed means from low to high.",
+        prompt: "After the short guard cleanup, return to the cheap rule: drag the lower-mean group before the higher-mean group.",
         partitions: [
-          { id: "forty-nine", values: [49], mean: 49 },
-          { id: "fifty", values: [50], mean: 50 },
-          { id: "one", values: [1], mean: 1 },
-          { id: "hundred", values: [100], mean: 100 },
+          { id: "higher-mean", values: [12, 18], mean: 15 },
+          { id: "lower-mean", values: [5, 11], mean: 8 },
         ],
-        targetOrder: ["one", "forty-nine", "fifty", "hundred"],
-        hint: "For a singleton group, μ is just the number written on the block.",
+        targetOrder: ["lower-mean", "higher-mean"],
+        hint: "The expensive guard is over. Compare only μ 8 and μ 15, then rank the whole groups.",
       },
     ],
   },
@@ -940,6 +954,7 @@ export default function Home() {
   const [practiceSolved, setPracticeSolved] = useState(false);
   const [practiceFeedback, setPracticeFeedback] = useState<string | null>(null);
   const [practiceUndoPending, setPracticeUndoPending] = useState(false);
+  const [practiceMedianSelection, setPracticeMedianSelection] = useState<number | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const lastToneTimeRef = useRef(0);
   const lastBogoTextureTimeRef = useRef(0);
@@ -973,6 +988,7 @@ export default function Home() {
   const practiceFinished = practiceStepIndex >= practiceSteps.length;
   const currentPractice = practiceSteps[Math.min(practiceStepIndex, practiceSteps.length - 1)];
   const isPartitionPractice = currentPractice.kind === "partitions";
+  const isMedianPractice = currentPractice.kind === "median";
   const algorithmLabel = algorithmDetails.label;
   const stageLabel = algorithmDetails.stageLabel;
   const totalStages = isMeanPartition
@@ -1048,13 +1064,29 @@ export default function Home() {
         work: Object.fromEntries(
           BENCHMARK_ALGORITHMS.map((benchmarkAlgorithm) => [
             benchmarkAlgorithm.key,
-            getTheoreticalWork(benchmarkAlgorithm.key, size),
+            getTheoreticalWork(benchmarkAlgorithm.key, size, benchmarkPattern),
           ]),
         ) as BenchmarkWork,
       })),
-    [],
+    [benchmarkPattern],
   );
   const displayedBenchmarkData = benchmarkView === "theory" ? theoreticalBenchmarkData : benchmarkData;
+  const orderedBenchmarkAlgorithms = useMemo(() => {
+    const finalColumn = displayedBenchmarkData.at(-1)?.work;
+
+    return [...BENCHMARK_ALGORITHMS].sort((left, right) => {
+      const difference = (finalColumn?.[right.key] ?? 0) - (finalColumn?.[left.key] ?? 0);
+      return difference || BENCHMARK_ALGORITHMS.indexOf(left) - BENCHMARK_ALGORITHMS.indexOf(right);
+    });
+  }, [displayedBenchmarkData]);
+  const orderedCurrentBenchmarkAlgorithms = useMemo(
+    () =>
+      [...BENCHMARK_ALGORITHMS].sort((left, right) => {
+        const difference = selectedBenchmark[right.key] - selectedBenchmark[left.key];
+        return difference || BENCHMARK_ALGORITHMS.indexOf(left) - BENCHMARK_ALGORITHMS.indexOf(right);
+      }),
+    [selectedBenchmark],
+  );
   const benchmarkMatrixStyle = {
     "--benchmark-columns": displayedBenchmarkData.length,
     minWidth: String(180 + displayedBenchmarkData.length * 118) + "px",
@@ -1501,10 +1533,17 @@ export default function Home() {
     practicePointerRef.current = null;
     setPracticeSolved(false);
     setPracticeFeedback(null);
+    setPracticeMedianSelection(null);
 
     if (firstStep.kind === "partitions") {
       setPracticeValues([]);
       setPracticePartitionOrder(firstStep.partitions.map((partition) => partition.id));
+      return;
+    }
+
+    if (firstStep.kind === "median") {
+      setPracticeValues([]);
+      setPracticePartitionOrder([]);
       return;
     }
 
@@ -1530,11 +1569,14 @@ export default function Home() {
   }
 
   function evaluatePracticeMove(nextValues: number[], nextPartitionOrder: string[]) {
-    const isCorrect = isPartitionPractice
-      ? currentPractice.targetOrder.every(
-          (partitionId, index) => nextPartitionOrder[index] === partitionId,
-        )
-      : currentPractice.target.every((value, index) => nextValues[index] === value);
+    const isCorrect =
+      currentPractice.kind === "partitions"
+        ? currentPractice.targetOrder.every(
+            (partitionId, index) => nextPartitionOrder[index] === partitionId,
+          )
+        : currentPractice.kind === "median"
+          ? false
+          : currentPractice.target.every((value, index) => nextValues[index] === value);
 
     setPracticeSolved(isCorrect);
     setPracticeFeedback(
@@ -1545,6 +1587,30 @@ export default function Home() {
         : "Not quite. Hint: " + currentPractice.hint,
     );
     return isCorrect;
+  }
+
+  function handleMedianPracticeChoice(value: number) {
+    if (practiceFinished || practiceUndoPending || currentPractice.kind !== "median") return;
+
+    setPracticeMedianSelection(value);
+    const isCorrect = value === currentPractice.targetMedian;
+    setPracticeSolved(isCorrect);
+    if (isCorrect) {
+      setPracticeFeedback(
+        practiceStepIndex === practiceSteps.length - 1
+          ? "Correct—this completes the walkthrough."
+          : "Correct. That lower median makes a balanced guard split; continue to the mean-ranking step.",
+      );
+      return;
+    }
+
+    setPracticeUndoPending(true);
+    setPracticeFeedback("Not quite. The choice will clear so you can try the median again. Hint: " + currentPractice.hint);
+    practiceUndoTimerRef.current = window.setTimeout(() => {
+      setPracticeMedianSelection(null);
+      setPracticeUndoPending(false);
+      practiceUndoTimerRef.current = null;
+    }, 560);
   }
 
   function schedulePracticeUndo(previousValues: number[], previousPartitionOrder: string[]) {
@@ -1698,6 +1764,7 @@ export default function Home() {
       setPracticeDropIndex(null);
       practicePointerRef.current = null;
       setPracticeSolved(false);
+      setPracticeMedianSelection(null);
       return;
     }
 
@@ -1711,10 +1778,17 @@ export default function Home() {
     practicePointerRef.current = null;
     setPracticeSolved(false);
     setPracticeFeedback(null);
+    setPracticeMedianSelection(null);
 
     if (nextStep.kind === "partitions") {
       setPracticeValues([]);
       setPracticePartitionOrder(nextStep.partitions.map((partition) => partition.id));
+      return;
+    }
+
+    if (nextStep.kind === "median") {
+      setPracticeValues([]);
+      setPracticePartitionOrder([]);
       return;
     }
 
@@ -1952,7 +2026,7 @@ export default function Home() {
                     <option value="quick">Quick sort</option>
                     <option value="merge">Merge sort</option>
                     <option value="mean-partition">Mean partition sort</option>
-                    <option value="range-guard-mean">Range-Guard Mean sort</option>
+                    <option value="range-guard-mean">Range-Guard Median sort</option>
                   </select>
                 </label>
 
@@ -2336,7 +2410,9 @@ export default function Home() {
                 : currentPractice.prompt}
             </p>
             <p className="practice-lab__help">
-              Pick up a block and drag it into place, or select one block and then select its destination. Each move is checked immediately.
+              {isMedianPractice
+                ? "Choose the lower median to create two near-even outlier-guard halves. A wrong choice clears itself so you can try again."
+                : "Pick up a block and drag it into place, or select one block and then select its destination. Each move is checked immediately."}
             </p>
             <div
               className="practice-board"
@@ -2344,7 +2420,24 @@ export default function Home() {
               role="group"
               aria-label={algorithmLabel + " interactive practice blocks"}
             >
-              {isPartitionPractice
+              {isMedianPractice && currentPractice.kind === "median"
+                ? currentPractice.values.map((value) => (
+                    <button
+                      className={
+                        "practice-block practice-block--median " +
+                        (practiceMedianSelection === value ? "practice-block--selected" : "")
+                      }
+                      type="button"
+                      key={value}
+                      onClick={() => handleMedianPracticeChoice(value)}
+                      disabled={practiceUndoPending || practiceSolved}
+                      aria-pressed={practiceMedianSelection === value}
+                    >
+                      <span>{value}</span>
+                      <strong>median?</strong>
+                    </button>
+                  ))
+                : isPartitionPractice
                 ? practicePartitionOrder.map((partitionId, index) => {
                     const partition = currentPractice.partitions.find(
                       (candidate) => candidate.id === partitionId,
@@ -2488,7 +2581,6 @@ export default function Home() {
                 <select
                   value={benchmarkPattern}
                   onChange={(event) => setBenchmarkPattern(event.target.value as BenchmarkPattern)}
-                  disabled={benchmarkView === "theory"}
                   aria-label="Benchmark test arrangement"
                 >
                   <option value="random">Random shuffle</option>
@@ -2504,21 +2596,22 @@ export default function Home() {
             role="img"
             aria-label={
               benchmarkView === "theory"
-                ? "Theoretical work growth for bubble, insertion, cocktail, selection, heap, quick, merge, mean partition, and range-guard mean sort on arrays from 16 through 65,536 values."
-                : "Estimated work for bubble, insertion, cocktail, selection, heap, quick, merge, mean partition, and range-guard mean sort on " + benchmarkPattern + " arrays from 16 through 256 values."
+                ? "Theoretical work growth, ordered from least to most efficient, for " + benchmarkPattern + " arrays from 16 through 65,536 values."
+                : "Estimated work, ordered from least to most efficient, for " + benchmarkPattern + " arrays from 16 through 256 values."
             }
           >
             <p className="benchmark-chart__note">
               {benchmarkView === "theory"
-                ? "Projected work uses each implementation's dominant growth model. Meter length uses a log scale, so O(n log n) curves remain visible next to quadratic ones; the printed number is a relative model unit, not a timed result."
+                ? "Projected work uses each implementation's dominant growth model and the selected arrangement. Meter length uses a log scale, so O(n log n) curves remain visible next to quadratic ones; the printed number is a relative model unit, not a timed result."
                 : "Each column compares algorithms at that exact array size. Meter length uses a log scale so the faster algorithms remain visible; the printed number is the exact work estimate."}
             </p>
+            <p className="benchmark-chart__order">Rows run from least efficient at the top to most efficient at the bottom, based on the rightmost size.</p>
             <div className="benchmark-matrix" style={benchmarkMatrixStyle}>
               <div className="benchmark-matrix__header">
                 <span>Algorithm</span>
                 {displayedBenchmarkData.map((entry) => <span key={entry.size}>n={formatCount(entry.size)}</span>)}
               </div>
-              {BENCHMARK_ALGORITHMS.map((benchmarkAlgorithm) => (
+              {orderedBenchmarkAlgorithms.map((benchmarkAlgorithm) => (
                 <div className="benchmark-matrix__row" key={benchmarkAlgorithm.key}>
                   <span className="benchmark-matrix__label">
                     <i className={"benchmark-legend__swatch benchmark-legend__swatch--" + benchmarkAlgorithm.className} />
@@ -2546,8 +2639,8 @@ export default function Home() {
           </div>
 
           <div className="benchmark-current" aria-label={"Current benchmark at " + arraySize + " values"}>
-            <p className="benchmark-current__title">Exact totals at n={arraySize}</p>
-            {BENCHMARK_ALGORITHMS.map((benchmarkAlgorithm) => {
+            <p className="benchmark-current__title">Exact totals at n={arraySize} · least to most efficient</p>
+            {orderedCurrentBenchmarkAlgorithms.map((benchmarkAlgorithm) => {
               const work = selectedBenchmark[benchmarkAlgorithm.key];
               return (
                 <div key={benchmarkAlgorithm.key}>
