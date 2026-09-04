@@ -703,7 +703,7 @@ export default function Home() {
   const playbackDensity = isBogo ? 48 : 1;
   const speedDelay = 720 - speed * 7.13;
   const minimumFrameDelay =
-    isLargeArray && !isBogo ? 16 : 7;
+    isMeanPartition ? 110 : isLargeArray && !isBogo ? 16 : 7;
   const usesEvenMergePacing =
     algorithm === "merge" &&
     currentStep.phase !== "ready" &&
@@ -960,7 +960,7 @@ export default function Home() {
                   <option value="quick">Quick sort</option>
                   <option value="merge">Merge sort</option>
                   <option value="bogo">Bogo sort ({BOGO_ATTEMPT_LABEL}-shuffle cap)</option>
-                  <option value="mean-partition">Mean partition sort (experiment)</option>
+                  <option value="mean-partition">Mean partition sort</option>
                 </select>
               </label>
 
