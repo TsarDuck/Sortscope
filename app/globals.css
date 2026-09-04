@@ -617,6 +617,18 @@ input:focus-visible {
   transition: background 360ms ease-out;
 }
 
+.bars--merge:not(.bars--dense) .bar {
+  transition: height 220ms cubic-bezier(.23, 1, .32, 1), background 300ms ease, box-shadow 300ms ease;
+}
+
+.bars--merge .bar--sorted {
+  transition: background 520ms ease-out, box-shadow 520ms ease-out;
+}
+
+.bars--merge .bar--merge {
+  box-shadow: 0 0 14px rgba(88, 217, 245, 0.18);
+}
+
 .bars--mean .bar-slot {
   transition: transform var(--mean-slide-duration, 520ms) cubic-bezier(.22, .9, .3, 1);
 }
@@ -1332,6 +1344,14 @@ input:focus-visible {
   gap: 8px;
 }
 
+.benchmark-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  justify-content: end;
+  gap: 14px;
+}
+
 .benchmark-select > span {
   color: var(--muted);
   font-size: 0.63rem;
@@ -1365,7 +1385,7 @@ input:focus-visible {
 .benchmark-matrix__header,
 .benchmark-matrix__row {
   display: grid;
-  grid-template-columns: minmax(145px, 1.3fr) repeat(5, minmax(102px, 1fr));
+  grid-template-columns: minmax(145px, 1.3fr) repeat(var(--benchmark-columns, 5), minmax(102px, 1fr));
 }
 
 .benchmark-matrix__header {
@@ -1557,6 +1577,10 @@ input:focus-visible {
   background: #67cce7;
 }
 
+.benchmark-legend__swatch--range-guard {
+  background: #d89cf4;
+}
+
 .benchmark-legend__swatch--cocktail {
   background: #f09372;
 }
@@ -1644,6 +1668,11 @@ input:focus-visible {
 
 .benchmark-current i b.benchmark-current__mean {
   background: linear-gradient(90deg, #7ce3f3, #4a9dd4);
+}
+
+.benchmark-current i b.benchmark-current__range-guard,
+.benchmark-meter--range-guard {
+  background: linear-gradient(90deg, #e0a8f5, #a469d3);
 }
 
 .benchmark-current i b.benchmark-current__bubble,
@@ -1860,6 +1889,10 @@ input:focus-visible {
   .benchmark-select {
     max-width: 270px;
   }
+
+  .benchmark-controls {
+    justify-content: start;
+  }
 }
 
 @media (max-width: 700px) {
@@ -2043,6 +2076,11 @@ input:focus-visible {
 
   .benchmark-select {
     max-width: none;
+  }
+
+  .benchmark-controls {
+    display: grid;
+    grid-template-columns: 1fr;
   }
 
   .benchmark-chart {

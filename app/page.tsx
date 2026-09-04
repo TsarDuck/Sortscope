@@ -18,6 +18,7 @@ import {
   analyzeHeapSort,
   analyzeInsertionSort,
   analyzeMeanPartitionSort,
+  analyzeRangeGuardMeanSort,
   analyzeMergeSort,
   analyzeQuickSort,
   analyzeSelectionSort,
@@ -25,6 +26,7 @@ import {
   buildBubbleSteps,
   buildHeapSortSteps,
   buildMeanPartitionSteps,
+  buildRangeGuardMeanSteps,
   buildMergeSortSteps,
   buildQuickSortSteps,
   buildSelectionSteps,
@@ -42,7 +44,8 @@ type AlgorithmId =
   | "quick"
   | "merge"
   | "bogo"
-  | "mean-partition";
+  | "mean-partition"
+  | "range-guard-mean";
 type RunState = "ready" | "running" | "paused" | "complete";
 type StepPhase =
   | "ready"
@@ -70,6 +73,7 @@ type MeanGroup = {
 };
 
 type BenchmarkPattern = "random" | "reverse" | "nearly-sorted";
+type BenchmarkView = "theory" | "measured";
 
 type BlockPracticeStep = {
   prompt: string;
@@ -123,6 +127,7 @@ const AUDIBLE_PHASES: StepPhase[] = [
 const DEFAULT_ARRAY_SIZE = 24;
 const DEFAULT_SPEED = 62;
 const BENCHMARK_SIZES = [16, 32, 64, 128, 256];
+const THEORY_BENCHMARK_SIZES = [16, 64, 256, 1_024, 4_096, 16_384, 65_536];
 const BENCHMARK_ALGORITHMS = [
   { key: "bubble", label: "Bubble sort", className: "bubble" },
   { key: "insertion", label: "Insertion sort", className: "insertion" },
@@ -132,6 +137,7 @@ const BENCHMARK_ALGORITHMS = [
   { key: "quick", label: "Quick sort", className: "quick" },
   { key: "merge", label: "Merge sort", className: "merge" },
   { key: "meanPartition", label: "Mean partition sort", className: "mean" },
+  { key: "rangeGuardMean", label: "Range-Guard Mean sort", className: "range-guard" },
 ] as const;
 type BenchmarkAlgorithm = (typeof BENCHMARK_ALGORITHMS)[number]["key"];
 type BenchmarkWork = Record<BenchmarkAlgorithm, number>;
@@ -162,6 +168,34 @@ function getBogoAttemptMaximum(size: number) {
     BOGO_MID_ARRAY_MAX_ATTEMPTS *
       (BOGO_LARGE_ARRAY_MAX_ATTEMPTS / BOGO_MID_ARRAY_MAX_ATTEMPTS) ** scale,
   );
+}
+
+function getTheoreticalWork(algorithm: BenchmarkAlgorithm, size: number) {
+  const n = Math.max(size, 2);
+  const logN = Math.log2(n);
+  const pairWork = (n * (n - 1)) / 2;
+
+  switch (algorithm) {
+    case "bubble":
+    case "cocktail":
+    case "selection":
+      return pairWork;
+    case "insertion":
+      return pairWork * 0.75;
+    case "heap":
+      return 2.6 * n * logN;
+    case "quick":
+      return 1.7 * n * logN;
+    case "merge":
+      return 2 * n * logN;
+    case "meanPartition":
+      // Legacy mean ranking inserts k groups one by one each round. The
+      // summed group-ranking work grows quadratically at large n.
+      return (2 / 3) * n * n + 2 * n * logN;
+    case "rangeGuardMean":
+      // The range guard waits for small groups and uses a fast group rank.
+      return 4.4 * n * logN;
+  }
 }
 
 const ALGORITHM_DETAILS: Record<
@@ -246,6 +280,7 @@ const ALGORITHM_DETAILS: Record<
       { prompt: "Start the bubble by moving 1 ahead of 4.", start: [4, 1, 3, 2], target: [1, 4, 3, 2], hint: "The first pair is backwards: 4 is larger than 1." },
       { prompt: "Keep 4 bubbling right past 3.", start: [1, 4, 3, 2], target: [1, 3, 4, 2], hint: "Compare the pair containing 4 and 3." },
       { prompt: "Finish the sweep by sending 4 to the right edge.", start: [1, 3, 4, 2], target: [1, 3, 2, 4], hint: "4 is still larger than the value beside it." },
+      { prompt: "One more short pass fixes the middle pair and completes the sorted row.", start: [1, 3, 2, 4], target: [1, 2, 3, 4], hint: "Compare 3 and 2; the settled 4 stays at the right edge." },
     ],
   },
   cocktail: {
@@ -341,6 +376,7 @@ const ALGORITHM_DETAILS: Record<
       { prompt: "Move the largest value, 4, to the heap root on the left.", start: [3, 1, 4, 2], target: [4, 3, 1, 2], hint: "A max heap must expose its largest active value first." },
       { prompt: "Extract 4 to the sorted right edge.", start: [4, 3, 1, 2], target: [3, 1, 2, 4], hint: "The right edge is outside the active heap once a value is extracted." },
       { prompt: "Restore the max-heap order among the remaining three values.", start: [3, 1, 2, 4], target: [3, 2, 1, 4], hint: "The root stays largest, then its children follow." },
+      { prompt: "Extract the remaining heap values to finish the ordered row.", start: [3, 2, 1, 4], target: [1, 2, 3, 4], hint: "The largest active value, 3, goes beside 4; the final two are already in order." },
     ],
   },
   quick: {
@@ -441,30 +477,30 @@ const ALGORITHM_DETAILS: Record<
   "mean-partition": {
     label: "Mean partition sort",
     number: "09",
-    heroCopy: "Rank broad groups by their averages, then use an adaptive overlap guard once the groups become small.",
-    controlTitle: "Rank groups, then guard overlaps",
+    heroCopy: "Split the row into more and more balanced groups, ranking whole groups by their averages each round.",
+    controlTitle: "Rank balanced groups by mean",
     stageLabel: "round",
-    stageDescription: "adaptive mean grouping",
+    stageDescription: "mean grouping",
     eyebrow: "THE BIG IDEA",
-    learnTitle: "Use broad groups first; inspect small groups later.",
+    learnTitle: "Sort blocks before sorting values.",
     learnCopy: [
-      "Mean partition sort repeatedly cuts the current row into groups: first 2, then 4, then 8, and so on. It computes each group’s arithmetic mean—the sum divided by the number of values—and moves whole groups so lower means are left of higher means. Those early wide groups are deliberately cheap: the algorithm does not spend time inspecting every value relationship yet.",
-      "Once groups reach roughly one quarter of the original row, capped at 16 values, the overlap guard turns on. It records each small group’s minimum and maximum. Groups whose ranges overlap are split around their own mean, separating low and high values before the next mean ranking. Safe boundaries remain untouched; singleton groups still make the final result exact because a one-value mean is that value.",
+      "Mean partition sort repeatedly cuts the current row into balanced groups: first 2, then 4, then 8, and so on. It computes each group’s arithmetic mean—the sum divided by the number of values—and moves whole groups so lower means are left of higher means.",
+      "A low group mean is a clue, not proof that every value in one group belongs before another. The basic model keeps splitting until singleton groups, where each mean equals the value itself. That final round makes the result exact.",
     ],
-    complexity: ["PASSES O(log n)", "WORK O(n log n)", "SPACE O(n)"],
+    complexity: ["PASSES O(log n)", "RANKING O(n²) WORST", "SPACE O(n)"],
     cardTitle: "MEAN PARTITION SORT",
-    cardTag: "adaptive · group-based",
+    cardTag: "baseline · group-based",
     steps: [
       "Split the current row into 2, 4, 8… balanced groups.",
       "Calculate the average of every group.",
-      "When small group ranges overlap, split those groups around their means.",
-      "Rank all groups; singleton-group means are the values themselves.",
+      "Rank every group from the smallest mean to the largest.",
+      "Continue until singleton-group means are the values themselves.",
     ],
     examples: [
       { values: "[1, 100] μ=50.5 | [49, 50] μ=49.5", detail: "The second group has the lower average, even though 100 is still inside the first group." },
       { values: "[49, 50 | 1, 100]", detail: "The broad mean pass ranks 49.5 before 50.5; this is fast, but not yet a proof of order." },
-      { values: "49–50 overlaps 1–100", detail: "Once groups are small, their ranges expose the crossing. Both groups are split around their own means." },
       { values: "[1] [49] [50] [100]", detail: "At singleton groups, each mean equals its value, so ranking the groups gives the exact numeric order." },
+      { values: "[1, 49, 50, 100]", detail: "The singleton round is the final exact numeric ranking." },
     ],
     practice: [
       {
@@ -487,6 +523,59 @@ const ALGORITHM_DETAILS: Record<
         ],
         targetOrder: ["one", "forty-nine", "fifty", "hundred"],
         hint: "For a singleton group, μ is just the number written on the block." },
+    ],
+  },
+  "range-guard-mean": {
+    label: "Range-Guard Mean sort",
+    number: "10",
+    heroCopy: "Rank broad groups by average, then guard small overlapping ranges so outliers separate smoothly and efficiently.",
+    controlTitle: "Rank groups, then guard overlaps",
+    stageLabel: "round",
+    stageDescription: "range-guard grouping",
+    eyebrow: "THE BIG IDEA",
+    learnTitle: "Keep broad passes cheap; expose outliers late.",
+    learnCopy: [
+      "Range-Guard Mean sort begins with the same broad 2, 4, 8… mean-ranked groups as Mean Partition Sort. It uses a faster group-ranking path, and it deliberately avoids extra range checks while groups are still large.",
+      "Once every group is roughly one quarter of the original row or smaller—capped at 16 values—the range guard records each group’s minimum and maximum. Only groups whose value ranges cross another group are split around their own mean. That exposes hidden low and high outliers without paying for strict refinement in the early wide passes.",
+    ],
+    complexity: ["PASSES O(log n)", "WORK O(n log n)", "SPACE O(n)"],
+    cardTitle: "RANGE-GUARD MEAN SORT",
+    cardTag: "adaptive · range-aware",
+    steps: [
+      "Split the current row into 2, 4, 8… balanced groups.",
+      "Calculate and quickly rank the average of every group.",
+      "At small groups, detect overlapping value ranges and split only those outlier groups.",
+      "Rank all groups; singleton-group means are the values themselves.",
+    ],
+    examples: [
+      { values: "[1, 100] μ=50.5 | [49, 50] μ=49.5", detail: "The second group has the lower average, even though 100 is still inside the first group." },
+      { values: "[49, 50 | 1, 100]", detail: "The broad mean pass ranks 49.5 before 50.5; this is fast, but not yet a proof of order." },
+      { values: "49–50 overlaps 1–100", detail: "At the small-group threshold, the range guard exposes the crossing and splits the overlapping groups around their means." },
+      { values: "[1] [49] [50] [100]", detail: "At singleton groups, each mean equals its value, so ranking the groups gives the exact numeric order." },
+    ],
+    practice: [
+      {
+        kind: "partitions",
+        prompt: "Drag the lower-mean partition to the left of the higher-mean partition.",
+        partitions: [
+          { id: "high", values: [1, 100], mean: 50.5 },
+          { id: "low", values: [49, 50], mean: 49.5 },
+        ],
+        targetOrder: ["low", "high"],
+        hint: "49.5 is lower than 50.5, so its whole group ranks first.",
+      },
+      {
+        kind: "partitions",
+        prompt: "After the range guard has made singleton groups, rank their displayed means from low to high.",
+        partitions: [
+          { id: "forty-nine", values: [49], mean: 49 },
+          { id: "fifty", values: [50], mean: 50 },
+          { id: "one", values: [1], mean: 1 },
+          { id: "hundred", values: [100], mean: 100 },
+        ],
+        targetOrder: ["one", "forty-nine", "fifty", "hundred"],
+        hint: "For a singleton group, μ is just the number written on the block.",
+      },
     ],
   },
 };
@@ -696,11 +785,20 @@ function getBarClass(
   step: SortStep,
   algorithm: AlgorithmId,
 ) {
-  if (algorithm === "mean-partition") {
+  if (algorithm === "mean-partition" || algorithm === "range-guard-mean") {
     if (step.phase === "complete") return "bar--sorted";
     if (step.phase === "split") return "bar--partition";
     if (step.phase === "average") return "bar--mean";
     if (step.phase === "reorder") return "bar--rank";
+    return "bar--idle";
+  }
+
+  if (algorithm === "merge") {
+    if (step.phase === "complete") return "bar--sorted";
+    if (step.phase === "merge" && index === step.inserting) return "bar--merge";
+    if (step.phase === "compare" && (index === step.comparing || index === step.shifting)) {
+      return "bar--compare";
+    }
     return "bar--idle";
   }
 
@@ -712,7 +810,13 @@ function getBarClass(
   }
 
   if (algorithm === "quick") {
-    if (step.phase === "complete" || step.settled?.includes(index)) return "bar--sorted";
+    if (step.phase === "complete") return "bar--sorted";
+    // At dense sizes, coloring every newly placed pivot creates a noisy striped
+    // row. Keep the in-progress state quiet and reserve the green line for the
+    // completed sort; the active pivot and swap still show the current action.
+    if (step.values.length <= DEFAULT_ARRAY_SIZE && step.settled?.includes(index)) {
+      return "bar--sorted";
+    }
     if (step.phase === "select" && index === step.inserting) return "bar--key";
     if (step.phase === "swap" && (index === step.comparing || index === step.shifting)) {
       return "bar--swap";
@@ -816,6 +920,7 @@ export default function Home() {
   const [bogoAttemptInput, setBogoAttemptInput] = useState(String(BOGO_MAX_ATTEMPTS));
   const [benchmarkPattern, setBenchmarkPattern] =
     useState<BenchmarkPattern>("random");
+  const [benchmarkView, setBenchmarkView] = useState<BenchmarkView>("theory");
   const [originalValues, setOriginalValues] = useState(INITIAL_VALUES);
   const [values, setValues] = useState(INITIAL_VALUES);
   const [steps, setSteps] = useState<SortStep[]>([]);
@@ -834,6 +939,7 @@ export default function Home() {
   const [practiceDropIndex, setPracticeDropIndex] = useState<number | null>(null);
   const [practiceSolved, setPracticeSolved] = useState(false);
   const [practiceFeedback, setPracticeFeedback] = useState<string | null>(null);
+  const [practiceUndoPending, setPracticeUndoPending] = useState(false);
   const audioContextRef = useRef<AudioContext | null>(null);
   const lastToneTimeRef = useRef(0);
   const lastBogoTextureTimeRef = useRef(0);
@@ -851,11 +957,13 @@ export default function Home() {
     moved: boolean;
   } | null>(null);
   const suppressPracticeClickRef = useRef(false);
+  const practiceUndoTimerRef = useRef<number | null>(null);
   const bogoSessionRef = useRef<BogoSession | null>(null);
   const [meanSlideOffsets, setMeanSlideOffsets] = useState<Record<number, number>>({});
   const [meanSlideStage, setMeanSlideStage] = useState<"idle" | "prepare" | "animate">("idle");
   const prefersReducedMotion = usePrefersReducedMotion();
-  const isMeanPartition = algorithm === "mean-partition";
+  const isMeanPartition = algorithm === "mean-partition" || algorithm === "range-guard-mean";
+  const isRangeGuardMean = algorithm === "range-guard-mean";
   const isBogo = algorithm === "bogo";
   const bogoAttemptMaximum = getBogoAttemptMaximum(arraySize);
   const bogoSliderStep = 1;
@@ -890,6 +998,7 @@ export default function Home() {
         const quick = analyzeQuickSort(benchmarkValues);
         const merge = analyzeMergeSort(benchmarkValues);
         const meanPartition = analyzeMeanPartitionSort(benchmarkValues);
+        const rangeGuardMean = analyzeRangeGuardMeanSort(benchmarkValues);
 
         return {
           size,
@@ -902,6 +1011,7 @@ export default function Home() {
             quick: getWorkEstimate(quick),
             merge: getWorkEstimate(merge),
             meanPartition: getWorkEstimate(meanPartition),
+            rangeGuardMean: getWorkEstimate(rangeGuardMean),
           } satisfies BenchmarkWork,
         };
       }),
@@ -917,6 +1027,7 @@ export default function Home() {
     const quick = analyzeQuickSort(benchmarkValues);
     const merge = analyzeMergeSort(benchmarkValues);
     const meanPartition = analyzeMeanPartitionSort(benchmarkValues);
+    const rangeGuardMean = analyzeRangeGuardMeanSort(benchmarkValues);
 
     return {
       bubble: getWorkEstimate(bubble),
@@ -927,8 +1038,27 @@ export default function Home() {
       quick: getWorkEstimate(quick),
       merge: getWorkEstimate(merge),
       meanPartition: getWorkEstimate(meanPartition),
+      rangeGuardMean: getWorkEstimate(rangeGuardMean),
     } satisfies BenchmarkWork;
   }, [arraySize, benchmarkPattern]);
+  const theoreticalBenchmarkData = useMemo(
+    () =>
+      THEORY_BENCHMARK_SIZES.map((size) => ({
+        size,
+        work: Object.fromEntries(
+          BENCHMARK_ALGORITHMS.map((benchmarkAlgorithm) => [
+            benchmarkAlgorithm.key,
+            getTheoreticalWork(benchmarkAlgorithm.key, size),
+          ]),
+        ) as BenchmarkWork,
+      })),
+    [],
+  );
+  const displayedBenchmarkData = benchmarkView === "theory" ? theoreticalBenchmarkData : benchmarkData;
+  const benchmarkMatrixStyle = {
+    "--benchmark-columns": displayedBenchmarkData.length,
+    minWidth: String(180 + displayedBenchmarkData.length * 118) + "px",
+  } as CSSProperties;
   const selectedBenchmarkMaximum = Math.max(
     1,
     ...Object.values(selectedBenchmark),
@@ -984,7 +1114,12 @@ export default function Home() {
     }
 
     const nextPositions = captureMeanBarPositions();
-    if (currentStep.phase !== "reorder") {
+    const shouldAnimateMeanMove =
+      currentStep.phase === "reorder" ||
+      (isRangeGuardMean &&
+        currentStep.phase === "split" &&
+        currentStep.message.includes("overlap guard"));
+    if (!shouldAnimateMeanMove) {
       meanBarPositionsRef.current = nextPositions;
       return;
     }
@@ -1023,7 +1158,7 @@ export default function Home() {
       if (settleFrame !== undefined) window.cancelAnimationFrame(settleFrame);
       if (releaseTimer !== undefined) window.clearTimeout(releaseTimer);
     };
-  }, [currentStep.pass, currentStep.phase, isMeanPartition, prefersReducedMotion, visibleValues]);
+  }, [currentStep.message, currentStep.pass, currentStep.phase, isMeanPartition, isRangeGuardMean, prefersReducedMotion, visibleValues]);
 
   useLayoutEffect(() => {
     const previousPositions = practiceBlockPositionsRef.current;
@@ -1073,7 +1208,10 @@ export default function Home() {
   const delay = prefersReducedMotion
     ? 18
     : isMeanPartition
-      ? currentStep.phase === "reorder"
+      ? currentStep.phase === "reorder" ||
+          (isRangeGuardMean &&
+            currentStep.phase === "split" &&
+            currentStep.message.includes("overlap guard"))
         ? meanSlideDuration + 120
         : meanStaticDelay
       : usesEvenMergePacing
@@ -1175,7 +1313,7 @@ export default function Home() {
     const gain = context.createGain();
     const motion = ((attempt * 0.61803398875) % 1 + 1) % 1;
     const frequency = 145 + motion * 330;
-    const peakGain = 0.075 * (soundVolume / 100) ** 2.5;
+    const peakGain = 0.17 * (soundVolume / 100) ** 2.15;
 
     oscillator.type = "triangle";
     oscillator.frequency.setValueAtTime(frequency, now);
@@ -1242,13 +1380,18 @@ export default function Home() {
   useEffect(() => {
     if (!isBogo || !soundEnabled || runState !== "running") return;
 
+    let cancelled = false;
     const playTexture = () => {
       const session = bogoSessionRef.current;
-      if (session && !session.done) playBogoShuffleTexture(session.attempts);
+      if (!cancelled && session && !session.done) playBogoShuffleTexture(session.attempts);
     };
-    playTexture();
+    const context = ensureAudioContext();
+    void context.resume().then(playTexture).catch(() => undefined);
     const timer = window.setInterval(playTexture, 145);
-    return () => window.clearInterval(timer);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
   }, [isBogo, runState, soundEnabled, soundVolume]);
 
   useEffect(() => {
@@ -1338,7 +1481,16 @@ export default function Home() {
     if (element) meanBarElementsRef.current.set(value, element);
   }
 
+  function clearPracticeUndo() {
+    if (practiceUndoTimerRef.current !== null) {
+      window.clearTimeout(practiceUndoTimerRef.current);
+      practiceUndoTimerRef.current = null;
+    }
+    setPracticeUndoPending(false);
+  }
+
   function resetPractice(nextAlgorithm = algorithm) {
+    clearPracticeUndo();
     const firstStep = ALGORITHM_DETAILS[nextAlgorithm].practice[0];
     setPracticeStepIndex(0);
     setPracticeSelectedIndex(null);
@@ -1392,33 +1544,54 @@ export default function Home() {
           : "Correct. Your move follows the rule; continue to the next step."
         : "Not quite. Hint: " + currentPractice.hint,
     );
+    return isCorrect;
+  }
+
+  function schedulePracticeUndo(previousValues: number[], previousPartitionOrder: string[]) {
+    setPracticeUndoPending(true);
+    practiceUndoTimerRef.current = window.setTimeout(() => {
+      if (isPartitionPractice) {
+        setPracticePartitionOrder(previousPartitionOrder);
+      } else {
+        setPracticeValues(previousValues);
+      }
+      setPracticeFeedback("That move breaks this step's rule, so it slid back. Hint: " + currentPractice.hint);
+      practiceUndoTimerRef.current = null;
+      setPracticeUndoPending(false);
+    }, 440);
   }
 
   function movePracticeItem(fromIndex: number, toIndex: number, capturePosition = true) {
-    if (practiceFinished || fromIndex === toIndex) return;
+    if (practiceFinished || practiceUndoPending || fromIndex === toIndex) return;
     if (capturePosition) {
       practiceBlockPositionsRef.current = capturePracticeBlockPositions();
     }
 
     if (isPartitionPractice) {
+      const previousOrder = [...practicePartitionOrder];
       const nextOrder = [...practicePartitionOrder];
       const [moved] = nextOrder.splice(fromIndex, 1);
       nextOrder.splice(toIndex, 0, moved);
       setPracticePartitionOrder(nextOrder);
-      evaluatePracticeMove(practiceValues, nextOrder);
+      if (!evaluatePracticeMove(practiceValues, nextOrder)) {
+        schedulePracticeUndo(practiceValues, previousOrder);
+      }
     } else {
+      const previousValues = [...practiceValues];
       const nextValues = [...practiceValues];
       const [moved] = nextValues.splice(fromIndex, 1);
       nextValues.splice(toIndex, 0, moved);
       setPracticeValues(nextValues);
-      evaluatePracticeMove(nextValues, practicePartitionOrder);
+      if (!evaluatePracticeMove(nextValues, practicePartitionOrder)) {
+        schedulePracticeUndo(previousValues, practicePartitionOrder);
+      }
     }
 
     setPracticeSelectedIndex(null);
   }
 
   function handlePracticeBlockClick(index: number) {
-    if (practiceFinished) return;
+    if (practiceFinished || practiceUndoPending) return;
     if (suppressPracticeClickRef.current) {
       suppressPracticeClickRef.current = false;
       return;
@@ -1482,7 +1655,7 @@ export default function Home() {
     index: number,
     id: string,
   ) {
-    if (practiceFinished || event.button !== 0) return;
+    if (practiceFinished || practiceUndoPending || event.button !== 0) return;
     event.currentTarget.setPointerCapture(event.pointerId);
     practicePointerRef.current = {
       id,
@@ -1514,6 +1687,7 @@ export default function Home() {
   }
 
   function advancePracticeStep() {
+    clearPracticeUndo();
     const nextStepIndex = practiceStepIndex + 1;
     if (nextStepIndex >= practiceSteps.length) {
       setPracticeStepIndex(practiceSteps.length);
@@ -1571,9 +1745,14 @@ export default function Home() {
       return;
     }
 
-    if (soundEnabled) ensureAudioContext();
+    const audioContext = soundEnabled ? ensureAudioContext() : null;
     setBogoCelebration(false);
     if (algorithm === "bogo") {
+      if (audioContext) {
+        // Start one texture in the click gesture. Fast Bogo batches can finish
+        // before the normal interval has time to produce an audible note.
+        void audioContext.resume().then(() => playBogoShuffleTexture(0)).catch(() => undefined);
+      }
       const session = createBogoSession(originalValues, bogoAttemptLimit);
       bogoSessionRef.current = session;
       setValues([...originalValues]);
@@ -1587,7 +1766,9 @@ export default function Home() {
     bogoSessionRef.current = null;
     setBogoLiveStep(null);
     const sequence =
-      algorithm === "mean-partition"
+      algorithm === "range-guard-mean"
+        ? buildRangeGuardMeanSteps(originalValues)
+        : algorithm === "mean-partition"
         ? buildMeanPartitionSteps(originalValues)
         : algorithm === "bubble"
           ? buildBubbleSteps(originalValues)
@@ -1771,6 +1952,7 @@ export default function Home() {
                     <option value="quick">Quick sort</option>
                     <option value="merge">Merge sort</option>
                     <option value="mean-partition">Mean partition sort</option>
+                    <option value="range-guard-mean">Range-Guard Mean sort</option>
                   </select>
                 </label>
 
@@ -2007,7 +2189,7 @@ export default function Home() {
                 {isMeanPartition ? (
                   <>
                     <span><i className="legend__swatch legend__swatch--idle" />current row</span>
-                    <span><i className="legend__swatch legend__swatch--partition" />split groups</span>
+                    <span><i className="legend__swatch legend__swatch--partition" />{isRangeGuardMean ? "group / guard split" : "split groups"}</span>
                     <span><i className="legend__swatch legend__swatch--mean" />mean measured</span>
                     <span><i className="legend__swatch legend__swatch--rank" />groups ranked</span>
                   </>
@@ -2189,6 +2371,7 @@ export default function Home() {
                         onPointerUp={() => finishPracticeDrag()}
                         onPointerCancel={() => finishPracticeDrag(true)}
                         onClick={() => handlePracticeBlockClick(index)}
+                        disabled={practiceUndoPending}
                         aria-pressed={practiceSelectedIndex === index}
                         aria-grabbed={isDragging}
                         style={
@@ -2231,6 +2414,7 @@ export default function Home() {
                           onPointerUp={() => finishPracticeDrag()}
                           onPointerCancel={() => finishPracticeDrag(true)}
                           onClick={() => handlePracticeBlockClick(index)}
+                          disabled={practiceUndoPending}
                           aria-pressed={practiceSelectedIndex === index}
                           aria-grabbed={isDragging}
                           style={
@@ -2282,40 +2466,57 @@ export default function Home() {
               <h2 id="comparison-title">Compare the work behind the motion.</h2>
               <p>
                 Every deterministic algorithm receives the same shuffled sequence of 1 through n.
-                These totals combine comparisons and writes, so they are operation estimates rather
-                than timers. Mean Partition also counts every value read and rewritten during each
-                grouping round, its group-ranking comparisons, and its late small-group overlap guard.
-                Bogo Sort stays out of this chart
-                because its expected work grows factorially, even though the live visualizer allows it
-                up to 256 values.
+                Switch between exact operation estimates for arrays up to 256 and a theoretical
+                projection that makes the growth shape visible through 65,536 values. Bogo Sort stays
+                out of both views because its expected work grows factorially.
               </p>
             </div>
-            <label className="benchmark-select">
-              <span>Test arrangement</span>
-              <select
-                value={benchmarkPattern}
-                onChange={(event) => setBenchmarkPattern(event.target.value as BenchmarkPattern)}
-                aria-label="Benchmark test arrangement"
-              >
-                <option value="random">Random shuffle</option>
-                <option value="reverse">Reverse order</option>
-                <option value="nearly-sorted">Nearly sorted</option>
-              </select>
-            </label>
+            <div className="benchmark-controls">
+              <label className="benchmark-select">
+                <span>Chart view</span>
+                <select
+                  value={benchmarkView}
+                  onChange={(event) => setBenchmarkView(event.target.value as BenchmarkView)}
+                  aria-label="Efficiency chart view"
+                >
+                  <option value="theory">Theory through 65,536</option>
+                  <option value="measured">Exact work through 256</option>
+                </select>
+              </label>
+              <label className="benchmark-select">
+                <span>Test arrangement</span>
+                <select
+                  value={benchmarkPattern}
+                  onChange={(event) => setBenchmarkPattern(event.target.value as BenchmarkPattern)}
+                  disabled={benchmarkView === "theory"}
+                  aria-label="Benchmark test arrangement"
+                >
+                  <option value="random">Random shuffle</option>
+                  <option value="reverse">Reverse order</option>
+                  <option value="nearly-sorted">Nearly sorted</option>
+                </select>
+              </label>
+            </div>
           </div>
 
           <div
             className="benchmark-chart"
             role="img"
-            aria-label={"Estimated work for bubble, insertion, cocktail, selection, heap, quick, merge, and mean partition sort on " + benchmarkPattern + " arrays from 16 through 256 values."}
+            aria-label={
+              benchmarkView === "theory"
+                ? "Theoretical work growth for bubble, insertion, cocktail, selection, heap, quick, merge, mean partition, and range-guard mean sort on arrays from 16 through 65,536 values."
+                : "Estimated work for bubble, insertion, cocktail, selection, heap, quick, merge, mean partition, and range-guard mean sort on " + benchmarkPattern + " arrays from 16 through 256 values."
+            }
           >
             <p className="benchmark-chart__note">
-              Each column compares algorithms at that exact array size. Meter length uses a log scale so the faster algorithms remain visible; the printed number is the exact work estimate.
+              {benchmarkView === "theory"
+                ? "Projected work uses each implementation's dominant growth model. Meter length uses a log scale, so O(n log n) curves remain visible next to quadratic ones; the printed number is a relative model unit, not a timed result."
+                : "Each column compares algorithms at that exact array size. Meter length uses a log scale so the faster algorithms remain visible; the printed number is the exact work estimate."}
             </p>
-            <div className="benchmark-matrix">
+            <div className="benchmark-matrix" style={benchmarkMatrixStyle}>
               <div className="benchmark-matrix__header">
                 <span>Algorithm</span>
-                {benchmarkData.map((entry) => <span key={entry.size}>n={entry.size}</span>)}
+                {displayedBenchmarkData.map((entry) => <span key={entry.size}>n={formatCount(entry.size)}</span>)}
               </div>
               {BENCHMARK_ALGORITHMS.map((benchmarkAlgorithm) => (
                 <div className="benchmark-matrix__row" key={benchmarkAlgorithm.key}>
@@ -2323,7 +2524,7 @@ export default function Home() {
                     <i className={"benchmark-legend__swatch benchmark-legend__swatch--" + benchmarkAlgorithm.className} />
                     {benchmarkAlgorithm.label}
                   </span>
-                  {benchmarkData.map((entry) => {
+                  {displayedBenchmarkData.map((entry) => {
                     const work = entry.work[benchmarkAlgorithm.key];
                     const columnMaximum = Math.max(1, ...Object.values(entry.work));
                     const ratio = Math.log1p(work) / Math.log1p(columnMaximum);

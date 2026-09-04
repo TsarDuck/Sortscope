@@ -7,7 +7,8 @@ export type AlgorithmId =
   | "quick"
   | "merge"
   | "bogo"
-  | "mean-partition";
+  | "mean-partition"
+  | "range-guard-mean";
 
 export type StepPhase =
   | "ready"
@@ -90,7 +91,6 @@ export function createInitialStep(
   values: number[],
   algorithm: AlgorithmId = "insertion",
 ): SortStep {
-  const isMeanPartition = algorithm === "mean-partition";
   const messages: Record<AlgorithmId, string> = {
     insertion: "The first value starts as a sorted one-item prefix.",
     bubble: "Neighboring values will trade places as the largest bubbles right.",
@@ -101,6 +101,7 @@ export function createInitialStep(
     merge: "Split the row into runs, then merge ordered neighbors.",
     bogo: "Shuffle the whole row until chance happens to order it.",
     "mean-partition": "The row will be repeatedly split into mean-ranked groups.",
+    "range-guard-mean": "The row will rank mean groups, then guard small overlapping ranges.",
   };
 
   return {
@@ -118,9 +119,7 @@ export function createInitialStep(
     message:
       values.length <= 1
         ? "One value is already ordered."
-        : isMeanPartition
-          ? messages["mean-partition"]
-          : messages[algorithm],
+        : messages[algorithm],
   };
 }
 
@@ -180,6 +179,12 @@ function createMeanChunk(
   };
 }
 
+function buildMeanChunks(values: number[], groupCount: number) {
+  return partitionBalanced(values, groupCount).map((group, index) =>
+    createMeanChunk(group, index, index),
+  );
+}
+
 function describeMeanGroups(chunks: MeanChunk[]): MeanGroup[] {
   let start = 0;
 
@@ -213,6 +218,27 @@ function rankMeanChunks(chunks: MeanChunk[]) {
     comparisons += 1;
     return compareMeans(left, right);
   });
+
+  return { chunks: ranked, comparisons };
+}
+
+function rankMeanChunksLegacy(chunks: MeanChunk[]) {
+  const ranked = [...chunks];
+  let comparisons = 0;
+
+  for (let index = 1; index < ranked.length; index += 1) {
+    const candidate = ranked[index];
+    let cursor = index - 1;
+
+    while (cursor >= 0) {
+      comparisons += 1;
+      if (compareMeans(ranked[cursor], candidate) <= 0) break;
+      ranked[cursor + 1] = ranked[cursor];
+      cursor -= 1;
+    }
+
+    ranked[cursor + 1] = candidate;
+  }
 
   return { chunks: ranked, comparisons };
 }
@@ -453,6 +479,122 @@ export function buildInsertionSteps(
 
 export function buildMeanPartitionSteps(source: number[]): SortStep[] {
   const steps = [createInitialStep(source, "mean-partition")];
+  const values = [...source];
+  let working = [...source];
+  let groupCount = 2;
+  let round = 0;
+  let meansCalculated = 0;
+  let valuesReordered = 0;
+
+  if (values.length <= 1) {
+    steps.push({
+      values: [...values],
+      pass: 0,
+      phase: "complete",
+      key: null,
+      comparing: null,
+      shifting: null,
+      inserting: null,
+      gapIndex: null,
+      sortedCount: values.length,
+      comparisons: 0,
+      writes: 0,
+      message: "No grouping is needed; the row is already ordered.",
+    });
+    return steps;
+  }
+
+  while (true) {
+    round += 1;
+    const chunks = buildMeanChunks(working, groupCount);
+    const groups = describeMeanGroups(chunks);
+    meansCalculated += chunks.length;
+
+    steps.push({
+      values: [...working],
+      pass: round,
+      phase: "split",
+      key: null,
+      comparing: null,
+      shifting: null,
+      inserting: null,
+      gapIndex: null,
+      sortedCount: 0,
+      comparisons: meansCalculated,
+      writes: valuesReordered,
+      message: "Round " + round + ": split the row into " + chunks.length + " balanced groups.",
+      groups,
+    });
+
+    steps.push({
+      values: [...working],
+      pass: round,
+      phase: "average",
+      key: null,
+      comparing: null,
+      shifting: null,
+      inserting: null,
+      gapIndex: null,
+      sortedCount: 0,
+      comparisons: meansCalculated,
+      writes: valuesReordered,
+      message:
+        chunks.length <= 8
+          ? "Group means: " + groups.map((group) => "μ " + formatMean(group.mean)).join(", ") + "."
+          : "Measure the averages for all " + chunks.length + " groups.",
+      groups,
+    });
+
+    const rankedChunks = rankMeanChunksLegacy(chunks).chunks;
+    valuesReordered += working.length;
+    working = rankedChunks.flatMap((chunk) => chunk.values);
+
+    steps.push({
+      values: [...working],
+      pass: round,
+      phase: "reorder",
+      key: null,
+      comparing: null,
+      shifting: null,
+      inserting: null,
+      gapIndex: null,
+      sortedCount: 0,
+      comparisons: meansCalculated,
+      writes: valuesReordered,
+      message: "Rank the groups by mean: smallest on the left, largest on the right.",
+      groups: describeMeanGroups(rankedChunks),
+    });
+
+    if (isNonDecreasing(working)) {
+      steps.push({
+        values: [...working],
+        pass: round,
+        phase: "complete",
+        key: null,
+        comparing: null,
+        shifting: null,
+        inserting: null,
+        gapIndex: null,
+        sortedCount: working.length,
+        comparisons: meansCalculated,
+        writes: valuesReordered,
+        message:
+          groupCount >= values.length
+            ? "Singleton groups make each mean equal its value. Sorted."
+            : "The row is already ordered, so no further splitting is needed.",
+      });
+      return steps;
+    }
+
+    if (groupCount >= values.length) break;
+    groupCount = Math.min(values.length, groupCount * 2);
+  }
+
+  return steps;
+}
+
+export function buildRangeGuardMeanSteps(source: number[]): SortStep[] {
+  const steps = [createInitialStep(source, "range-guard-mean")];
   const values = [...source];
   const refinementBlockSize = getRefinementBlockSize(values.length);
   let chunks = [createMeanChunk([...source], 0, 0)];
@@ -1942,6 +2084,54 @@ export function analyzeMergeSort(source: number[]): SortMetrics {
 }
 
 export function analyzeMeanPartitionSort(source: number[]): SortMetrics {
+  const sourceValues = [...source];
+  let working = [...sourceValues];
+  let groupCount = 2;
+  let rounds = 0;
+  let meansCalculated = 0;
+  let meanComputationOperations = 0;
+  let rankComparisons = 0;
+  let outputWrites = 0;
+
+  if (working.length <= 1) {
+    return {
+      comparisons: 0,
+      rankComparisons: 0,
+      writes: 0,
+      rounds: 0,
+      finalValues: working,
+      meanComputationOperations: 0,
+      refinementOperations: 0,
+    };
+  }
+
+  while (true) {
+    rounds += 1;
+    const chunks = buildMeanChunks(working, groupCount);
+    meansCalculated += chunks.length;
+    meanComputationOperations += working.length + chunks.length;
+    const ranking = rankMeanChunksLegacy(chunks);
+    rankComparisons += ranking.comparisons;
+    outputWrites += working.length;
+    working = ranking.chunks.flatMap((chunk) => chunk.values);
+
+    if (isNonDecreasing(working) || groupCount >= sourceValues.length) {
+      return {
+        comparisons: meansCalculated,
+        rankComparisons,
+        writes: outputWrites,
+        rounds,
+        finalValues: working,
+        meanComputationOperations,
+        refinementOperations: 0,
+      };
+    }
+
+    groupCount = Math.min(sourceValues.length, groupCount * 2);
+  }
+}
+
+export function analyzeRangeGuardMeanSort(source: number[]): SortMetrics {
   const sourceValues = [...source];
   const refinementBlockSize = getRefinementBlockSize(sourceValues.length);
   let chunks = [createMeanChunk([...sourceValues], 0, 0)];

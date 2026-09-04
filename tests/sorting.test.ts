@@ -8,6 +8,7 @@ import {
   analyzeHeapSort,
   analyzeInsertionSort,
   analyzeMeanPartitionSort,
+  analyzeRangeGuardMeanSort,
   analyzeMergeSort,
   analyzeQuickSort,
   analyzeSelectionSort,
@@ -17,6 +18,7 @@ import {
   buildHeapSortSteps,
   buildInsertionSteps,
   buildMeanPartitionSteps,
+  buildRangeGuardMeanSteps,
   buildMergeSortSteps,
   buildQuickSortSteps,
   buildSelectionSteps,
@@ -54,16 +56,28 @@ test("mean partition sort refines blocks until it reaches numeric order", () => 
   assert.equal(isNonDecreasing(finalValues(steps)), true);
 });
 
-test("mean partition saves its overlap guard for adaptive small groups", () => {
+test("range-guard mean saves its overlap guard for adaptive small groups", () => {
   const source = [1, 16, 2, 15, 3, 14, 4, 13, 5, 12, 6, 11, 7, 10, 8, 9];
-  const steps = buildMeanPartitionSteps(source);
+  const steps = buildRangeGuardMeanSteps(source);
   const splitSteps = steps.filter((step) => step.phase === "split");
 
   assert.deepEqual(splitSteps.slice(0, 2).map((step) => step.groups?.length), [2, 4]);
   assert.ok(splitSteps[1].groups?.every((group) => group.end - group.start === 4));
   assert.match(splitSteps[2].message, /overlap guard/);
   assert.deepEqual(finalValues(steps), [...source].sort((left, right) => left - right));
-  assert.ok((analyzeMeanPartitionSort(source).refinementOperations ?? 0) > 0);
+  assert.ok((analyzeRangeGuardMeanSort(source).refinementOperations ?? 0) > 0);
+});
+
+test("mean partition remains the simple baseline while range-guard mean refines overlaps", () => {
+  const source = [1, 16, 2, 15, 3, 14, 4, 13, 5, 12, 6, 11, 7, 10, 8, 9];
+  const baseline = buildMeanPartitionSteps(source);
+  const guarded = buildRangeGuardMeanSteps(source);
+
+  assert.equal(baseline.some((step) => step.message.includes("overlap guard")), false);
+  assert.equal(guarded.some((step) => step.message.includes("overlap guard")), true);
+  assert.equal(analyzeMeanPartitionSort(source).refinementOperations, 0);
+  assert.deepEqual(finalValues(baseline), [...source].sort((left, right) => left - right));
+  assert.deepEqual(finalValues(guarded), [...source].sort((left, right) => left - right));
 });
 
 test("balanced partitions cover every value without creating empty groups", () => {
@@ -222,5 +236,6 @@ test("sorting metric analyzers preserve a clean 1 through 256 final line", () =>
   assert.deepEqual(analyzeQuickSort(source).finalValues, expected);
   assert.deepEqual(analyzeMergeSort(source).finalValues, expected);
   assert.deepEqual(analyzeMeanPartitionSort(source).finalValues, expected);
+  assert.deepEqual(analyzeRangeGuardMeanSort(source).finalValues, expected);
   assert.deepEqual(source, Array.from({ length: 256 }, (_, index) => 256 - index));
 });
