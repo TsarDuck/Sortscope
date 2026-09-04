@@ -67,7 +67,7 @@ type MeanChunk = {
   originalIndex: number;
 };
 
-export const BOGO_MAX_ATTEMPTS = 100_000;
+export const BOGO_MAX_ATTEMPTS = 1_000_000;
 const COMPACT_FRAME_THRESHOLD = 24;
 
 export function createInitialStep(
@@ -1098,6 +1098,29 @@ export function buildMergeSortSteps(source: number[]): SortStep[] {
       let leftIndex = 0;
       let rightIndex = 0;
       let destination = left;
+      const visualWriteInterval = Math.max(1, Math.ceil((right - left) / 12));
+
+      function recordCompactMergeWrite() {
+        if (
+          !compactFrames ||
+          ((destination - left) % visualWriteInterval !== 0 && destination !== right)
+        ) {
+          return;
+        }
+
+        steps.push(
+          makeStep(values, {
+            pass,
+            phase: "merge",
+            inserting: destination - 1,
+            rangeStart: left,
+            rangeEnd: right,
+            comparisons,
+            writes,
+            message: "Write another ordered portion of the merged run.",
+          }),
+        );
+      }
 
       while (leftIndex < leftRun.length && rightIndex < rightRun.length) {
         comparisons += 1;
@@ -1139,6 +1162,8 @@ export function buildMergeSortSteps(source: number[]): SortStep[] {
               message: "Write the next smallest value into the merged run.",
             }),
           );
+        } else {
+          recordCompactMergeWrite();
         }
       }
 
@@ -1147,6 +1172,7 @@ export function buildMergeSortSteps(source: number[]): SortStep[] {
         leftIndex += 1;
         destination += 1;
         writes += 1;
+        recordCompactMergeWrite();
       }
 
       while (rightIndex < rightRun.length) {
@@ -1154,19 +1180,22 @@ export function buildMergeSortSteps(source: number[]): SortStep[] {
         rightIndex += 1;
         destination += 1;
         writes += 1;
+        recordCompactMergeWrite();
       }
 
-      steps.push(
-        makeStep(values, {
-          pass,
-          phase: "merge",
-          rangeStart: left,
-          rangeEnd: right,
-          comparisons,
-          writes,
-          message: "Merge two ordered runs into one larger ordered run.",
-        }),
-      );
+      if (!compactFrames) {
+        steps.push(
+          makeStep(values, {
+            pass,
+            phase: "merge",
+            rangeStart: left,
+            rangeEnd: right,
+            comparisons,
+            writes,
+            message: "Merge two ordered runs into one larger ordered run.",
+          }),
+        );
+      }
     }
 
     width *= 2;

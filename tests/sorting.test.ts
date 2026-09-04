@@ -98,6 +98,9 @@ test("dense cocktail and merge frames keep their visual focus scoped", () => {
   const mergeFrames = buildMergeSortSteps([8, 3, 7, 1, 6, 2, 5, 4]).filter(
     (step) => step.phase === "merge",
   );
+  const finalMergeFrames = buildMergeSortSteps(
+    Array.from({ length: 256 }, (_, index) => 256 - index),
+  ).filter((step) => step.phase === "merge" && step.pass === 8);
 
   assert.ok(cocktailSweeps.length > 0);
   for (const step of cocktailSweeps) {
@@ -118,6 +121,8 @@ test("dense cocktail and merge frames keep their visual focus scoped", () => {
       (step) => (step.rangeEnd ?? 0) - (step.rangeStart ?? 0) < 8,
     ),
   );
+  assert.ok(finalMergeFrames.length >= 10);
+  assert.equal(finalMergeFrames.at(-1)?.inserting, 255);
 });
 
 test("bogo sort either succeeds by shuffle or reports its safety limit honestly", () => {
@@ -131,7 +136,7 @@ test("bogo sort either succeeds by shuffle or reports its safety limit honestly"
   );
 
   assert.deepEqual(source, [2, 1]);
-  assert.equal(BOGO_MAX_ATTEMPTS, 100_000);
+  assert.equal(BOGO_MAX_ATTEMPTS, 1_000_000);
   assert.deepEqual(finalValues(success), [1, 2]);
   assert.equal(success.at(-1)?.phase, "complete");
   assert.equal(limited.at(-1)?.phase, "limited");
