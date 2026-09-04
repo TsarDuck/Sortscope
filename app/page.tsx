@@ -17,7 +17,6 @@ import {
   analyzeCocktailSort,
   analyzeHeapSort,
   analyzeInsertionSort,
-  analyzeMeanPartitionSort,
   analyzeRangeGuardMeanSort,
   analyzeMergeSort,
   analyzeQuickSort,
@@ -25,7 +24,6 @@ import {
   buildCocktailSteps,
   buildBubbleSteps,
   buildHeapSortSteps,
-  buildMeanPartitionSteps,
   buildRangeGuardMeanSteps,
   buildMergeSortSteps,
   buildQuickSortSteps,
@@ -44,7 +42,6 @@ type AlgorithmId =
   | "quick"
   | "merge"
   | "bogo"
-  | "mean-partition"
   | "range-guard-mean";
 type RunState = "ready" | "running" | "paused" | "complete";
 type StepPhase =
@@ -144,8 +141,7 @@ const BENCHMARK_ALGORITHMS = [
   { key: "heap", label: "Heap sort", className: "heap" },
   { key: "quick", label: "Quick sort", className: "quick" },
   { key: "merge", label: "Merge sort", className: "merge" },
-  { key: "meanPartition", label: "Mean partition sort", className: "mean" },
-  { key: "rangeGuardMean", label: "Range-Guard Median sort", className: "range-guard" },
+  { key: "rangeGuardMean", label: "Range-Guard Adaptive sort", className: "range-guard" },
 ] as const;
 type BenchmarkAlgorithm = (typeof BENCHMARK_ALGORITHMS)[number]["key"];
 type BenchmarkWork = Record<BenchmarkAlgorithm, number>;
@@ -206,14 +202,11 @@ function getTheoreticalWork(
           : pairWork;
     case "merge":
       return 2 * n * logN;
-    case "meanPartition":
-      // Legacy mean ranking inserts k groups one by one each round. The
-      // summed group-ranking work grows quadratically at large n.
-      return (2 / 3) * n * n + 2 * n * logN;
     case "rangeGuardMean":
-      // One or two small median guard passes are bounded; all remaining rounds
-      // use fast mean ranking.
-      return 3.4 * n * logN;
+      // One broad mean scout, then an exact natural-run merge only inside the
+      // unresolved range components. It remains O(n log n) in the worst case,
+      // with a small linear setup cost rather than repeated whole-row passes.
+      return 2 * n * logN + 2 * n;
   }
 }
 
@@ -493,102 +486,51 @@ const ALGORITHM_DETAILS: Record<
       { prompt: "Try a second tiny lucky outcome with four values.", start: [2, 4, 1, 3], target: [1, 2, 3, 4], hint: "There is only one successful order among all possible shuffles." },
     ],
   },
-  "mean-partition": {
-    label: "Mean partition sort",
-    number: "09",
-    heroCopy: "Split the row into more and more balanced groups, ranking whole groups by their averages each round.",
-    controlTitle: "Rank balanced groups by mean",
-    stageLabel: "round",
-    stageDescription: "mean grouping",
-    eyebrow: "THE BIG IDEA",
-    learnTitle: "Sort blocks before sorting values.",
-    learnCopy: [
-      "Mean partition sort repeatedly cuts the current row into balanced groups: first 2, then 4, then 8, and so on. It computes each group’s arithmetic mean—the sum divided by the number of values—and moves whole groups so lower means are left of higher means.",
-      "A low group mean is a clue, not proof that every value in one group belongs before another. The basic model keeps splitting until singleton groups, where each mean equals the value itself. That final round makes the result exact.",
-    ],
-    complexity: ["PASSES O(log n)", "RANKING O(n²) WORST", "SPACE O(n)"],
-    cardTitle: "MEAN PARTITION SORT",
-    cardTag: "baseline · group-based",
-    steps: [
-      "Split the current row into 2, 4, 8… balanced groups.",
-      "Calculate the average of every group.",
-      "Rank every group from the smallest mean to the largest.",
-      "Continue until singleton-group means are the values themselves.",
-    ],
-    examples: [
-      { values: "[1, 100] μ=50.5 | [49, 50] μ=49.5", detail: "The second group has the lower average, even though 100 is still inside the first group." },
-      { values: "[49, 50 | 1, 100]", detail: "The broad mean pass ranks 49.5 before 50.5; this is fast, but not yet a proof of order." },
-      { values: "[1] [49] [50] [100]", detail: "At singleton groups, each mean equals its value, so ranking the groups gives the exact numeric order." },
-      { values: "[1, 49, 50, 100]", detail: "The singleton round is the final exact numeric ranking." },
-    ],
-    practice: [
-      {
-        kind: "partitions",
-        prompt: "Drag the lower-mean partition to the left of the higher-mean partition.",
-        partitions: [
-          { id: "high", values: [1, 100], mean: 50.5 },
-          { id: "low", values: [49, 50], mean: 49.5 },
-        ],
-        targetOrder: ["low", "high"],
-        hint: "49.5 is lower than 50.5, so its whole group ranks first." },
-      {
-        kind: "partitions",
-        prompt: "Now the groups are single values. Rank their displayed means from low to high.",
-        partitions: [
-          { id: "forty-nine", values: [49], mean: 49 },
-          { id: "fifty", values: [50], mean: 50 },
-          { id: "one", values: [1], mean: 1 },
-          { id: "hundred", values: [100], mean: 100 },
-        ],
-        targetOrder: ["one", "forty-nine", "fifty", "hundred"],
-        hint: "For a singleton group, μ is just the number written on the block." },
-    ],
-  },
   "range-guard-mean": {
-    label: "Range-Guard Median sort",
-    number: "10",
-    heroCopy: "Rank broad groups by average, use one short median cleanup for outliers, then return to fast mean ranking.",
-    controlTitle: "Use a short median guard, then mean-rank",
+    label: "Range-Guard Adaptive sort",
+    number: "09",
+    heroCopy: "Use one broad mean rank to scout the row, then finish only the value ranges that still cross.",
+    controlTitle: "Certify ranges, then finish locally",
     stageLabel: "round",
-    stageDescription: "bounded median guard",
+    stageDescription: "adaptive range finish",
     eyebrow: "THE BIG IDEA",
-    learnTitle: "Clean up outliers briefly, then go back to averages.",
+    learnTitle: "Use averages to scout, ranges to prove, and local work to finish.",
     learnCopy: [
-      "Range-Guard Median sort begins with the same broad 2, 4, 8… mean-ranked groups as Mean Partition Sort. It uses a faster group-ranking path and deliberately does no range work while groups are still large.",
-      "Once groups are roughly one quarter of the original row or smaller—capped at 16 values—the guard checks their minimum and maximum. Crossing groups get one median split, with a second only if a small, stubborn overlap remains. A median makes near-even halves, so a single extreme value cannot make a lopsided 15-versus-1 split. The guard then turns off and ordinary mean grouping finishes the job exactly at singleton groups.",
+      "Range-Guard Adaptive sort begins with two broad balanced groups and ranks those groups by their arithmetic means. That first move is a fast scouting signal: a smaller average often belongs earlier, but it is not proof that every value in the group belongs earlier.",
+      "The guard then asks one exact question at each possible boundary: is the largest value on the left no bigger than the smallest value on the right? When the answer is yes, that boundary is certified, so the two sides can be finished independently—even when they share an equal edge value. When ranges cross, only that combined region needs more work.",
+      "Each unresolved region finishes with an adaptive natural merge. Runs that are already increasing stay put, strictly decreasing runs reverse once, and only the remaining runs merge together. Small rows skip the scouting setup entirely because a direct adaptive finish takes less work.",
     ],
-    complexity: ["PASSES O(log n)", "WORK O(n log n)", "SPACE O(n)"],
-    cardTitle: "RANGE-GUARD MEDIAN SORT",
-    cardTag: "adaptive · bounded cleanup",
+    complexity: ["BEST O(n)", "WORST O(n log n)", "SPACE O(n)"],
+    cardTitle: "RANGE-GUARD ADAPTIVE SORT",
+    cardTag: "adaptive · certified regions",
     steps: [
-      "Split the current row into 2, 4, 8… balanced groups.",
-      "Calculate and quickly rank the average of every group.",
-      "At small groups, use one or two median guard passes only for overlapping outlier groups.",
-      "Return to mean ranking; singleton-group means are the values themselves.",
+      "Split the row into two broad balanced groups and rank their means.",
+      "Scan for certified boundaries: max(left side) ≤ min(right side).",
+      "Treat each span between certified boundaries as an independent value region.",
+      "Finish only those regions with natural runs and stable local merges.",
     ],
     examples: [
-      { values: "[1, 100, 101, 102] | [48, 49, 50, 51]", detail: "Broad means can hide the 1 inside the first high-average group, so the row needs a targeted cleanup." },
-      { values: "median([1, 100, 101, 102]) = 100", detail: "The lower median makes near-even sides: [1, 100] and [101, 102], instead of a lopsided mean split." },
-      { values: "one or two guard passes", detail: "Only ranges that still cross are refined. The guard then shuts off instead of inspecting every later group." },
-      { values: "mean groups → singleton means", detail: "Ordinary mean ranking resumes; the singleton pass still guarantees exact numeric order." },
+      { values: "[1, 100] μ=50.5 | [48, 49] μ=48.5", detail: "The right group scouts earlier by mean, but its range still crosses the left group: max(48, 49) is not enough to prove where 1 and 100 belong." },
+      { values: "max([1, 16]) = 16 ≤ min([16, 31]) = 16", detail: "This is a certified boundary. Equal edge values are safe: every left value is still no larger than every right value." },
+      { values: "[1, 4] + [2, 3] → [1, 2, 3, 4]", detail: "An unresolved region is finished by merging its natural increasing runs, rather than repeatedly rebuilding the whole row." },
+      { values: "certified regions → one row", detail: "Once each local region is exact, concatenating the regions is globally sorted by the range proof." },
     ],
     practice: [
       {
-        kind: "median",
-        prompt: "The overlap guard has isolated [1, 100, 101, 102]. Tap its lower median—the value that makes the two guard halves as even as possible.",
-        values: [1, 100, 101, 102],
-        targetMedian: 100,
-        hint: "Sort mentally: 1, 100, 101, 102. For this even-sized block, use the lower middle value.",
+        kind: "partitions",
+        prompt: "These mean-ranked ranges are already certified: the left maximum is 16 and the right minimum is 16. Keep the lower range before the higher range.",
+        partitions: [
+          { id: "high-range", values: [16, 17, 31], mean: 21.3 },
+          { id: "low-range", values: [1, 2, 16], mean: 6.3 },
+        ],
+        targetOrder: ["low-range", "high-range"],
+        hint: "Because 16 ≤ 16, every value in the first range can safely stay before every value in the second.",
       },
       {
-        kind: "partitions",
-        prompt: "After the short guard cleanup, return to the cheap rule: drag the lower-mean group before the higher-mean group.",
-        partitions: [
-          { id: "higher-mean", values: [12, 18], mean: 15 },
-          { id: "lower-mean", values: [5, 11], mean: 8 },
-        ],
-        targetOrder: ["lower-mean", "higher-mean"],
-        hint: "The expensive guard is over. Compare only μ 8 and μ 15, then rank the whole groups.",
+        prompt: "Now merge the two natural runs into their exact local order.",
+        start: [1, 4, 2, 3],
+        target: [1, 2, 3, 4],
+        hint: "Take the smaller front value from [1, 4] or [2, 3] each time.",
       },
     ],
   },
@@ -799,7 +741,7 @@ function getBarClass(
   step: SortStep,
   algorithm: AlgorithmId,
 ) {
-  if (algorithm === "mean-partition" || algorithm === "range-guard-mean") {
+  if (algorithm === "range-guard-mean") {
     if (step.phase === "complete") return "bar--sorted";
     if (step.phase === "split") return "bar--partition";
     if (step.phase === "average") return "bar--mean";
@@ -977,8 +919,7 @@ export default function Home() {
   const [meanSlideOffsets, setMeanSlideOffsets] = useState<Record<number, number>>({});
   const [meanSlideStage, setMeanSlideStage] = useState<"idle" | "prepare" | "animate">("idle");
   const prefersReducedMotion = usePrefersReducedMotion();
-  const isMeanPartition = algorithm === "mean-partition" || algorithm === "range-guard-mean";
-  const isRangeGuardMean = algorithm === "range-guard-mean";
+  const usesRangeGroups = algorithm === "range-guard-mean";
   const isBogo = algorithm === "bogo";
   const bogoAttemptMaximum = getBogoAttemptMaximum(arraySize);
   const bogoSliderStep = 1;
@@ -991,8 +932,10 @@ export default function Home() {
   const isMedianPractice = currentPractice.kind === "median";
   const algorithmLabel = algorithmDetails.label;
   const stageLabel = algorithmDetails.stageLabel;
-  const totalStages = isMeanPartition
-    ? Math.max(1, Math.ceil(Math.log2(Math.max(originalValues.length, 1))))
+  const totalStages = usesRangeGroups
+    ? steps.length > 1
+      ? Math.max(1, steps.at(-1)?.pass ?? 1)
+      : Math.max(1, Math.ceil(Math.log2(Math.max(originalValues.length, 1))) + 1)
     : isBogo
       ? bogoAttemptLimit
       : algorithm === "merge"
@@ -1013,7 +956,6 @@ export default function Home() {
         const heap = analyzeHeapSort(benchmarkValues);
         const quick = analyzeQuickSort(benchmarkValues);
         const merge = analyzeMergeSort(benchmarkValues);
-        const meanPartition = analyzeMeanPartitionSort(benchmarkValues);
         const rangeGuardMean = analyzeRangeGuardMeanSort(benchmarkValues);
 
         return {
@@ -1026,7 +968,6 @@ export default function Home() {
             heap: getWorkEstimate(heap),
             quick: getWorkEstimate(quick),
             merge: getWorkEstimate(merge),
-            meanPartition: getWorkEstimate(meanPartition),
             rangeGuardMean: getWorkEstimate(rangeGuardMean),
           } satisfies BenchmarkWork,
         };
@@ -1042,7 +983,6 @@ export default function Home() {
     const heap = analyzeHeapSort(benchmarkValues);
     const quick = analyzeQuickSort(benchmarkValues);
     const merge = analyzeMergeSort(benchmarkValues);
-    const meanPartition = analyzeMeanPartitionSort(benchmarkValues);
     const rangeGuardMean = analyzeRangeGuardMeanSort(benchmarkValues);
 
     return {
@@ -1053,7 +993,6 @@ export default function Home() {
       heap: getWorkEstimate(heap),
       quick: getWorkEstimate(quick),
       merge: getWorkEstimate(merge),
-      meanPartition: getWorkEstimate(meanPartition),
       rangeGuardMean: getWorkEstimate(rangeGuardMean),
     } satisfies BenchmarkWork;
   }, [arraySize, benchmarkPattern]);
@@ -1138,7 +1077,7 @@ export default function Home() {
       return positions;
     };
 
-    if (!isMeanPartition || prefersReducedMotion) {
+    if (!usesRangeGroups || prefersReducedMotion) {
       meanBarPositionsRef.current = captureMeanBarPositions();
       setMeanSlideOffsets({});
       setMeanSlideStage("idle");
@@ -1148,9 +1087,7 @@ export default function Home() {
     const nextPositions = captureMeanBarPositions();
     const shouldAnimateMeanMove =
       currentStep.phase === "reorder" ||
-      (isRangeGuardMean &&
-        currentStep.phase === "split" &&
-        currentStep.message.includes("overlap guard"));
+      (currentStep.phase === "split" && currentStep.message.includes("Range guard"));
     if (!shouldAnimateMeanMove) {
       meanBarPositionsRef.current = nextPositions;
       return;
@@ -1190,7 +1127,7 @@ export default function Home() {
       if (settleFrame !== undefined) window.cancelAnimationFrame(settleFrame);
       if (releaseTimer !== undefined) window.clearTimeout(releaseTimer);
     };
-  }, [currentStep.message, currentStep.pass, currentStep.phase, isMeanPartition, isRangeGuardMean, prefersReducedMotion, visibleValues]);
+  }, [currentStep.message, currentStep.pass, currentStep.phase, usesRangeGroups, prefersReducedMotion, visibleValues]);
 
   useLayoutEffect(() => {
     const previousPositions = practiceBlockPositionsRef.current;
@@ -1239,11 +1176,9 @@ export default function Home() {
   const mergeFramesInCurrentPass = mergePassFrameCounts.get(currentStep.pass) ?? 1;
   const delay = prefersReducedMotion
     ? 18
-    : isMeanPartition
+    : usesRangeGroups
       ? currentStep.phase === "reorder" ||
-          (isRangeGuardMean &&
-            currentStep.phase === "split" &&
-            currentStep.message.includes("overlap guard"))
+          (currentStep.phase === "split" && currentStep.message.includes("Range guard"))
         ? meanSlideDuration + 120
         : meanStaticDelay
       : usesEvenMergePacing
@@ -1256,10 +1191,10 @@ export default function Home() {
         "--bar-transition-duration": String(Math.min(260, Math.max(90, delay * 0.75))) + "ms",
       } as CSSProperties)
     : undefined;
-  const meanTransitionStyle = isMeanPartition
+  const meanTransitionStyle = usesRangeGroups
     ? ({ "--mean-slide-duration": String(meanSlideDuration) + "ms" } as CSSProperties)
     : undefined;
-  const barTransitionStyle = isMeanPartition
+  const barTransitionStyle = usesRangeGroups
     ? ({
         ...(denseBarTransitionStyle ?? {}),
         "--mean-slide-duration": String(meanSlideDuration) + "ms",
@@ -1279,8 +1214,8 @@ export default function Home() {
     currentStep.phase === "limited"
       ? "Bogo Sort stopped after the shuffle safety limit. Try a new array or another algorithm."
       : runState === "complete"
-        ? isMeanPartition
-          ? "Sorting complete. " + currentStep.comparisons + " group means and " + currentStep.writes + " moved values."
+        ? usesRangeGroups
+          ? "Sorting complete. " + currentStep.comparisons + " tracked checks and " + currentStep.writes + " moved values."
           : "Sorting complete. " + currentStep.comparisons + " comparisons and " + currentStep.writes + " array writes."
       : runState === "paused"
         ? "Paused during " + stageLabel + " " + currentStep.pass + " of " + totalStages + "."
@@ -1842,8 +1777,6 @@ export default function Home() {
     const sequence =
       algorithm === "range-guard-mean"
         ? buildRangeGuardMeanSteps(originalValues)
-        : algorithm === "mean-partition"
-        ? buildMeanPartitionSteps(originalValues)
         : algorithm === "bubble"
           ? buildBubbleSteps(originalValues)
         : algorithm === "cocktail"
@@ -2025,8 +1958,7 @@ export default function Home() {
                     <option value="heap">Heap sort</option>
                     <option value="quick">Quick sort</option>
                     <option value="merge">Merge sort</option>
-                    <option value="mean-partition">Mean partition sort</option>
-                    <option value="range-guard-mean">Range-Guard Median sort</option>
+                    <option value="range-guard-mean">Range-Guard Adaptive sort</option>
                   </select>
                 </label>
 
@@ -2174,7 +2106,7 @@ export default function Home() {
 
             <div className="chart-stage" role="img" aria-label={"Array values: " + displayValues + ". " + currentStep.message}>
               <div className="chart-grid" aria-hidden="true" />
-              {isMeanPartition && currentStep.groups && (
+              {usesRangeGroups && currentStep.groups && (
                 <div
                   className={"mean-bands mean-bands--" + meanSlideStage}
                   style={meanTransitionStyle}
@@ -2209,7 +2141,7 @@ export default function Home() {
                   "bars " +
                   (isLargeArray ? "bars--dense " : "") +
                   (algorithm === "merge" ? "bars--merge " : "") +
-                  (isMeanPartition ? "bars--mean bars--mean-" + meanSlideStage + " " : "") +
+                  (usesRangeGroups ? "bars--mean bars--mean-" + meanSlideStage + " " : "") +
                   (shouldInterpolateDenseBars ? "bars--smooth" : "")
                 }
                 style={barTransitionStyle}
@@ -2218,7 +2150,7 @@ export default function Home() {
                 {visibleValues.map((value, index) => {
                   const isGap = index === currentStep.gapIndex;
                   const shownValue = isGap && currentStep.key !== null ? currentStep.key : value;
-                  const group = isMeanPartition
+                  const group = usesRangeGroups
                     ? currentStep.groups?.find(
                         (candidate) => index >= candidate.start && index < candidate.end,
                       )
@@ -2228,7 +2160,7 @@ export default function Home() {
                       (index === group.end - 1 ? "bar-slot--group-end" : "")
                     : "";
                   const height = (shownValue / largestValue) * 100;
-                  const meanSlideOffset = isMeanPartition ? meanSlideOffsets[value] : undefined;
+                  const meanSlideOffset = usesRangeGroups ? meanSlideOffsets[value] : undefined;
                   const meanSlotStyle =
                     meanSlideOffset === undefined
                       ? undefined
@@ -2236,8 +2168,8 @@ export default function Home() {
                   return (
                     <div
                       className={"bar-slot " + groupClass}
-                      key={isMeanPartition ? "mean-" + String(value) : String(index) + "-" + String(originalValues.length)}
-                      ref={isMeanPartition ? (element) => setMeanBarRef(value, element) : undefined}
+                      key={usesRangeGroups ? "mean-" + String(value) : String(index) + "-" + String(originalValues.length)}
+                      ref={usesRangeGroups ? (element) => setMeanBarRef(value, element) : undefined}
                       style={meanSlotStyle}
                     >
                       <div
@@ -2260,10 +2192,10 @@ export default function Home() {
 
             <div className="workbench__footer">
               <div className="legend" aria-label="Color legend">
-                {isMeanPartition ? (
+                {usesRangeGroups ? (
                   <>
                     <span><i className="legend__swatch legend__swatch--idle" />current row</span>
-                    <span><i className="legend__swatch legend__swatch--partition" />{isRangeGuardMean ? "group / guard split" : "split groups"}</span>
+                    <span><i className="legend__swatch legend__swatch--partition" />group / range scan</span>
                     <span><i className="legend__swatch legend__swatch--mean" />mean measured</span>
                     <span><i className="legend__swatch legend__swatch--rank" />groups ranked</span>
                   </>
@@ -2336,14 +2268,14 @@ export default function Home() {
               <p>{algorithmDetails.stageDescription}</p>
             </div>
             <div className="stat-card">
-              <span>{isMeanPartition ? "MEANS READ" : isBogo ? "ORDER CHECKS" : "COMPARISONS"}</span>
+              <span>{usesRangeGroups ? "WORK CHECKS" : isBogo ? "ORDER CHECKS" : "COMPARISONS"}</span>
               <strong>{currentStep.comparisons}</strong>
-              <p>{isMeanPartition ? "group averages" : isBogo ? "values checked" : "values checked"}</p>
+              <p>{usesRangeGroups ? "means + ranges" : isBogo ? "values checked" : "values checked"}</p>
             </div>
             <div className="stat-card">
-              <span>{isMeanPartition ? "VALUES MOVED" : isBogo ? "SHUFFLE WRITES" : "ARRAY WRITES"}</span>
+              <span>{usesRangeGroups ? "VALUES MOVED" : isBogo ? "SHUFFLE WRITES" : "ARRAY WRITES"}</span>
               <strong>{currentStep.writes}</strong>
-              <p>{isMeanPartition ? "re-ranked groups" : isBogo ? "random swaps" : "moves + writes"}</p>
+              <p>{usesRangeGroups ? "local finish moves" : isBogo ? "random swaps" : "moves + writes"}</p>
             </div>
             <div className="stat-card stat-card--progress">
               <span>PROGRESS</span>

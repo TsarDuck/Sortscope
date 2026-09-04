@@ -7,7 +7,6 @@ export type AlgorithmId =
   | "quick"
   | "merge"
   | "bogo"
-  | "mean-partition"
   | "range-guard-mean";
 
 export type StepPhase =
@@ -80,13 +79,11 @@ type MeanChunk = {
   values: number[];
   sum: number;
   originalIndex: number;
-  min?: number;
-  max?: number;
 };
 
 export const BOGO_MAX_ATTEMPTS = 1_000_000;
 const COMPACT_FRAME_THRESHOLD = 24;
-const MAX_RANGE_GUARD_PASSES = 2;
+const RANGE_GUARD_MIN_SIZE = 32;
 
 export function createInitialStep(
   values: number[],
@@ -101,8 +98,7 @@ export function createInitialStep(
     quick: "Choose a pivot, partition around it, then repeat on each side.",
     merge: "Split the row into runs, then merge ordered neighbors.",
     bogo: "Shuffle the whole row until chance happens to order it.",
-    "mean-partition": "The row will be repeatedly split into mean-ranked groups.",
-    "range-guard-mean": "The row will rank mean groups, then use a short median guard for small overlaps.",
+    "range-guard-mean": "The row will use one broad mean rank, then exactly resolve only the crossing ranges.",
   };
 
   return {
@@ -157,18 +153,11 @@ function createMeanChunk(
   values: number[],
   id: number,
   originalIndex: number,
-  includeBounds = false,
 ): MeanChunk {
   let sum = 0;
-  let min = Infinity;
-  let max = -Infinity;
 
   for (const value of values) {
     sum += value;
-    if (includeBounds) {
-      min = Math.min(min, value);
-      max = Math.max(max, value);
-    }
   }
 
   return {
@@ -176,7 +165,6 @@ function createMeanChunk(
     values,
     sum,
     originalIndex,
-    ...(includeBounds ? { min, max } : {}),
   };
 }
 
@@ -238,192 +226,264 @@ function rankMeanChunks(chunks: MeanChunk[]) {
   return { chunks: ranked, comparisons };
 }
 
-function rankMeanChunksLegacy(chunks: MeanChunk[]) {
-  const ranked = [...chunks];
+type RangeComponent = {
+  chunks: MeanChunk[];
+  values: number[];
+};
+
+type NaturalSortResult = {
+  values: number[];
+  comparisons: number;
+  writes: number;
+  frames: number[][];
+};
+
+type RangeFinishResult = {
+  values: number[];
+  inputChunks: MeanChunk[];
+  chunks: MeanChunk[];
+  comparisons: number;
+  writes: number;
+  frames: number[][];
+  componentCount: number;
+};
+
+function getMaximum(values: number[]) {
+  let maximum = values[0] ?? -Infinity;
   let comparisons = 0;
 
-  for (let index = 1; index < ranked.length; index += 1) {
-    const candidate = ranked[index];
-    let cursor = index - 1;
-
-    while (cursor >= 0) {
-      comparisons += 1;
-      if (compareMeans(ranked[cursor], candidate) <= 0) break;
-      ranked[cursor + 1] = ranked[cursor];
-      cursor -= 1;
-    }
-
-    ranked[cursor + 1] = candidate;
-  }
-
-  return { chunks: ranked, comparisons };
-}
-
-function getRefinementBlockSize(length: number) {
-  return Math.min(16, Math.max(2, Math.ceil(length / 4)));
-}
-
-function hasRefinementEligibleGroups(chunks: MeanChunk[], blockSize: number) {
-  return chunks.length > 0 && chunks.every((chunk) => chunk.values.length <= blockSize);
-}
-
-function shouldUseRangeGuardPass(
-  guardPassesUsed: number,
-  chunks: MeanChunk[],
-  overlappingChunkIds: Set<number>,
-) {
-  if (overlappingChunkIds.size === 0) return false;
-  if (guardPassesUsed === 0) return true;
-
-  // A follow-up pass is worthwhile only when the remaining crossing is local.
-  // If most groups still overlap, return immediately to the inexpensive mean
-  // rounds rather than turning the guard into a late-stage global algorithm.
-  return overlappingChunkIds.size <= Math.max(2, Math.ceil(chunks.length / 4));
-}
-
-function getOverlappingChunkIds(chunks: MeanChunk[]) {
-  if (chunks.length < 2) return new Set<number>();
-
-  const prefixMaximums: number[] = [];
-  const suffixMinimums: number[] = Array.from({ length: chunks.length });
-  let runningMaximum = -Infinity;
-  let runningMinimum = Infinity;
-
-  for (let index = 0; index < chunks.length; index += 1) {
-    runningMaximum = Math.max(runningMaximum, chunks[index].max ?? -Infinity);
-    prefixMaximums[index] = runningMaximum;
-  }
-
-  for (let index = chunks.length - 1; index >= 0; index -= 1) {
-    runningMinimum = Math.min(runningMinimum, chunks[index].min ?? Infinity);
-    suffixMinimums[index] = runningMinimum;
-  }
-
-  const overlapping = new Set<number>();
-  let componentStart = 0;
-
-  for (let index = 0; index < chunks.length - 1; index += 1) {
-    const isSafeBoundary = prefixMaximums[index] <= suffixMinimums[index + 1];
-    if (!isSafeBoundary) continue;
-
-    if (index > componentStart) {
-      for (let member = componentStart; member <= index; member += 1) {
-        overlapping.add(chunks[member].id);
-      }
-    }
-    componentStart = index + 1;
-  }
-
-  if (componentStart < chunks.length - 1) {
-    for (let member = componentStart; member < chunks.length; member += 1) {
-      overlapping.add(chunks[member].id);
-    }
-  }
-
-  return overlapping;
-}
-
-function splitGuardedMedianChunk(chunk: MeanChunk) {
-  if (chunk.values.length <= 1) {
-    return { childValues: [chunk.values], operations: 0 };
-  }
-
-  // The guard only works on small blocks. Selecting an exact median produces
-  // near-even children, so one cleanup pass removes more outlier mixing than a
-  // potentially skewed mean pivot and leaves the following cheap mean rounds
-  // with less work to do.
-  const ranked = [...chunk.values];
-  let comparisons = 0;
-  ranked.sort((left, right) => {
+  for (let index = 1; index < values.length; index += 1) {
     comparisons += 1;
-    return left - right;
-  });
-  const median = ranked[Math.floor((ranked.length - 1) / 2)];
-  const lower: number[] = [];
-  const upper: number[] = [];
-
-  for (const value of chunk.values) {
-    if (value <= median) {
-      lower.push(value);
-    } else {
-      upper.push(value);
-    }
+    if (values[index] > maximum) maximum = values[index];
   }
 
-  if (lower.length > 0 && upper.length > 0) {
+  return { value: maximum, comparisons };
+}
+
+function getMinimum(values: number[]) {
+  let minimum = values[0] ?? Infinity;
+  let comparisons = 0;
+
+  for (let index = 1; index < values.length; index += 1) {
+    comparisons += 1;
+    if (values[index] < minimum) minimum = values[index];
+  }
+
+  return { value: minimum, comparisons };
+}
+
+/**
+ * Finds certified value regions after mean ranking. A cut is safe only when
+ * every value to its left is no greater than every value to its right; using
+ * prefix maxima and suffix minima catches non-adjacent crossings too.
+ */
+function getRangeComponents(chunks: MeanChunk[]) {
+  if (chunks.length === 0) return { components: [] as RangeComponent[], comparisons: 0 };
+  if (chunks.length === 1) {
     return {
-      childValues: [lower, upper],
-      // comparator work plus one pivot comparison and one output write per value
-      operations: comparisons + chunk.values.length * 2,
+      components: [{ chunks: [...chunks], values: [...chunks[0].values] }],
+      comparisons: 0,
     };
   }
 
-  return {
-    childValues: partitionBalanced(chunk.values, 2),
-    operations: comparisons + chunk.values.length,
-  };
-}
+  const prefixMaximums: number[] = [];
+  const suffixMinimums: number[] = Array.from({ length: chunks.length });
+  let comparisons = 0;
+  let runningMaximum = -Infinity;
+  let runningMinimum = Infinity;
 
-function splitForNextMeanRound(
-  currentChunks: MeanChunk[],
-  targetGroupCount: number,
-  useRefinement: boolean,
-  overlappingChunkIds: Set<number>,
-  refinementBlockSize: number,
-) {
-  const additionalGroups = targetGroupCount - currentChunks.length;
-  const eligibleChunks = currentChunks
-    .map((chunk, index) => ({ chunk, index }))
-    .filter(({ chunk }) => chunk.values.length > 1)
-    .sort((left, right) => {
-      const leftIsOverlapping = overlappingChunkIds.has(left.chunk.id) ? 1 : 0;
-      const rightIsOverlapping = overlappingChunkIds.has(right.chunk.id) ? 1 : 0;
-      if (leftIsOverlapping !== rightIsOverlapping) {
-        return rightIsOverlapping - leftIsOverlapping;
-      }
-      return right.chunk.values.length - left.chunk.values.length || left.index - right.index;
+  // The final chunk can never be on the left side of a boundary, so avoid an
+  // unnecessary maximum scan. Likewise, the first chunk is never on the
+  // right side. With two groups this is just max(left) versus min(right).
+  for (let index = 0; index < chunks.length - 1; index += 1) {
+    const maximum = getMaximum(chunks[index].values);
+    comparisons += maximum.comparisons;
+    if (index > 0) comparisons += 1;
+    if (maximum.value > runningMaximum) runningMaximum = maximum.value;
+    prefixMaximums[index] = runningMaximum;
+  }
+
+  for (let index = chunks.length - 1; index > 0; index -= 1) {
+    const minimum = getMinimum(chunks[index].values);
+    comparisons += minimum.comparisons;
+    if (index < chunks.length - 1) comparisons += 1;
+    if (minimum.value < runningMinimum) runningMinimum = minimum.value;
+    suffixMinimums[index] = runningMinimum;
+  }
+
+  const components: RangeComponent[] = [];
+  let componentStart = 0;
+
+  for (let index = 0; index < chunks.length - 1; index += 1) {
+    comparisons += 1;
+    const isSafeBoundary = prefixMaximums[index] <= suffixMinimums[index + 1];
+    if (!isSafeBoundary) continue;
+
+    const componentChunks = chunks.slice(componentStart, index + 1);
+    components.push({
+      chunks: componentChunks,
+      values: componentChunks.flatMap((chunk) => chunk.values),
     });
-  const selectedIndexes = new Set(
-    eligibleChunks.slice(0, Math.max(0, additionalGroups)).map(({ index }) => index),
-  );
-  let refinementOperations = 0;
-  let refinementSplits = 0;
-  let childValues = currentChunks.flatMap((chunk, index) => {
-    const shouldRefine =
-      useRefinement &&
-      overlappingChunkIds.has(chunk.id) &&
-      chunk.values.length <= refinementBlockSize;
-    if (!selectedIndexes.has(index)) return [[...chunk.values]];
-    if (!shouldRefine) return partitionBalanced(chunk.values, 2);
+    componentStart = index + 1;
+  }
 
-    const split = splitGuardedMedianChunk(chunk);
-    refinementSplits += 1;
-    refinementOperations += split.operations;
-    return split.childValues;
+  const componentChunks = chunks.slice(componentStart);
+  components.push({
+    chunks: componentChunks,
+    values: componentChunks.flatMap((chunk) => chunk.values),
   });
 
-  // Strict guard pivots can create singleton children early. Split the largest
-  // remaining group as needed so the 2, 4, 8… round schedule still advances.
-  while (childValues.length < targetGroupCount) {
-    let largestIndex = -1;
-    for (let index = 0; index < childValues.length; index += 1) {
-      if (
-        childValues[index].length > 1 &&
-        (largestIndex === -1 || childValues[index].length > childValues[largestIndex].length)
-      ) {
-        largestIndex = index;
+  return { components, comparisons };
+}
+
+function sortNaturalRuns(source: number[]): NaturalSortResult {
+  if (source.length <= 1) {
+    return { values: [...source], comparisons: 0, writes: 0, frames: [] };
+  }
+
+  let values = [...source];
+  let comparisons = 0;
+  let writes = 0;
+  const frames: number[][] = [];
+  const runs: Array<{ start: number; end: number }> = [];
+  let start = 0;
+  let normalizedDescendingRun = false;
+
+  while (start < values.length) {
+    let end = start + 1;
+
+    if (end < values.length) {
+      comparisons += 1;
+      const descending = values[end - 1] > values[end];
+      end += 1;
+
+      while (end < values.length) {
+        comparisons += 1;
+        const continues = descending ? values[end - 1] > values[end] : values[end - 1] <= values[end];
+        if (!continues) break;
+        end += 1;
+      }
+
+      if (descending) {
+        let left = start;
+        let right = end - 1;
+        while (left < right) {
+          const temporary = values[left];
+          values[left] = values[right];
+          values[right] = temporary;
+          writes += 2;
+          left += 1;
+          right -= 1;
+        }
+        normalizedDescendingRun = true;
       }
     }
 
-    if (largestIndex === -1) break;
-    childValues = [
-      ...childValues.slice(0, largestIndex),
-      ...partitionBalanced(childValues[largestIndex], 2),
-      ...childValues.slice(largestIndex + 1),
-    ];
+    runs.push({ start, end });
+    start = end;
   }
 
-  return { childValues, refinementSplits, refinementOperations };
+  if (normalizedDescendingRun) frames.push([...values]);
+
+  let workingRuns = runs;
+  while (workingRuns.length > 1) {
+    const nextValues = Array.from({ length: values.length }, () => 0);
+    const nextRuns: Array<{ start: number; end: number }> = [];
+
+    for (let index = 0; index < workingRuns.length; index += 2) {
+      const leftRun = workingRuns[index];
+      const rightRun = workingRuns[index + 1];
+
+      if (!rightRun) {
+        for (let cursor = leftRun.start; cursor < leftRun.end; cursor += 1) {
+          nextValues[cursor] = values[cursor];
+          writes += 1;
+        }
+        nextRuns.push(leftRun);
+        continue;
+      }
+
+      let left = leftRun.start;
+      let right = rightRun.start;
+      let destination = leftRun.start;
+
+      while (left < leftRun.end && right < rightRun.end) {
+        comparisons += 1;
+        if (values[left] <= values[right]) {
+          nextValues[destination] = values[left];
+          left += 1;
+        } else {
+          nextValues[destination] = values[right];
+          right += 1;
+        }
+        destination += 1;
+        writes += 1;
+      }
+
+      while (left < leftRun.end) {
+        nextValues[destination] = values[left];
+        left += 1;
+        destination += 1;
+        writes += 1;
+      }
+
+      while (right < rightRun.end) {
+        nextValues[destination] = values[right];
+        right += 1;
+        destination += 1;
+        writes += 1;
+      }
+
+      nextRuns.push({ start: leftRun.start, end: rightRun.end });
+    }
+
+    values = nextValues;
+    workingRuns = nextRuns;
+    frames.push([...values]);
+  }
+
+  return { values, comparisons, writes, frames };
+}
+
+function finishRangeComponents(chunks: MeanChunk[]): RangeFinishResult {
+  const range = getRangeComponents(chunks);
+  const sortedComponents = range.components.map((component) => sortNaturalRuns(component.values));
+  const frameCount = sortedComponents.reduce(
+    (largest, component) => Math.max(largest, component.frames.length),
+    0,
+  );
+  const frames: number[][] = [];
+
+  for (let frameIndex = 0; frameIndex < frameCount; frameIndex += 1) {
+    frames.push(
+      sortedComponents.flatMap((component) => {
+        if (component.frames.length === 0) return component.values;
+        return component.frames[Math.min(frameIndex, component.frames.length - 1)];
+      }),
+    );
+  }
+
+  const finishedChunks = sortedComponents.map((component, index) =>
+    createMeanChunk(component.values, index, index),
+  );
+  const inputChunks = range.components.map((component, index) =>
+    createMeanChunk(component.values, index, index),
+  );
+
+  return {
+    values:
+      finishedChunks.length === 1
+        ? finishedChunks[0].values
+        : finishedChunks.flatMap((chunk) => chunk.values),
+    inputChunks,
+    chunks: finishedChunks,
+    comparisons:
+      range.comparisons +
+      sortedComponents.reduce((total, component) => total + component.comparisons, 0),
+    writes: sortedComponents.reduce((total, component) => total + component.writes, 0),
+    frames,
+    componentCount: range.components.length,
+  };
 }
 
 export function buildInsertionSteps(
@@ -533,13 +593,12 @@ export function buildInsertionSteps(
   return steps;
 }
 
-export function buildMeanPartitionSteps(source: number[]): SortStep[] {
-  const steps = [createInitialStep(source, "mean-partition")];
+export function buildRangeGuardMeanSteps(source: number[]): SortStep[] {
+  const steps = [createInitialStep(source, "range-guard-mean")];
   const values = [...source];
   let working = [...source];
-  let groupCount = 2;
-  let round = 0;
-  let meansCalculated = 0;
+  let pass = 0;
+  let trackedComparisons = 0;
   let valuesReordered = 0;
 
   if (values.length <= 1) {
@@ -560,15 +619,17 @@ export function buildMeanPartitionSteps(source: number[]): SortStep[] {
     return steps;
   }
 
-  while (true) {
-    round += 1;
-    const chunks = buildMeanChunks(working, groupCount);
-    const groups = describeMeanGroups(chunks);
-    meansCalculated += chunks.length;
+  let finish: RangeFinishResult;
+
+  if (values.length >= RANGE_GUARD_MIN_SIZE) {
+    pass = 1;
+    const broadChunks = buildMeanChunks(working, 2);
+    const broadGroups = describeMeanGroups(broadChunks);
+    trackedComparisons += broadChunks.length;
 
     steps.push({
       values: [...working],
-      pass: round,
+      pass,
       phase: "split",
       key: null,
       comparing: null,
@@ -576,15 +637,15 @@ export function buildMeanPartitionSteps(source: number[]): SortStep[] {
       inserting: null,
       gapIndex: null,
       sortedCount: 0,
-      comparisons: meansCalculated,
+      comparisons: trackedComparisons,
       writes: valuesReordered,
-      message: "Round " + round + ": split the row into " + chunks.length + " balanced groups.",
-      groups,
+      message: "Round 1: split the row into two broad mean groups.",
+      groups: broadGroups,
     });
 
     steps.push({
       values: [...working],
-      pass: round,
+      pass,
       phase: "average",
       key: null,
       comparing: null,
@@ -592,22 +653,22 @@ export function buildMeanPartitionSteps(source: number[]): SortStep[] {
       inserting: null,
       gapIndex: null,
       sortedCount: 0,
-      comparisons: meansCalculated,
+      comparisons: trackedComparisons,
       writes: valuesReordered,
       message:
-        chunks.length <= 8
-          ? "Group means: " + groups.map((group) => "μ " + formatMean(group.mean)).join(", ") + "."
-          : "Measure the averages for all " + chunks.length + " groups.",
-      groups,
+        "Group means: " + broadGroups.map((group) => "μ " + formatMean(group.mean)).join(", ") + ".",
+      groups: broadGroups,
     });
 
-    const rankedChunks = rankMeanChunksLegacy(chunks).chunks;
-    valuesReordered += working.length;
+    const ranking = rankMeanChunks(broadChunks);
+    trackedComparisons += ranking.comparisons;
+    const rankedChunks = ranking.chunks;
+    valuesReordered += values.length;
     working = rankedChunks.flatMap((chunk) => chunk.values);
 
     steps.push({
       values: [...working],
-      pass: round,
+      pass,
       phase: "reorder",
       key: null,
       comparing: null,
@@ -615,16 +676,16 @@ export function buildMeanPartitionSteps(source: number[]): SortStep[] {
       inserting: null,
       gapIndex: null,
       sortedCount: 0,
-      comparisons: meansCalculated,
+      comparisons: trackedComparisons,
       writes: valuesReordered,
-      message: "Rank the groups by mean: smallest on the left, largest on the right.",
+      message: "Rank the two broad groups by mean before inspecting their value ranges.",
       groups: describeMeanGroups(rankedChunks),
     });
 
     if (isNonDecreasing(working)) {
       steps.push({
         values: [...working],
-        pass: round,
+        pass,
         phase: "complete",
         key: null,
         comparing: null,
@@ -632,152 +693,72 @@ export function buildMeanPartitionSteps(source: number[]): SortStep[] {
         inserting: null,
         gapIndex: null,
         sortedCount: working.length,
-        comparisons: meansCalculated,
+        comparisons: trackedComparisons,
         writes: valuesReordered,
-        message:
-          groupCount >= values.length
-            ? "Singleton groups make each mean equal its value. Sorted."
-            : "The row is already ordered, so no further splitting is needed.",
+        message: "The broad mean rank already placed every value in order.",
       });
       return steps;
     }
 
-    if (groupCount >= values.length) break;
-    groupCount = Math.min(values.length, groupCount * 2);
+    finish = finishRangeComponents(rankedChunks);
+  } else {
+    if (isNonDecreasing(working)) {
+      steps.push({
+        values: [...working],
+        pass: 0,
+        phase: "complete",
+        key: null,
+        comparing: null,
+        shifting: null,
+        inserting: null,
+        gapIndex: null,
+        sortedCount: working.length,
+        comparisons: 0,
+        writes: 0,
+        message: "The small row is already ordered, so no scouting pass is needed.",
+      });
+      return steps;
+    }
+
+    pass = 1;
+    finish = finishRangeComponents([createMeanChunk(working, 0, 0)]);
   }
 
-  return steps;
-}
+  pass += 1;
+  const finishGroups = describeMeanGroups(finish.inputChunks);
+  trackedComparisons += finish.comparisons;
 
-export function buildRangeGuardMeanSteps(source: number[]): SortStep[] {
-  const steps = [createInitialStep(source, "range-guard-mean")];
-  const values = [...source];
-  const refinementBlockSize = getRefinementBlockSize(values.length);
-  let chunks = [createMeanChunk([...source], 0, 0)];
-  let round = 0;
-  let meansCalculated = 0;
-  let valuesReordered = 0;
-  let guardPassesUsed = 0;
-  let rangeGuardClosed = false;
+  steps.push({
+    values: [...working],
+    pass,
+    phase: "split",
+    key: null,
+    comparing: null,
+    shifting: null,
+    inserting: null,
+    gapIndex: null,
+    sortedCount: 0,
+    comparisons: trackedComparisons,
+    writes: valuesReordered,
+    message:
+      values.length < RANGE_GUARD_MIN_SIZE
+        ? "Small row: skip mean scouting and finish its natural runs directly."
+        : "Range guard finds " +
+          finish.componentCount +
+          " certified " +
+          (finish.componentCount === 1 ? "value region" : "independent value regions") +
+          ". Only those regions need exact local work.",
+    groups: finishGroups,
+  });
 
-  if (values.length <= 1) {
+  valuesReordered += finish.writes;
+  if (finish.componentCount > 1) valuesReordered += values.length;
+  const finalGroups = describeMeanGroups(finish.chunks);
+
+  finish.frames.forEach((frame, frameIndex) => {
     steps.push({
-      values: [...values],
-      pass: 0,
-      phase: "complete",
-      key: null,
-      comparing: null,
-      shifting: null,
-      inserting: null,
-      gapIndex: null,
-      sortedCount: values.length,
-      comparisons: 0,
-      writes: 0,
-      message: "No grouping is needed; the row is already ordered.",
-    });
-    return steps;
-  }
-
-  while (true) {
-    round += 1;
-    const targetGroupCount = Math.min(values.length, chunks.length * 2);
-    const canUseRangeGuard =
-      !rangeGuardClosed &&
-      guardPassesUsed < MAX_RANGE_GUARD_PASSES &&
-      hasRefinementEligibleGroups(chunks, refinementBlockSize);
-    const overlappingChunkIds = canUseRangeGuard
-      ? getOverlappingChunkIds(chunks)
-      : new Set<number>();
-    const useRefinement =
-      canUseRangeGuard &&
-      shouldUseRangeGuardPass(guardPassesUsed, chunks, overlappingChunkIds);
-    if (canUseRangeGuard && !useRefinement) rangeGuardClosed = true;
-    const split = splitForNextMeanRound(
-      chunks,
-      targetGroupCount,
-      useRefinement,
-      overlappingChunkIds,
-      refinementBlockSize,
-    );
-    if (useRefinement) guardPassesUsed += 1;
-    const captureBounds =
-      !rangeGuardClosed &&
-      guardPassesUsed < MAX_RANGE_GUARD_PASSES &&
-      split.childValues.every((group) => group.length <= refinementBlockSize);
-    const nextChunks = split.childValues.map((group, index) =>
-      createMeanChunk(group, index, index, captureBounds),
-    );
-    const groups = describeMeanGroups(nextChunks);
-    meansCalculated += nextChunks.length;
-    const splitMessage =
-      split.refinementSplits > 0
-        ? "Round " +
-          round +
-          ": overlap guard pass " +
-          guardPassesUsed +
-          " of " +
-          MAX_RANGE_GUARD_PASSES +
-          " splits " +
-          split.refinementSplits +
-          " small " +
-          (split.refinementSplits === 1 ? "group" : "groups") +
-          " at their medians; " +
-          (guardPassesUsed === MAX_RANGE_GUARD_PASSES
-            ? "later rounds return to mean ranking."
-            : "a second pass runs only for a small residual overlap.")
-        : "Round " +
-          round +
-          ": split the row into " +
-          nextChunks.length +
-          " balanced groups.";
-
-    steps.push({
-      values: nextChunks.flatMap((chunk) => chunk.values),
-      pass: round,
-      phase: "split",
-      key: null,
-      comparing: null,
-      shifting: null,
-      inserting: null,
-      gapIndex: null,
-      sortedCount: 0,
-      comparisons: meansCalculated,
-      writes: valuesReordered,
-      message: splitMessage,
-      groups,
-    });
-
-    const meanMessage =
-      nextChunks.length <= 8
-        ? "Group means: " +
-          groups.map((group) => "μ " + formatMean(group.mean)).join(", ") +
-          "."
-        : "Measure the averages for all " + nextChunks.length + " groups.";
-
-    steps.push({
-      values: nextChunks.flatMap((chunk) => chunk.values),
-      pass: round,
-      phase: "average",
-      key: null,
-      comparing: null,
-      shifting: null,
-      inserting: null,
-      gapIndex: null,
-      sortedCount: 0,
-      comparisons: meansCalculated,
-      writes: valuesReordered,
-      message: meanMessage,
-      groups,
-    });
-
-    const ranking = rankMeanChunks(nextChunks);
-    const rankedChunks = ranking.chunks;
-    valuesReordered += rankedChunks.reduce((total, chunk) => total + chunk.values.length, 0);
-    const working = rankedChunks.flatMap((chunk) => chunk.values);
-
-    steps.push({
-      values: [...working],
-      pass: round,
+      values: [...frame],
+      pass: pass + frameIndex,
       phase: "reorder",
       key: null,
       comparing: null,
@@ -785,37 +766,35 @@ export function buildRangeGuardMeanSteps(source: number[]): SortStep[] {
       inserting: null,
       gapIndex: null,
       sortedCount: 0,
-      comparisons: meansCalculated,
+      comparisons: trackedComparisons,
       writes: valuesReordered,
       message:
-        "Rank the groups by mean: smallest on the left, largest on the right.",
-      groups: describeMeanGroups(rankedChunks),
+        "Adaptive local finish " +
+        (frameIndex + 1) +
+        " of " +
+        finish.frames.length +
+        ": merge only the natural runs inside each guarded region.",
+      groups: finalGroups,
     });
+  });
 
-    if (isNonDecreasing(working)) {
-      steps.push({
-        values: [...working],
-        pass: round,
-        phase: "complete",
-        key: null,
-        comparing: null,
-        shifting: null,
-        inserting: null,
-        gapIndex: null,
-        sortedCount: working.length,
-        comparisons: meansCalculated,
-        writes: valuesReordered,
-        message:
-          rankedChunks.length >= values.length
-            ? "Singleton groups make each mean equal its value. Sorted."
-            : "The row is already ordered, so no further splitting is needed.",
-      });
-      return steps;
-    }
-
-    if (rankedChunks.length >= values.length) break;
-    chunks = rankedChunks;
-  }
+  const finalPass = pass + Math.max(0, finish.frames.length - 1);
+  steps.push({
+    values: [...finish.values],
+    pass: finalPass,
+    phase: "complete",
+    key: null,
+    comparing: null,
+    shifting: null,
+    inserting: null,
+    gapIndex: null,
+    sortedCount: finish.values.length,
+    comparisons: trackedComparisons,
+    writes: valuesReordered,
+    message:
+      "Certified range boundaries let the independently finished regions join into one sorted row.",
+    groups: finalGroups,
+  });
 
   return steps;
 }
@@ -2159,66 +2138,15 @@ export function analyzeMergeSort(source: number[]): SortMetrics {
   };
 }
 
-export function analyzeMeanPartitionSort(source: number[]): SortMetrics {
-  const sourceValues = [...source];
-  let working = [...sourceValues];
-  let groupCount = 2;
-  let rounds = 0;
-  let meansCalculated = 0;
-  let meanComputationOperations = 0;
-  let rankComparisons = 0;
-  let outputWrites = 0;
-
-  if (working.length <= 1) {
-    return {
-      comparisons: 0,
-      rankComparisons: 0,
-      writes: 0,
-      rounds: 0,
-      finalValues: working,
-      meanComputationOperations: 0,
-      refinementOperations: 0,
-    };
-  }
-
-  while (true) {
-    rounds += 1;
-    const chunks = buildMeanChunks(working, groupCount);
-    meansCalculated += chunks.length;
-    meanComputationOperations += working.length + chunks.length;
-    const ranking = rankMeanChunksLegacy(chunks);
-    rankComparisons += ranking.comparisons;
-    outputWrites += working.length;
-    working = ranking.chunks.flatMap((chunk) => chunk.values);
-
-    if (isNonDecreasing(working) || groupCount >= sourceValues.length) {
-      return {
-        comparisons: meansCalculated,
-        rankComparisons,
-        writes: outputWrites,
-        rounds,
-        finalValues: working,
-        meanComputationOperations,
-        refinementOperations: 0,
-      };
-    }
-
-    groupCount = Math.min(sourceValues.length, groupCount * 2);
-  }
-}
-
 export function analyzeRangeGuardMeanSort(source: number[]): SortMetrics {
   const sourceValues = [...source];
-  const refinementBlockSize = getRefinementBlockSize(sourceValues.length);
-  let chunks = [createMeanChunk([...sourceValues], 0, 0)];
+  let working = [...sourceValues];
   let rounds = 0;
   let meansCalculated = 0;
   let meanComputationOperations = 0;
   let refinementOperations = 0;
   let rankComparisons = 0;
   let outputWrites = 0;
-  let guardPassesUsed = 0;
-  let rangeGuardClosed = false;
 
   if (sourceValues.length <= 1) {
     return {
@@ -2232,56 +2160,17 @@ export function analyzeRangeGuardMeanSort(source: number[]): SortMetrics {
     };
   }
 
-  while (true) {
+  if (sourceValues.length >= RANGE_GUARD_MIN_SIZE) {
     rounds += 1;
-    const targetGroupCount = Math.min(sourceValues.length, chunks.length * 2);
-    const canUseRangeGuard =
-      !rangeGuardClosed &&
-      guardPassesUsed < MAX_RANGE_GUARD_PASSES &&
-      hasRefinementEligibleGroups(chunks, refinementBlockSize);
-    const overlappingChunkIds = canUseRangeGuard
-      ? getOverlappingChunkIds(chunks)
-      : new Set<number>();
-    const useRefinement =
-      canUseRangeGuard &&
-      shouldUseRangeGuardPass(guardPassesUsed, chunks, overlappingChunkIds);
-    if (canUseRangeGuard && !useRefinement) rangeGuardClosed = true;
-    const split = splitForNextMeanRound(
-      chunks,
-      targetGroupCount,
-      useRefinement,
-      overlappingChunkIds,
-      refinementBlockSize,
-    );
-    if (useRefinement) guardPassesUsed += 1;
-    const captureBounds =
-      !rangeGuardClosed &&
-      guardPassesUsed < MAX_RANGE_GUARD_PASSES &&
-      split.childValues.every((group) => group.length <= refinementBlockSize);
-    const nextChunks = split.childValues.map((group, index) =>
-      createMeanChunk(group, index, index, captureBounds),
-    );
-    meansCalculated += nextChunks.length;
-    // Each round scans every value for its group sum and divides once per group.
-    meanComputationOperations += sourceValues.length + nextChunks.length;
-    if (captureBounds) {
-      // Min/max values are gathered during the same group scan once groups are small.
-      refinementOperations += sourceValues.length * 2;
-    }
-    if (canUseRangeGuard) {
-      // Prefix/suffix range checks find only the blocks that truly overlap.
-      refinementOperations += chunks.length * 3;
-    }
-    refinementOperations += split.refinementOperations;
-    const ranking = rankMeanChunks(nextChunks);
+    const broadChunks = buildMeanChunks(working, 2);
+    meansCalculated += broadChunks.length;
+    meanComputationOperations += sourceValues.length + broadChunks.length;
+    const ranking = rankMeanChunks(broadChunks);
     rankComparisons += ranking.comparisons;
-    const rankedChunks = ranking.chunks;
-
-    // Each ranking materializes one newly ordered row of values.
     outputWrites += sourceValues.length;
-    const working = rankedChunks.flatMap((chunk) => chunk.values);
+    working = ranking.chunks.flatMap((chunk) => chunk.values);
 
-    if (isNonDecreasing(working) || rankedChunks.length >= sourceValues.length) {
+    if (isNonDecreasing(working)) {
       return {
         comparisons: meansCalculated,
         rankComparisons,
@@ -2293,6 +2182,45 @@ export function analyzeRangeGuardMeanSort(source: number[]): SortMetrics {
       };
     }
 
-    chunks = rankedChunks;
+    const finish = finishRangeComponents(ranking.chunks);
+    refinementOperations += finish.comparisons;
+    outputWrites += finish.writes;
+    if (finish.componentCount > 1) outputWrites += sourceValues.length;
+
+    return {
+      comparisons: meansCalculated,
+      rankComparisons,
+      writes: outputWrites,
+      rounds: rounds + Math.max(1, finish.frames.length),
+      finalValues: finish.values,
+      meanComputationOperations,
+      refinementOperations,
+    };
   }
+
+  if (isNonDecreasing(working)) {
+    return {
+      comparisons: 0,
+      rankComparisons: 0,
+      writes: 0,
+      rounds: 0,
+      finalValues: working,
+      meanComputationOperations: 0,
+      refinementOperations: 0,
+    };
+  }
+
+  const finish = finishRangeComponents([createMeanChunk(working, 0, 0)]);
+  refinementOperations += finish.comparisons;
+  outputWrites += finish.writes;
+
+  return {
+    comparisons: 0,
+    rankComparisons: 0,
+    writes: outputWrites,
+    rounds: Math.max(1, finish.frames.length),
+    finalValues: finish.values,
+    meanComputationOperations: 0,
+    refinementOperations,
+  };
 }

@@ -1550,11 +1550,6 @@ input:focus-visible {
   box-shadow: 0 0 16px rgba(239, 141, 205, 0.2);
 }
 
-.benchmark-bar--mean {
-  background: linear-gradient(180deg, #7de5f4, #469ad3);
-  box-shadow: 0 0 16px rgba(88, 217, 245, 0.2);
-}
-
 .benchmark-bar--cocktail {
   background: linear-gradient(180deg, #ffb891, #e77a5e);
   box-shadow: 0 0 16px rgba(255, 146, 120, 0.2);
@@ -1608,10 +1603,6 @@ input:focus-visible {
 
 .benchmark-legend__swatch--bubble {
   background: #e58bc3;
-}
-
-.benchmark-legend__swatch--mean {
-  background: #67cce7;
 }
 
 .benchmark-legend__swatch--range-guard {
@@ -1703,10 +1694,6 @@ input:focus-visible {
   transition: width 240ms ease;
 }
 
-.benchmark-current i b.benchmark-current__mean {
-  background: linear-gradient(90deg, #7ce3f3, #4a9dd4);
-}
-
 .benchmark-current i b.benchmark-current__range-guard,
 .benchmark-meter--range-guard {
   background: linear-gradient(90deg, #e0a8f5, #a469d3);
@@ -1719,10 +1706,6 @@ input:focus-visible {
 
 .benchmark-meter--insertion {
   background: linear-gradient(90deg, #9e91ff, #7666df);
-}
-
-.benchmark-meter--mean {
-  background: linear-gradient(90deg, #7ce3f3, #4a9dd4);
 }
 
 .benchmark-meter--cocktail {
