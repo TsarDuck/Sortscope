@@ -677,6 +677,16 @@ export default function Home() {
     [algorithm, stepIndex, steps, values],
   );
   const visibleValues = currentStep.values;
+  const mergePassFrameCounts = useMemo(() => {
+    if (algorithm !== "merge") return new Map<number, number>();
+
+    return steps.reduce((counts, step) => {
+      if (step.pass > 0 && step.phase !== "complete") {
+        counts.set(step.pass, (counts.get(step.pass) ?? 0) + 1);
+      }
+      return counts;
+    }, new Map<number, number>());
+  }, [algorithm, steps]);
 
   useEffect(() => {
     if (!isBogo || runState !== "complete" || currentStep.phase !== "complete") {
@@ -691,17 +701,17 @@ export default function Home() {
   const isLocked = runState === "running" || runState === "paused";
   const playbackDensity = isBogo ? 48 : 1;
   const speedDelay = 720 - speed * 7.13;
-  const finalSequencePass = steps.at(-1)?.pass ?? totalStages;
-  const usesProgressivePacing =
+  const usesEvenMergePacing =
     algorithm === "merge" &&
     currentStep.phase !== "ready" &&
     currentStep.phase !== "complete";
-  const progressivePacingMultiplier = usesProgressivePacing
-    ? 1 + 0.75 * (currentStep.pass / Math.max(finalSequencePass, 1))
-    : 1;
+  const mergePassDuration = Math.max(600, 3_400 - speed * 28);
+  const mergeFramesInCurrentPass = mergePassFrameCounts.get(currentStep.pass) ?? 1;
   const delay = prefersReducedMotion
     ? 18
-    : Math.max(7, speedDelay / playbackDensity) * progressivePacingMultiplier;
+    : usesEvenMergePacing
+      ? Math.max(7, mergePassDuration / mergeFramesInCurrentPass)
+      : Math.max(7, speedDelay / playbackDensity);
   const progress =
     runState === "complete"
       ? 100
