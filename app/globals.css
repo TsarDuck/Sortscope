@@ -291,10 +291,11 @@ button:disabled {
 }
 
 .control-number {
-  width: 66px;
+  /* Reserve a dedicated lane on the right for the native spinner controls. */
+  width: 88px;
   min-width: 0;
   min-height: 36px;
-  padding: 5px 8px;
+  padding: 5px 32px 5px 10px;
   border: 1px solid rgba(160, 174, 234, 0.28);
   border-radius: 5px;
   color: var(--ink);
@@ -303,12 +304,13 @@ button:disabled {
   font-size: 0.78rem;
   font-weight: 800;
   line-height: 1.2;
-  text-align: right;
+  font-variant-numeric: tabular-nums;
+  text-align: left;
   background: rgba(8, 11, 28, 0.62);
 }
 
 .control-number--bogo {
-  width: 136px;
+  width: 172px;
 }
 
 .bogo-unlimited-warning {
@@ -367,7 +369,7 @@ button:disabled {
 /* Give Chromium's built-in up/down controls a comfortably sized hit area. */
 .control-number::-webkit-inner-spin-button,
 .control-number::-webkit-outer-spin-button {
-  width: 20px;
+  width: 22px;
   min-height: 30px;
   margin: 0;
   cursor: pointer;
