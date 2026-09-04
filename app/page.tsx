@@ -697,7 +697,7 @@ export default function Home() {
   const speedDelay = 720 - speed * 7.13;
   const finalSequencePass = steps.at(-1)?.pass ?? totalStages;
   const usesProgressivePacing =
-    (algorithm === "quick" || algorithm === "merge") &&
+    algorithm === "merge" &&
     currentStep.phase !== "ready" &&
     currentStep.phase !== "complete";
   const progressivePacingMultiplier = usesProgressivePacing
