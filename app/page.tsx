@@ -356,7 +356,7 @@ function buildInsertionSteps(source: number[]): SortStep[] {
   const values = [...source];
   let comparisons = 0;
   let writes = 0;
-  const useCompactFrames = values.length > 64;
+  const useCompactFrames = values.length > DEFAULT_ARRAY_SIZE;
 
   for (let i = 1; i < values.length; i += 1) {
     const key = values[i];
@@ -689,11 +689,7 @@ export default function Home() {
   }, [currentStep.phase, isBogo, runState]);
 
   const isLocked = runState === "running" || runState === "paused";
-  const playbackDensity = isBogo
-    ? 48
-    : isMeanPartition
-      ? 1
-      : Math.max(1, Math.ceil(originalValues.length / 48));
+  const playbackDensity = isBogo ? 48 : 1;
   const speedDelay = 720 - speed * 7.13;
   const finalSequencePass = steps.at(-1)?.pass ?? totalStages;
   const usesProgressivePacing =
@@ -1071,7 +1067,7 @@ export default function Home() {
                   <strong>{currentStep.key}</strong>
                 </div>
               )}
-              <div className={"bars " + (originalValues.length > 64 ? "bars--dense" : "")} aria-hidden="true">
+              <div className={"bars " + (originalValues.length > DEFAULT_ARRAY_SIZE ? "bars--dense" : "")} aria-hidden="true">
                 {visibleValues.map((value, index) => {
                   const isGap = index === currentStep.gapIndex;
                   const shownValue = isGap && currentStep.key !== null ? currentStep.key : value;

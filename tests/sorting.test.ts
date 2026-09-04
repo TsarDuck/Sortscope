@@ -153,6 +153,15 @@ test("dense algorithms retain a bounded number of useful render snapshots", () =
   assert.deepEqual(finalValues(heap), [...source].reverse());
 });
 
+test("rows above the default detail size use compact visual sequences", () => {
+  const detailed = Array.from({ length: 24 }, (_, index) => 24 - index);
+  const compact = Array.from({ length: 25 }, (_, index) => 25 - index);
+
+  assert.ok(buildCocktailSteps(compact).length < buildCocktailSteps(detailed).length);
+  assert.ok(buildQuickSortSteps(compact).length < buildQuickSortSteps(detailed).length);
+  assert.ok(buildMergeSortSteps(compact).length < buildMergeSortSteps(detailed).length);
+});
+
 test("sorting metric analyzers preserve a clean 1 through 256 final line", () => {
   const source = Array.from({ length: 256 }, (_, index) => 256 - index);
   const expected = Array.from({ length: 256 }, (_, index) => index + 1);

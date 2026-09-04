@@ -68,6 +68,7 @@ type MeanChunk = {
 };
 
 export const BOGO_MAX_ATTEMPTS = 100_000;
+const COMPACT_FRAME_THRESHOLD = 24;
 
 export function createInitialStep(
   values: number[],
@@ -480,7 +481,7 @@ export function buildSelectionSteps(source: number[]): SortStep[] {
   const steps = [createInitialStep(source, "selection")];
   const values = [...source];
   const settled = new Set<number>();
-  const compactFrames = values.length > 64;
+  const compactFrames = values.length > COMPACT_FRAME_THRESHOLD;
   let comparisons = 0;
   let writes = 0;
 
@@ -591,7 +592,7 @@ export function buildHeapSortSteps(source: number[]): SortStep[] {
   const steps = [createInitialStep(source, "heap")];
   const values = [...source];
   const settled = new Set<number>();
-  const compactFrames = values.length > 64;
+  const compactFrames = values.length > COMPACT_FRAME_THRESHOLD;
   let pass = 0;
   let comparisons = 0;
   let writes = 0;
@@ -745,7 +746,7 @@ export function buildCocktailSteps(source: number[]): SortStep[] {
   const steps = [createInitialStep(source, "cocktail")];
   const values = [...source];
   const settled = new Set<number>();
-  const compactFrames = values.length > 64;
+  const compactFrames = values.length > COMPACT_FRAME_THRESHOLD;
   // Keep the orange sweep readable without retaining thousands of full array
   // snapshots for a 256-value row. The interval targets roughly 500 sweep
   // frames across the entire dense run, rather than per directional pass.
@@ -956,7 +957,7 @@ export function buildQuickSortSteps(source: number[]): SortStep[] {
   const values = [...source];
   const settled = new Set<number>();
   const stack = values.length > 1 ? [{ low: 0, high: values.length - 1 }] : [];
-  const compactFrames = values.length > 64;
+  const compactFrames = values.length > COMPACT_FRAME_THRESHOLD;
   let pass = 0;
   let comparisons = 0;
   let writes = 0;
@@ -1069,7 +1070,7 @@ export function buildQuickSortSteps(source: number[]): SortStep[] {
 export function buildMergeSortSteps(source: number[]): SortStep[] {
   const steps = [createInitialStep(source, "merge")];
   const values = [...source];
-  const compactFrames = values.length > 64;
+  const compactFrames = values.length > COMPACT_FRAME_THRESHOLD;
   let width = 1;
   let pass = 0;
   let comparisons = 0;
