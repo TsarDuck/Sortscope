@@ -694,14 +694,16 @@ export default function Home() {
       : Math.max(1, Math.ceil(originalValues.length / 48));
   const speedDelay = 720 - speed * 7.13;
   const finalSequencePass = steps.at(-1)?.pass ?? totalStages;
-  const isReadableEndgame =
+  const usesProgressivePacing =
     (algorithm === "quick" || algorithm === "merge") &&
-    currentStep.phase !== "complete" &&
-    currentStep.pass >= Math.max(1, finalSequencePass - 1);
-  const endgameMultiplier = isReadableEndgame ? 1.75 : 1;
+    currentStep.phase !== "ready" &&
+    currentStep.phase !== "complete";
+  const progressivePacingMultiplier = usesProgressivePacing
+    ? 1 + 0.75 * (currentStep.pass / Math.max(finalSequencePass, 1))
+    : 1;
   const delay = prefersReducedMotion
     ? 18
-    : Math.max(7, speedDelay / playbackDensity) * endgameMultiplier;
+    : Math.max(7, speedDelay / playbackDensity) * progressivePacingMultiplier;
   const progress =
     runState === "complete"
       ? 100
