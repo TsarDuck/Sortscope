@@ -13,9 +13,9 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Sortscope — Insertion Sort Visualizer",
+  title: "Sortscope — Sorting Visualizer",
   description:
-    "An interactive visualizer for learning how insertion sort grows a sorted prefix.",
+    "An interactive visualizer and comparison lab for exploring sorting algorithms.",
 };
 
 export default function RootLayout({
