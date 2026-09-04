@@ -373,6 +373,11 @@ input[type="range"]:disabled {
   gap: 8px;
 }
 
+.sound-volume {
+  width: 116px;
+  min-width: 116px;
+}
+
 .button {
   display: inline-flex;
   align-items: center;
@@ -1538,6 +1543,7 @@ input:focus-visible {
   .button-row {
     width: 100%;
     margin-left: 0;
+    flex-wrap: wrap;
   }
 
   .button {
@@ -1546,6 +1552,11 @@ input:focus-visible {
 
   .text-button {
     flex: 0 0 auto;
+  }
+
+  .sound-volume {
+    flex: 1 1 100%;
+    width: auto;
   }
 
   .workbench__message {

@@ -611,13 +611,13 @@ export default function Home() {
   const [stepIndex, setStepIndex] = useState(0);
   const [runState, setRunState] = useState<RunState>("ready");
   const [bogoCelebration, setBogoCelebration] = useState(false);
-  const [soundEnabled, setSoundEnabled] = useState(true);
   const [soundVolume, setSoundVolume] = useState(50);
   const audioContextRef = useRef<AudioContext | null>(null);
   const lastToneTimeRef = useRef(0);
   const prefersReducedMotion = usePrefersReducedMotion();
   const isMeanPartition = algorithm === "mean-partition";
   const isBogo = algorithm === "bogo";
+  const soundEnabled = soundVolume > 0;
   const algorithmDetails = ALGORITHM_DETAILS[algorithm];
   const algorithmLabel = algorithmDetails.label;
   const stageLabel = algorithmDetails.stageLabel;
@@ -886,9 +886,9 @@ export default function Home() {
     setRunState("ready");
   }
 
-  function handleSoundToggle() {
-    if (!soundEnabled) ensureAudioContext();
-    setSoundEnabled(!soundEnabled);
+  function handleSoundVolumeChange(nextVolume: number) {
+    if (nextVolume > 0 && soundVolume === 0) ensureAudioContext();
+    setSoundVolume(nextVolume);
   }
 
   function handleAlgorithmChange(nextAlgorithm: AlgorithmId) {
@@ -1139,22 +1139,6 @@ export default function Home() {
                 />
               </label>
 
-              <label className="control-field control-field--range">
-                <span className="control-label">
-                  Sound volume
-                  <strong>{soundEnabled ? soundVolume + "%" : "off"}</strong>
-                </span>
-                <input
-                  type="range"
-                  min="0"
-                  max="100"
-                  value={soundVolume}
-                  onChange={(event) => setSoundVolume(Number(event.target.value))}
-                  disabled={!soundEnabled}
-                  aria-label="Sorting sound volume"
-                />
-              </label>
-
               <div className="button-row">
                 <button
                   className="button button--secondary"
@@ -1171,14 +1155,19 @@ export default function Home() {
                 <button className="text-button" type="button" onClick={resetArray}>
                   Reset
                 </button>
-                <button
-                  className="text-button"
-                  type="button"
-                  onClick={handleSoundToggle}
-                  aria-pressed={soundEnabled}
-                >
-                  Sound: {soundEnabled ? "on" : "off"}
-                </button>
+                <label className="control-field sound-volume">
+                  <span className="control-label">
+                    Sound <strong>{soundVolume}%</strong>
+                  </span>
+                  <input
+                    type="range"
+                    min="0"
+                    max="100"
+                    value={soundVolume}
+                    onChange={(event) => handleSoundVolumeChange(Number(event.target.value))}
+                    aria-label="Sorting sound volume"
+                  />
+                </label>
               </div>
             </div>
           </div>
