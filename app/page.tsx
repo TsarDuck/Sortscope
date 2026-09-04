@@ -86,6 +86,15 @@ const INITIAL_VALUES = [
   17, 5, 22, 8, 19, 3, 14, 24, 1, 12, 7, 20, 10, 23, 4, 16, 9, 21, 2, 18,
   6, 15, 11, 13,
 ];
+const BOGO_CONFETTI_COLORS = ["#ffe98e", "#a9f2be", "#8ee6ff", "#cbb8ff", "#ff9fba", "#ffbd82"];
+const BOGO_CONFETTI = Array.from({ length: 64 }, (_, index) => ({
+  id: index,
+  left: (index * 37 + 11) % 100,
+  delay: (index % 16) * 0.07,
+  duration: 1.8 + (index % 5) * 0.18,
+  color: BOGO_CONFETTI_COLORS[index % BOGO_CONFETTI_COLORS.length],
+  shape: index % 3,
+}));
 
 const ALGORITHM_DETAILS: Record<
   AlgorithmId,
@@ -516,6 +525,7 @@ export default function Home() {
   const [steps, setSteps] = useState<SortStep[]>([]);
   const [stepIndex, setStepIndex] = useState(0);
   const [runState, setRunState] = useState<RunState>("ready");
+  const [bogoCelebration, setBogoCelebration] = useState(false);
   const prefersReducedMotion = usePrefersReducedMotion();
   const isMeanPartition = algorithm === "mean-partition";
   const isBogo = algorithm === "bogo";
@@ -583,6 +593,17 @@ export default function Home() {
     () => steps[stepIndex] ?? createInitialStep(values, algorithm),
     [algorithm, stepIndex, steps, values],
   );
+
+  useEffect(() => {
+    if (!isBogo || runState !== "complete" || currentStep.phase !== "complete") {
+      return;
+    }
+
+    setBogoCelebration(true);
+    const timer = window.setTimeout(() => setBogoCelebration(false), 4800);
+    return () => window.clearTimeout(timer);
+  }, [currentStep.phase, isBogo, runState]);
+
   const isLocked = runState === "running" || runState === "paused";
   const playbackDensity = isBogo
     ? 24
@@ -636,6 +657,7 @@ export default function Home() {
 
   function createNewArray(size = arraySize) {
     const nextValues = makeRandomArray(size);
+    setBogoCelebration(false);
     setOriginalValues(nextValues);
     setValues(nextValues);
     setSteps([]);
@@ -644,6 +666,7 @@ export default function Home() {
   }
 
   function resetArray() {
+    setBogoCelebration(false);
     setValues([...originalValues]);
     setSteps([]);
     setStepIndex(0);
@@ -651,6 +674,7 @@ export default function Home() {
   }
 
   function handleAlgorithmChange(nextAlgorithm: AlgorithmId) {
+    setBogoCelebration(false);
     setAlgorithm(nextAlgorithm);
     setValues([...originalValues]);
     setSteps([]);
@@ -669,6 +693,7 @@ export default function Home() {
       return;
     }
 
+    setBogoCelebration(false);
     const sequence =
       algorithm === "mean-partition"
         ? buildMeanPartitionSteps(originalValues)
@@ -705,6 +730,32 @@ export default function Home() {
     <main className="sortlab-app">
       <div className="page-glow page-glow--one" aria-hidden="true" />
       <div className="page-glow page-glow--two" aria-hidden="true" />
+      {bogoCelebration && (
+        <div
+          className={"bogo-celebration " + (prefersReducedMotion ? "bogo-celebration--reduced" : "")}
+          role="status"
+          aria-live="polite"
+        >
+          <div className="bogo-confetti" aria-hidden="true">
+            {BOGO_CONFETTI.map((piece) => (
+              <i
+                className={"bogo-confetti__piece bogo-confetti__piece--" + piece.shape}
+                key={piece.id}
+                style={{
+                  left: String(piece.left) + "%",
+                  background: piece.color,
+                  animationDelay: String(piece.delay) + "s",
+                  animationDuration: String(piece.duration) + "s",
+                }}
+              />
+            ))}
+          </div>
+          <div className="bogo-celebration__message">
+            <span>BOGO SORT</span>
+            <strong>Holy shit, it actually worked!</strong>
+          </div>
+        </div>
+      )}
 
       <div className="shell">
         <header className="site-header">

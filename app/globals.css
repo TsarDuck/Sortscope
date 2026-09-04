@@ -1246,6 +1246,113 @@ input:focus-visible {
   font-style: normal;
 }
 
+.bogo-celebration {
+  position: fixed;
+  z-index: 20;
+  inset: 0;
+  display: flex;
+  justify-content: center;
+  overflow: hidden;
+  padding: clamp(72px, 13vh, 150px) 22px 0;
+  pointer-events: none;
+}
+
+.bogo-confetti {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+}
+
+.bogo-confetti__piece {
+  position: absolute;
+  top: -22px;
+  width: 10px;
+  height: 17px;
+  border-radius: 2px;
+  box-shadow: 0 0 12px rgba(255, 255, 255, 0.25);
+  animation-name: bogo-confetti-fall;
+  animation-timing-function: cubic-bezier(.16, .76, .32, 1);
+  animation-fill-mode: both;
+}
+
+.bogo-confetti__piece--1 {
+  width: 15px;
+  height: 7px;
+  border-radius: 99px;
+}
+
+.bogo-confetti__piece--2 {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+
+.bogo-celebration__message {
+  position: relative;
+  z-index: 1;
+  align-self: flex-start;
+  width: min(100%, 560px);
+  padding: 22px 28px 24px;
+  border: 1px solid rgba(255, 240, 151, 0.72);
+  border-radius: 20px;
+  color: #fff8d6;
+  background: linear-gradient(135deg, rgba(25, 20, 58, 0.96), rgba(72, 38, 102, 0.95));
+  box-shadow: 0 18px 80px rgba(12, 7, 31, 0.62), 0 0 55px rgba(240, 203, 96, 0.23);
+  text-align: center;
+  animation: bogo-celebration-pop 420ms cubic-bezier(.19, 1.45, .35, 1) both;
+}
+
+.bogo-celebration__message span,
+.bogo-celebration__message strong {
+  display: block;
+}
+
+.bogo-celebration__message span {
+  color: #ffe784;
+  font-size: 0.68rem;
+  font-weight: 900;
+  letter-spacing: 0.2em;
+}
+
+.bogo-celebration__message strong {
+  margin-top: 8px;
+  font-size: clamp(1.55rem, 4vw, 2.7rem);
+  line-height: 1.03;
+  letter-spacing: -0.055em;
+}
+
+.bogo-celebration--reduced .bogo-confetti {
+  display: none;
+}
+
+@keyframes bogo-confetti-fall {
+  0% {
+    opacity: 0;
+    transform: translate3d(0, -36px, 0) rotate(0deg);
+  }
+
+  10% {
+    opacity: 1;
+  }
+
+  100% {
+    opacity: 0;
+    transform: translate3d(0, 112vh, 0) rotate(760deg);
+  }
+}
+
+@keyframes bogo-celebration-pop {
+  from {
+    opacity: 0;
+    transform: translateY(-16px) scale(0.86);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
 .sr-only {
   position: absolute;
   width: 1px;
