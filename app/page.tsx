@@ -701,6 +701,8 @@ export default function Home() {
   const isLocked = runState === "running" || runState === "paused";
   const playbackDensity = isBogo ? 48 : 1;
   const speedDelay = 720 - speed * 7.13;
+  const minimumFrameDelay =
+    originalValues.length > DEFAULT_ARRAY_SIZE && !isBogo ? 16 : 7;
   const usesEvenMergePacing =
     algorithm === "merge" &&
     currentStep.phase !== "ready" &&
@@ -710,8 +712,8 @@ export default function Home() {
   const delay = prefersReducedMotion
     ? 18
     : usesEvenMergePacing
-      ? Math.max(7, mergePassDuration / mergeFramesInCurrentPass)
-      : Math.max(7, speedDelay / playbackDensity);
+      ? Math.max(minimumFrameDelay, mergePassDuration / mergeFramesInCurrentPass)
+      : Math.max(minimumFrameDelay, speedDelay / playbackDensity);
   const progress =
     runState === "complete"
       ? 100
