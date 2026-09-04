@@ -2,13 +2,28 @@
 
 import { useEffect, useMemo, useState } from "react";
 import {
+  BOGO_MAX_ATTEMPTS,
+  BOGO_MAX_VALUES,
+  analyzeCocktailSort,
   analyzeInsertionSort,
   analyzeMeanPartitionSort,
+  analyzeMergeSort,
+  analyzeQuickSort,
+  buildBogoSteps,
+  buildCocktailSteps,
   buildMeanPartitionSteps,
+  buildMergeSortSteps,
+  buildQuickSortSteps,
   formatMean,
 } from "./lib/sorting";
 
-type AlgorithmId = "insertion" | "mean-partition";
+type AlgorithmId =
+  | "insertion"
+  | "cocktail"
+  | "quick"
+  | "merge"
+  | "bogo"
+  | "mean-partition";
 type RunState = "ready" | "running" | "paused" | "complete";
 type StepPhase =
   | "ready"
@@ -19,6 +34,10 @@ type StepPhase =
   | "split"
   | "average"
   | "reorder"
+  | "swap"
+  | "merge"
+  | "shuffle"
+  | "limited"
   | "complete";
 
 type MeanGroup = {
@@ -45,22 +64,165 @@ type SortStep = {
   writes: number;
   message: string;
   groups?: MeanGroup[];
+  settled?: number[];
 };
 
 const DEFAULT_ARRAY_SIZE = 24;
 const DEFAULT_SPEED = 62;
 const BENCHMARK_SIZES = [16, 32, 64, 128, 256];
+const BENCHMARK_ALGORITHMS = [
+  { key: "insertion", label: "Insertion sort", className: "insertion" },
+  { key: "cocktail", label: "Cocktail sort", className: "cocktail" },
+  { key: "quick", label: "Quick sort", className: "quick" },
+  { key: "merge", label: "Merge sort", className: "merge" },
+  { key: "meanPartition", label: "Mean partition sort", className: "mean" },
+] as const;
+type BenchmarkAlgorithm = (typeof BENCHMARK_ALGORITHMS)[number]["key"];
+type BenchmarkWork = Record<BenchmarkAlgorithm, number>;
 const INITIAL_VALUES = [
   17, 5, 22, 8, 19, 3, 14, 24, 1, 12, 7, 20, 10, 23, 4, 16, 9, 21, 2, 18,
   6, 15, 11, 13,
 ];
 
+const ALGORITHM_DETAILS: Record<
+  AlgorithmId,
+  {
+    label: string;
+    number: string;
+    heroCopy: string;
+    controlTitle: string;
+    stageLabel: string;
+    stageDescription: string;
+    eyebrow: string;
+    learnTitle: string;
+    learnCopy: string;
+    complexity: [string, string, string];
+    cardTitle: string;
+    cardTag: string;
+    steps: string[];
+  }
+> = {
+  insertion: {
+    label: "Insertion sort",
+    number: "01",
+    heroCopy: "Slow down a real insertion sort and see the sorted prefix grow one deliberate move at a time.",
+    controlTitle: "Build a sorted prefix",
+    stageLabel: "pass",
+    stageDescription: "key placement",
+    eyebrow: "THE BIG IDEA",
+    learnTitle: "Like sorting cards in your hand.",
+    learnCopy: "Insertion sort grows a tidy section from left to right. It picks up one value, shifts larger neighbors aside, then drops that value into the gap it created.",
+    complexity: ["BEST O(n)", "AVERAGE O(n²)", "SPACE O(1)"],
+    cardTitle: "INSERTION SORT",
+    cardTag: "stable · in-place",
+    steps: [
+      "Choose the next value as the key.",
+      "Compare it to values in the sorted prefix.",
+      "Shift larger values right, then insert the key.",
+    ],
+  },
+  cocktail: {
+    label: "Cocktail sort",
+    number: "02",
+    heroCopy: "Sweep in both directions so large values drift right while small values travel back left.",
+    controlTitle: "Sweep in both directions",
+    stageLabel: "sweep",
+    stageDescription: "forward or backward pass",
+    eyebrow: "THE BIG IDEA",
+    learnTitle: "Bubble both ways.",
+    learnCopy: "Cocktail sort is a bidirectional bubble sort. A forward sweep settles a large value at the right edge, then a backward sweep settles a small one at the left edge.",
+    complexity: ["BEST O(n)", "AVERAGE O(n²)", "SPACE O(1)"],
+    cardTitle: "COCKTAIL SORT",
+    cardTag: "stable · in-place",
+    steps: [
+      "Compare neighboring values while moving right.",
+      "Swap out-of-order neighbors to settle the largest value.",
+      "Reverse direction to settle the smallest remaining value.",
+    ],
+  },
+  quick: {
+    label: "Quick sort",
+    number: "03",
+    heroCopy: "Choose a pivot, split smaller and larger values around it, then repeat on each side.",
+    controlTitle: "Partition around a pivot",
+    stageLabel: "partition",
+    stageDescription: "pivot placement",
+    eyebrow: "THE BIG IDEA",
+    learnTitle: "Put pivots in their final places.",
+    learnCopy: "Quick sort chooses a pivot and partitions the active range so smaller values go left and larger values go right. Each pivot then stays in its final position.",
+    complexity: ["AVERAGE O(n log n)", "WORST O(n²)", "SPACE O(log n)"],
+    cardTitle: "QUICK SORT",
+    cardTag: "in-place · pivot-based",
+    steps: [
+      "Choose the rightmost value as the pivot.",
+      "Move smaller values to the pivot's left side.",
+      "Place the pivot, then partition each remaining side.",
+    ],
+  },
+  merge: {
+    label: "Merge sort",
+    number: "04",
+    heroCopy: "Build larger ordered runs by repeatedly merging pairs of smaller ordered runs.",
+    controlTitle: "Merge ordered runs",
+    stageLabel: "merge pass",
+    stageDescription: "run merging",
+    eyebrow: "THE BIG IDEA",
+    learnTitle: "Combine sorted pieces.",
+    learnCopy: "Merge sort treats each value as a one-item ordered run, then repeatedly combines neighboring runs by taking the next smallest available value.",
+    complexity: ["TIME O(n log n)", "STABLE YES", "SPACE O(n)"],
+    cardTitle: "MERGE SORT",
+    cardTag: "stable · divide and conquer",
+    steps: [
+      "Start with one-value ordered runs.",
+      "Compare the front values of two neighboring runs.",
+      "Write the smaller one into a larger merged run.",
+    ],
+  },
+  bogo: {
+    label: "Bogo sort",
+    number: "05",
+    heroCopy: "Shuffle the whole row and hope it lands in order—a deliberately impractical sorting experiment.",
+    controlTitle: "Shuffle and hope",
+    stageLabel: "shuffle",
+    stageDescription: "random attempt",
+    eyebrow: "CHAOS EXPERIMENT",
+    learnTitle: "Let chance do the sorting.",
+    learnCopy: "Bogo sort checks whether the row is ordered. If not, it randomly shuffles every value and tries again. It is limited to five values and 720 attempts here so the visualizer stays responsive.",
+    complexity: ["BEST O(n)", "EXPECTED O(n · n!)", "LIMIT 720 TRIES"],
+    cardTitle: "BOGO SORT",
+    cardTag: "randomized · capped demo",
+    steps: [
+      "Check whether the entire row is ordered.",
+      "Shuffle every value when it is not.",
+      "Repeat until it works—or the safety limit stops it.",
+    ],
+  },
+  "mean-partition": {
+    label: "Mean partition sort",
+    number: "06",
+    heroCopy: "Split the newly arranged row into 2, 4, 8, and more balanced groups, then rank every group by its average.",
+    controlTitle: "Rank groups by their mean",
+    stageLabel: "round",
+    stageDescription: "mean grouping",
+    eyebrow: "EXPERIMENTAL IDEA",
+    learnTitle: "Sort blocks before sorting values.",
+    learnCopy: "Each round splits the newly arranged row into more balanced groups, calculates every group average, then ranks all groups from low mean to high mean. A mean does not guarantee that a whole block belongs before another one, so the process continues until each group holds one value.",
+    complexity: ["ROUNDS O(log n)", "GUARANTEE SINGLETON ROUND", "SPACE O(n)"],
+    cardTitle: "MEAN PARTITION SORT",
+    cardTag: "experimental · group-based",
+    steps: [
+      "Split the current row into 2, 4, 8… balanced groups.",
+      "Calculate the average of every group.",
+      "Rank all groups from the smallest mean to the largest.",
+      "At singleton groups, each mean is the value itself.",
+    ],
+  },
+};
+
 function createInitialStep(
   values: number[],
   algorithm: AlgorithmId = "insertion",
 ): SortStep {
-  const isMeanPartition = algorithm === "mean-partition";
-
   return {
     values: [...values],
     pass: 0,
@@ -70,14 +232,13 @@ function createInitialStep(
     shifting: null,
     inserting: null,
     gapIndex: null,
-    sortedCount: isMeanPartition ? 0 : values.length ? 1 : 0,
+    sortedCount: algorithm === "insertion" && values.length ? 1 : 0,
     comparisons: 0,
     writes: 0,
-    message: isMeanPartition
-      ? values.length <= 1
+    message:
+      values.length <= 1
         ? "One value is already ordered."
-        : "The row will be repeatedly split into mean-ranked groups."
-      : "The first value starts as a sorted one-item prefix.",
+        : ALGORITHM_DETAILS[algorithm].heroCopy,
   };
 }
 
@@ -121,6 +282,14 @@ function makeBenchmarkArray(length: number, pattern: BenchmarkPattern) {
 
 function formatCount(value: number) {
   return value.toLocaleString("en-US");
+}
+
+function getWorkEstimate(metrics: {
+  comparisons: number;
+  rankComparisons: number;
+  writes: number;
+}) {
+  return metrics.comparisons + metrics.rankComparisons + metrics.writes;
 }
 
 function buildInsertionSteps(source: number[]): SortStep[] {
@@ -255,6 +424,43 @@ function getBarClass(
     return "bar--idle";
   }
 
+  if (algorithm === "bogo") {
+    if (step.phase === "complete") return "bar--sorted";
+    if (step.phase === "limited") return "bar--limited";
+    if (step.phase === "shuffle") return "bar--shuffle";
+    return "bar--idle";
+  }
+
+  if (algorithm === "quick") {
+    if (step.phase === "complete" || step.settled?.includes(index)) return "bar--sorted";
+    if (step.phase === "select" && index === step.inserting) return "bar--key";
+    if (step.phase === "swap" && (index === step.comparing || index === step.shifting)) {
+      return "bar--swap";
+    }
+    if (index === step.comparing) return "bar--compare";
+    if (index === step.shifting) return "bar--shift";
+    if (index === step.inserting) return "bar--insert";
+    return "bar--idle";
+  }
+
+  if (algorithm === "merge") {
+    if (step.phase === "complete") return "bar--sorted";
+    if (index === step.comparing || index === step.shifting) return "bar--compare";
+    if (index === step.inserting) return "bar--insert";
+    if (step.phase === "merge") return "bar--merge";
+    return "bar--idle";
+  }
+
+  if (algorithm === "cocktail") {
+    if (step.phase === "complete" || step.settled?.includes(index)) return "bar--sorted";
+    if (step.phase === "swap" && (index === step.comparing || index === step.shifting)) {
+      return "bar--swap";
+    }
+    if (index === step.comparing || index === step.shifting) return "bar--compare";
+    if (index === step.inserting) return "bar--insert";
+    return "bar--idle";
+  }
+
   if (index === step.gapIndex) return "bar--gap";
   if (index === step.inserting) return "bar--insert";
   if (index === step.shifting) return "bar--shift";
@@ -274,6 +480,10 @@ function getPhaseLabel(phase: StepPhase) {
     split: "Split groups",
     average: "Measure means",
     reorder: "Rank groups",
+    swap: "Swap values",
+    merge: "Merge runs",
+    shuffle: "Shuffle",
+    limited: "Safety stop",
     complete: "Sorted",
   };
 
@@ -293,73 +503,95 @@ export default function Home() {
   const [runState, setRunState] = useState<RunState>("ready");
   const prefersReducedMotion = usePrefersReducedMotion();
   const isMeanPartition = algorithm === "mean-partition";
-  const algorithmLabel = isMeanPartition
-    ? "Mean partition sort"
-    : "Insertion sort";
-  const stageLabel = isMeanPartition ? "round" : "pass";
+  const isBogo = algorithm === "bogo";
+  const algorithmDetails = ALGORITHM_DETAILS[algorithm];
+  const algorithmLabel = algorithmDetails.label;
+  const stageLabel = algorithmDetails.stageLabel;
   const totalStages = isMeanPartition
     ? Math.max(1, Math.ceil(Math.log2(Math.max(originalValues.length, 1))))
-    : Math.max(originalValues.length - 1, 0);
+    : isBogo
+      ? BOGO_MAX_ATTEMPTS
+      : algorithm === "merge"
+        ? Math.max(1, Math.ceil(Math.log2(Math.max(originalValues.length, 1))))
+        : Math.max(originalValues.length - 1, 0);
+  const minimumArraySize = isBogo ? 3 : 8;
+  const maximumArraySize = isBogo ? BOGO_MAX_VALUES : 256;
   const benchmarkData = useMemo(
     () =>
       BENCHMARK_SIZES.map((size) => {
         const benchmarkValues = makeBenchmarkArray(size, benchmarkPattern);
         const insertion = analyzeInsertionSort(benchmarkValues);
+        const cocktail = analyzeCocktailSort(benchmarkValues);
+        const quick = analyzeQuickSort(benchmarkValues);
+        const merge = analyzeMergeSort(benchmarkValues);
         const meanPartition = analyzeMeanPartitionSort(benchmarkValues);
 
         return {
           size,
-          insertionWork: insertion.comparisons + insertion.writes,
-          meanWork:
-            meanPartition.comparisons +
-            meanPartition.rankComparisons +
-            meanPartition.writes,
+          work: {
+            insertion: getWorkEstimate(insertion),
+            cocktail: getWorkEstimate(cocktail),
+            quick: getWorkEstimate(quick),
+            merge: getWorkEstimate(merge),
+            meanPartition: getWorkEstimate(meanPartition),
+          } satisfies BenchmarkWork,
         };
       }),
     [benchmarkPattern],
   );
   const benchmarkMaximum = Math.max(
     1,
-    ...benchmarkData.flatMap((entry) => [entry.insertionWork, entry.meanWork]),
+    ...benchmarkData.flatMap((entry) => Object.values(entry.work)),
   );
   const selectedBenchmark = useMemo(() => {
     const benchmarkValues = makeBenchmarkArray(arraySize, benchmarkPattern);
     const insertion = analyzeInsertionSort(benchmarkValues);
+    const cocktail = analyzeCocktailSort(benchmarkValues);
+    const quick = analyzeQuickSort(benchmarkValues);
+    const merge = analyzeMergeSort(benchmarkValues);
     const meanPartition = analyzeMeanPartitionSort(benchmarkValues);
 
     return {
-      insertion: insertion.comparisons + insertion.writes,
-      meanPartition:
-        meanPartition.comparisons +
-        meanPartition.rankComparisons +
-        meanPartition.writes,
-    };
+      insertion: getWorkEstimate(insertion),
+      cocktail: getWorkEstimate(cocktail),
+      quick: getWorkEstimate(quick),
+      merge: getWorkEstimate(merge),
+      meanPartition: getWorkEstimate(meanPartition),
+    } satisfies BenchmarkWork;
   }, [arraySize, benchmarkPattern]);
+  const selectedBenchmarkMaximum = Math.max(
+    1,
+    ...Object.values(selectedBenchmark),
+  );
 
   const currentStep = useMemo(
     () => steps[stepIndex] ?? createInitialStep(values, algorithm),
     [algorithm, stepIndex, steps, values],
   );
   const isLocked = runState === "running" || runState === "paused";
-  const playbackDensity = isMeanPartition
-    ? 1
-    : Math.max(1, Math.ceil(originalValues.length / 48));
+  const playbackDensity = isBogo
+    ? 24
+    : isMeanPartition
+      ? 1
+      : Math.max(1, Math.ceil(originalValues.length / 48));
   const delay = prefersReducedMotion
     ? 18
     : Math.max(7, (710 - speed * 6.7) / playbackDensity);
   const progress =
     runState === "complete"
       ? 100
-      : Math.round(
-          (currentStep.pass / Math.max(1, totalStages)) * 100,
-        );
+      : steps.length > 1
+        ? Math.round((stepIndex / (steps.length - 1)) * 100)
+        : 0;
   const displayValues = values.join(", ");
   const largestValue = Math.max(...originalValues, 1);
   const liveStatus =
-    runState === "complete"
-      ? isMeanPartition
-        ? "Sorting complete. " + currentStep.comparisons + " group means and " + currentStep.writes + " moved values."
-        : "Sorting complete. " + currentStep.comparisons + " comparisons and " + currentStep.writes + " array writes."
+    currentStep.phase === "limited"
+      ? "Bogo Sort stopped after the shuffle safety limit. Try a new small array."
+      : runState === "complete"
+        ? isMeanPartition
+          ? "Sorting complete. " + currentStep.comparisons + " group means and " + currentStep.writes + " moved values."
+          : "Sorting complete. " + currentStep.comparisons + " comparisons and " + currentStep.writes + " array writes."
       : runState === "paused"
         ? "Paused during " + stageLabel + " " + currentStep.pass + " of " + totalStages + "."
         : runState === "running"
@@ -404,6 +636,26 @@ export default function Home() {
 
   function handleAlgorithmChange(nextAlgorithm: AlgorithmId) {
     setAlgorithm(nextAlgorithm);
+    if (nextAlgorithm === "bogo" && arraySize > BOGO_MAX_VALUES) {
+      const nextValues = makeRandomArray(BOGO_MAX_VALUES);
+      setArraySize(BOGO_MAX_VALUES);
+      setOriginalValues(nextValues);
+      setValues(nextValues);
+      setSteps([]);
+      setStepIndex(0);
+      setRunState("ready");
+      return;
+    }
+    if (nextAlgorithm !== "bogo" && arraySize < 8) {
+      const nextValues = makeRandomArray(8);
+      setArraySize(8);
+      setOriginalValues(nextValues);
+      setValues(nextValues);
+      setSteps([]);
+      setStepIndex(0);
+      setRunState("ready");
+      return;
+    }
     setValues([...originalValues]);
     setSteps([]);
     setStepIndex(0);
@@ -421,9 +673,18 @@ export default function Home() {
       return;
     }
 
-    const sequence = isMeanPartition
-      ? buildMeanPartitionSteps(originalValues)
-      : buildInsertionSteps(originalValues);
+    const sequence =
+      algorithm === "mean-partition"
+        ? buildMeanPartitionSteps(originalValues)
+        : algorithm === "cocktail"
+          ? buildCocktailSteps(originalValues)
+          : algorithm === "quick"
+            ? buildQuickSortSteps(originalValues)
+            : algorithm === "merge"
+              ? buildMergeSortSteps(originalValues)
+              : algorithm === "bogo"
+                ? buildBogoSteps(originalValues)
+                : buildInsertionSteps(originalValues);
     setValues([...originalValues]);
     setSteps(sequence);
     setStepIndex(0);
@@ -468,14 +729,10 @@ export default function Home() {
               Watch each value
               <span> find its place.</span>
             </h1>
-            <p className="hero-copy">
-              {isMeanPartition
-                ? "Split the newly arranged row into 2, 4, 8, and more balanced groups, then rank every group by its average."
-                : "Slow down a real insertion sort and see the sorted prefix grow one deliberate move at a time."}
-            </p>
+            <p className="hero-copy">{algorithmDetails.heroCopy}</p>
           </div>
           <div className="hero-aside">
-            <span className="hero-aside__number">{isMeanPartition ? "02" : "01"}</span>
+            <span className="hero-aside__number">{algorithmDetails.number}</span>
             <div>
               <p>NOW EXPLORING</p>
               <strong>{algorithmLabel}</strong>
@@ -487,9 +744,7 @@ export default function Home() {
           <div className="control-deck">
             <div className="control-deck__intro">
               <p className="eyebrow">CONTROL ROOM</p>
-              <h2 id="visualizer-title">
-                {isMeanPartition ? "Rank groups by their mean" : "Build a sorted prefix"}
-              </h2>
+              <h2 id="visualizer-title">{algorithmDetails.controlTitle}</h2>
             </div>
 
             <div className="controls" aria-label="Visualizer controls">
@@ -502,6 +757,10 @@ export default function Home() {
                   aria-label="Sorting algorithm"
                 >
                   <option value="insertion">Insertion sort</option>
+                  <option value="cocktail">Cocktail sort</option>
+                  <option value="quick">Quick sort</option>
+                  <option value="merge">Merge sort</option>
+                  <option value="bogo">Bogo sort (five values max)</option>
                   <option value="mean-partition">Mean partition sort (experiment)</option>
                 </select>
               </label>
@@ -512,8 +771,8 @@ export default function Home() {
                 </span>
                 <input
                   type="range"
-                  min="8"
-                  max="256"
+                  min={minimumArraySize}
+                  max={maximumArraySize}
                   step="1"
                   value={arraySize}
                   onChange={(event) => handleArraySizeChange(Number(event.target.value))}
@@ -590,7 +849,7 @@ export default function Home() {
                   })}
                 </div>
               )}
-              {!isMeanPartition && currentStep.phase === "shift" && currentStep.key !== null && (
+              {algorithm === "insertion" && currentStep.phase === "shift" && currentStep.key !== null && (
                 <div className="held-key" aria-hidden="true">
                   <span>holding key</span>
                   <strong>{currentStep.key}</strong>
@@ -639,6 +898,32 @@ export default function Home() {
                     <span><i className="legend__swatch legend__swatch--mean" />mean measured</span>
                     <span><i className="legend__swatch legend__swatch--rank" />groups ranked</span>
                   </>
+                ) : isBogo ? (
+                  <>
+                    <span><i className="legend__swatch legend__swatch--idle" />not ordered</span>
+                    <span><i className="legend__swatch legend__swatch--shuffle" />random shuffle</span>
+                    <span><i className="legend__swatch legend__swatch--sorted" />ordered by chance</span>
+                  </>
+                ) : algorithm === "merge" ? (
+                  <>
+                    <span><i className="legend__swatch legend__swatch--idle" />current runs</span>
+                    <span><i className="legend__swatch legend__swatch--compare" />run comparison</span>
+                    <span><i className="legend__swatch legend__swatch--merge" />merged write</span>
+                  </>
+                ) : algorithm === "quick" ? (
+                  <>
+                    <span><i className="legend__swatch legend__swatch--idle" />active range</span>
+                    <span><i className="legend__swatch legend__swatch--key" />pivot</span>
+                    <span><i className="legend__swatch legend__swatch--swap" />partition swap</span>
+                    <span><i className="legend__swatch legend__swatch--sorted" />placed pivot</span>
+                  </>
+                ) : algorithm === "cocktail" ? (
+                  <>
+                    <span><i className="legend__swatch legend__swatch--idle" />unsorted</span>
+                    <span><i className="legend__swatch legend__swatch--compare" />neighbors checked</span>
+                    <span><i className="legend__swatch legend__swatch--swap" />swap</span>
+                    <span><i className="legend__swatch legend__swatch--sorted" />settled edge</span>
+                  </>
                 ) : (
                   <>
                     <span><i className="legend__swatch legend__swatch--idle" />unsorted</span>
@@ -656,19 +941,19 @@ export default function Home() {
 
           <div className="stats" aria-label="Sort statistics">
             <div className="stat-card">
-              <span>{isMeanPartition ? "ROUND" : "PASS"}</span>
+              <span>{stageLabel.toUpperCase()}</span>
               <strong>{currentStep.pass}<em> / {totalStages}</em></strong>
-              <p>{isMeanPartition ? "mean grouping" : "key placement"}</p>
+              <p>{algorithmDetails.stageDescription}</p>
             </div>
             <div className="stat-card">
-              <span>{isMeanPartition ? "MEANS READ" : "COMPARISONS"}</span>
+              <span>{isMeanPartition ? "MEANS READ" : isBogo ? "ORDER CHECKS" : "COMPARISONS"}</span>
               <strong>{currentStep.comparisons}</strong>
-              <p>{isMeanPartition ? "group averages" : "values checked"}</p>
+              <p>{isMeanPartition ? "group averages" : isBogo ? "values checked" : "values checked"}</p>
             </div>
             <div className="stat-card">
-              <span>{isMeanPartition ? "VALUES MOVED" : "ARRAY WRITES"}</span>
+              <span>{isMeanPartition ? "VALUES MOVED" : isBogo ? "SHUFFLE WRITES" : "ARRAY WRITES"}</span>
               <strong>{currentStep.writes}</strong>
-              <p>{isMeanPartition ? "re-ranked groups" : "shifts + inserts"}</p>
+              <p>{isMeanPartition ? "re-ranked groups" : isBogo ? "random swaps" : "moves + writes"}</p>
             </div>
             <div className="stat-card stat-card--progress">
               <span>PROGRESS</span>
@@ -680,54 +965,29 @@ export default function Home() {
 
         <section className="learn-grid" aria-labelledby="learn-title">
           <div className="learn-copy">
-            <p className="eyebrow">{isMeanPartition ? "EXPERIMENTAL IDEA" : "THE BIG IDEA"}</p>
-            <h2 id="learn-title">
-              {isMeanPartition
-                ? "Sort blocks before sorting values."
-                : "Like sorting cards in your hand."}
-            </h2>
-            <p>
-              {isMeanPartition
-                ? "Each round splits the newly arranged row into more balanced groups, calculates every group average, then ranks all groups from low mean to high mean. A mean does not guarantee that a whole block belongs before another one, so the process continues until each group holds one value."
-                : "Insertion sort grows a tidy section from left to right. It picks up one value, shifts larger neighbors aside, then drops that value into the gap it created."}
-            </p>
+            <p className="eyebrow">{algorithmDetails.eyebrow}</p>
+            <h2 id="learn-title">{algorithmDetails.learnTitle}</h2>
+            <p>{algorithmDetails.learnCopy}</p>
             <div className="complexity-row" aria-label={algorithmLabel + " characteristics"}>
-              {isMeanPartition ? (
-                <>
-                  <span><b>ROUNDS</b> O(log n)</span>
-                  <span><b>GUARANTEE</b> singleton round</span>
-                  <span><b>SPACE</b> O(n)</span>
-                </>
-              ) : (
-                <>
-                  <span><b>BEST</b> O(n)</span>
-                  <span><b>AVERAGE</b> O(n²)</span>
-                  <span><b>SPACE</b> O(1)</span>
-                </>
-              )}
+              {algorithmDetails.complexity.map((item) => {
+                const [label, ...detail] = item.split(" ");
+                return <span key={item}><b>{label}</b> {detail.join(" ")}</span>;
+              })}
             </div>
           </div>
 
           <div className="algorithm-card">
             <div className="algorithm-card__header">
-              <span>{isMeanPartition ? "MEAN PARTITION SORT" : "INSERTION SORT"}</span>
-              <span>{isMeanPartition ? "experimental · group-based" : "stable · in-place"}</span>
+              <span>{algorithmDetails.cardTitle}</span>
+              <span>{algorithmDetails.cardTag}</span>
             </div>
             <ol className="algorithm-steps">
-              {isMeanPartition ? (
-                <>
-                  <li><i>01</i><span>Split the current row into <b>2, 4, 8…</b> balanced groups.</span></li>
-                  <li><i>02</i><span>Calculate the average of every group.</span></li>
-                  <li><i>03</i><span>Rank all groups from the smallest mean to the largest.</span></li>
-                  <li><i>04</i><span>At singleton groups, each mean is the <b>value itself</b>.</span></li>
-                </>
-              ) : (
-                <>
-                  <li><i>01</i><span>Choose the next value as the <b>key</b>.</span></li>
-                  <li><i>02</i><span>Compare it to values in the sorted prefix.</span></li>
-                  <li><i>03</i><span>Shift larger values right, then insert the key.</span></li>
-                </>
-              )}
+              {algorithmDetails.steps.map((step, index) => (
+                <li key={step}>
+                  <i>{String(index + 1).padStart(2, "0")}</i>
+                  <span>{step}</span>
+                </li>
+              ))}
             </ol>
           </div>
         </section>
@@ -738,9 +998,10 @@ export default function Home() {
               <p className="eyebrow">EFFICIENCY LAB</p>
               <h2 id="comparison-title">Compare the work behind the motion.</h2>
               <p>
-                Both algorithms receive the same shuffled sequence of 1 through n.
-                The chart totals value checks or group-mean reads, group-ranking
-                checks, and item moves, so it is an operation estimate rather than a timer.
+                Every practical algorithm receives the same shuffled sequence of 1 through n.
+                These totals combine comparisons and writes, so they are operation estimates rather
+                than timers. Bogo Sort stays a live five-value experiment because its expected work
+                grows factorially.
               </p>
             </div>
             <label className="benchmark-select">
@@ -760,7 +1021,7 @@ export default function Home() {
           <div
             className="benchmark-chart"
             role="img"
-            aria-label={"Estimated work for insertion sort and mean partition sort on " + benchmarkPattern + " arrays from 16 through 256 values."}
+            aria-label={"Estimated work for insertion, cocktail, quick, merge, and mean partition sort on " + benchmarkPattern + " arrays from 16 through 256 values."}
           >
             <div className="benchmark-chart__scale">
               <span>{formatCount(benchmarkMaximum)} work units</span>
@@ -768,20 +1029,22 @@ export default function Home() {
             </div>
             <div className="benchmark-columns" aria-hidden="true">
               {benchmarkData.map((entry) => {
-                const insertionHeight = Math.max(
-                  3,
-                  (entry.insertionWork / benchmarkMaximum) * 100,
-                );
-                const meanHeight = Math.max(
-                  3,
-                  (entry.meanWork / benchmarkMaximum) * 100,
-                );
-
                 return (
                   <div className="benchmark-group" key={entry.size}>
                     <div className="benchmark-bars">
-                      <div className="benchmark-bar benchmark-bar--insertion" style={{ height: String(insertionHeight) + "%" }} />
-                      <div className="benchmark-bar benchmark-bar--mean" style={{ height: String(meanHeight) + "%" }} />
+                      {BENCHMARK_ALGORITHMS.map((benchmarkAlgorithm) => {
+                        const height = Math.max(
+                          3,
+                          (entry.work[benchmarkAlgorithm.key] / benchmarkMaximum) * 100,
+                        );
+                        return (
+                          <div
+                            className={"benchmark-bar benchmark-bar--" + benchmarkAlgorithm.className}
+                            key={benchmarkAlgorithm.key}
+                            style={{ height: String(height) + "%" }}
+                          />
+                        );
+                      })}
                     </div>
                     <span>n={entry.size}</span>
                   </div>
@@ -789,24 +1052,32 @@ export default function Home() {
               })}
             </div>
             <div className="benchmark-legend" aria-hidden="true">
-              <span><i className="benchmark-legend__swatch benchmark-legend__swatch--insertion" />Insertion sort</span>
-              <span><i className="benchmark-legend__swatch benchmark-legend__swatch--mean" />Mean partition sort</span>
+              {BENCHMARK_ALGORITHMS.map((benchmarkAlgorithm) => (
+                <span key={benchmarkAlgorithm.key}>
+                  <i className={"benchmark-legend__swatch benchmark-legend__swatch--" + benchmarkAlgorithm.className} />
+                  {benchmarkAlgorithm.label}
+                </span>
+              ))}
             </div>
           </div>
 
           <div className="benchmark-current" aria-label={"Current benchmark at " + arraySize + " values"}>
-            <div>
-              <span>AT n={arraySize}</span>
-              <strong>Insertion sort</strong>
-              <i><b style={{ width: String((selectedBenchmark.insertion / Math.max(selectedBenchmark.insertion, selectedBenchmark.meanPartition, 1)) * 100) + "%" }} /></i>
-              <em>{formatCount(selectedBenchmark.insertion)} work units</em>
-            </div>
-            <div>
-              <span>AT n={arraySize}</span>
-              <strong>Mean partition sort</strong>
-              <i><b className="benchmark-current__mean" style={{ width: String((selectedBenchmark.meanPartition / Math.max(selectedBenchmark.insertion, selectedBenchmark.meanPartition, 1)) * 100) + "%" }} /></i>
-              <em>{formatCount(selectedBenchmark.meanPartition)} work units</em>
-            </div>
+            {BENCHMARK_ALGORITHMS.map((benchmarkAlgorithm) => {
+              const work = selectedBenchmark[benchmarkAlgorithm.key];
+              return (
+                <div key={benchmarkAlgorithm.key}>
+                  <span>AT n={arraySize}</span>
+                  <strong>{benchmarkAlgorithm.label}</strong>
+                  <i>
+                    <b
+                      className={"benchmark-current__" + benchmarkAlgorithm.className}
+                      style={{ width: String((work / selectedBenchmarkMaximum) * 100) + "%" }}
+                    />
+                  </i>
+                  <em>{formatCount(work)} work units</em>
+                </div>
+              );
+            })}
           </div>
         </section>
 
