@@ -64,7 +64,7 @@ type MeanChunk = {
   originalIndex: number;
 };
 
-export const BOGO_MAX_ATTEMPTS = 720;
+export const BOGO_MAX_ATTEMPTS = 10_000;
 
 export function createInitialStep(
   values: number[],
@@ -494,6 +494,7 @@ export function buildCocktailSteps(source: number[]): SortStep[] {
   const values = [...source];
   const settled = new Set<number>();
   const compactFrames = values.length > 64;
+  const visualInterval = Math.max(1, Math.ceil(values.length / 16));
   let lower = 0;
   let upper = values.length - 1;
   let pass = 0;
@@ -504,18 +505,18 @@ export function buildCocktailSteps(source: number[]): SortStep[] {
   while (lower < upper) {
     pass += 1;
     swapped = false;
-    steps.push(
-      makeStep(values, {
-        pass,
-        phase: compactFrames ? "sweep" : "select",
-        comparing: compactFrames ? lower : null,
-        shifting: compactFrames ? lower + 1 : null,
-        comparisons,
-        writes,
-        settled: getSettledIndices(settled),
-        message: "Sweep " + pass + ": move the largest remaining value to the right.",
-      }),
-    );
+    if (!compactFrames) {
+      steps.push(
+        makeStep(values, {
+          pass,
+          phase: "select",
+          comparisons,
+          writes,
+          settled: getSettledIndices(settled),
+          message: "Sweep " + pass + ": move the largest remaining value to the right.",
+        }),
+      );
+    }
 
     for (let index = lower; index < upper; index += 1) {
       comparisons += 1;
@@ -553,6 +554,24 @@ export function buildCocktailSteps(source: number[]): SortStep[] {
           );
         }
       }
+
+      if (
+        compactFrames &&
+        ((index - lower) % visualInterval === 0 || index === upper - 1)
+      ) {
+        steps.push(
+          makeStep(values, {
+            pass,
+            phase: "sweep",
+            comparing: index,
+            shifting: index + 1,
+            comparisons,
+            writes,
+            settled: getSettledIndices(settled),
+            message: "Sweep " + pass + ": the orange pair moves right through the row.",
+          }),
+        );
+      }
     }
 
     settled.add(upper);
@@ -573,18 +592,18 @@ export function buildCocktailSteps(source: number[]): SortStep[] {
 
     pass += 1;
     swapped = false;
-    steps.push(
-      makeStep(values, {
-        pass,
-        phase: compactFrames ? "sweep" : "select",
-        comparing: compactFrames ? upper : null,
-        shifting: compactFrames ? upper + 1 : null,
-        comparisons,
-        writes,
-        settled: getSettledIndices(settled),
-        message: "Sweep " + pass + ": move the smallest remaining value to the left.",
-      }),
-    );
+    if (!compactFrames) {
+      steps.push(
+        makeStep(values, {
+          pass,
+          phase: "select",
+          comparisons,
+          writes,
+          settled: getSettledIndices(settled),
+          message: "Sweep " + pass + ": move the smallest remaining value to the left.",
+        }),
+      );
+    }
 
     for (let index = upper; index >= lower; index -= 1) {
       comparisons += 1;
@@ -621,6 +640,24 @@ export function buildCocktailSteps(source: number[]): SortStep[] {
             }),
           );
         }
+      }
+
+      if (
+        compactFrames &&
+        ((upper - index) % visualInterval === 0 || index === lower)
+      ) {
+        steps.push(
+          makeStep(values, {
+            pass,
+            phase: "sweep",
+            comparing: index,
+            shifting: index + 1,
+            comparisons,
+            writes,
+            settled: getSettledIndices(settled),
+            message: "Sweep " + pass + ": the orange pair moves left through the row.",
+          }),
+        );
       }
     }
 

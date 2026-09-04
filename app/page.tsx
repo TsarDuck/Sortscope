@@ -81,6 +81,7 @@ const BENCHMARK_ALGORITHMS = [
 ] as const;
 type BenchmarkAlgorithm = (typeof BENCHMARK_ALGORITHMS)[number]["key"];
 type BenchmarkWork = Record<BenchmarkAlgorithm, number>;
+const BOGO_ATTEMPT_LABEL = BOGO_MAX_ATTEMPTS.toLocaleString("en-US");
 const INITIAL_VALUES = [
   17, 5, 22, 8, 19, 3, 14, 24, 1, 12, 7, 20, 10, 23, 4, 16, 9, 21, 2, 18,
   6, 15, 11, 13,
@@ -189,8 +190,8 @@ const ALGORITHM_DETAILS: Record<
     stageDescription: "random attempt",
     eyebrow: "CHAOS EXPERIMENT",
     learnTitle: "Let chance do the sorting.",
-    learnCopy: "Bogo sort checks whether the row is ordered. If not, it randomly shuffles every value and tries again. It works at every array size here, but stops after 720 attempts so the visualizer stays responsive.",
-    complexity: ["BEST O(n)", "EXPECTED O(n · n!)", "LIMIT 720 TRIES"],
+    learnCopy: "Bogo sort checks whether the row is ordered. If not, it randomly shuffles every value and tries again. It works at every array size here, but stops after " + BOGO_ATTEMPT_LABEL + " attempts so the visualizer stays responsive.",
+    complexity: ["BEST O(n)", "EXPECTED O(n · n!)", "LIMIT " + BOGO_ATTEMPT_LABEL + " TRIES"],
     cardTitle: "BOGO SORT",
     cardTag: "randomized · capped demo",
     steps: [
@@ -755,7 +756,7 @@ export default function Home() {
                   <option value="cocktail">Cocktail sort</option>
                   <option value="quick">Quick sort</option>
                   <option value="merge">Merge sort</option>
-                  <option value="bogo">Bogo sort (720-shuffle cap)</option>
+                  <option value="bogo">Bogo sort ({BOGO_ATTEMPT_LABEL}-shuffle cap)</option>
                   <option value="mean-partition">Mean partition sort (experiment)</option>
                 </select>
               </label>

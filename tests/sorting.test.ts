@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  BOGO_MAX_ATTEMPTS,
   analyzeCocktailSort,
   analyzeInsertionSort,
   analyzeMeanPartitionSort,
@@ -92,6 +93,9 @@ test("dense cocktail and merge frames keep their visual focus scoped", () => {
   for (const step of cocktailSweeps) {
     assert.equal(step.shifting, (step.comparing ?? -1) + 1);
   }
+  const firstSweep = cocktailSweeps.filter((step) => step.pass === 1);
+  assert.ok(firstSweep.length >= 4);
+  assert.notEqual(firstSweep.at(0)?.comparing, firstSweep.at(-1)?.comparing);
 
   assert.ok(mergeFrames.length > 0);
   for (const step of mergeFrames) {
@@ -117,6 +121,7 @@ test("bogo sort either succeeds by shuffle or reports its safety limit honestly"
   );
 
   assert.deepEqual(source, [2, 1]);
+  assert.equal(BOGO_MAX_ATTEMPTS, 10_000);
   assert.deepEqual(finalValues(success), [1, 2]);
   assert.equal(success.at(-1)?.phase, "complete");
   assert.equal(limited.at(-1)?.phase, "limited");
