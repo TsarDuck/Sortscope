@@ -268,6 +268,10 @@ button:disabled {
 }
 
 .control-label {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
   color: var(--muted);
   font-size: 0.63rem;
   font-weight: 800;
@@ -276,9 +280,33 @@ button:disabled {
 }
 
 .control-label strong {
-  float: right;
   color: var(--ink);
   font-size: 0.7rem;
+}
+
+.control-number {
+  width: 48px;
+  min-width: 0;
+  padding: 3px 5px;
+  border: 1px solid rgba(160, 174, 234, 0.28);
+  border-radius: 5px;
+  color: var(--ink);
+  font: inherit;
+  font-size: 0.68rem;
+  font-weight: 800;
+  line-height: 1.1;
+  text-align: right;
+  background: rgba(8, 11, 28, 0.62);
+}
+
+.control-number:focus {
+  outline: 2px solid rgba(136, 122, 255, 0.7);
+  outline-offset: 1px;
+}
+
+.control-number:disabled {
+  cursor: not-allowed;
+  opacity: 0.52;
 }
 
 select {

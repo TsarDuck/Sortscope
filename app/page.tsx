@@ -588,7 +588,9 @@ function getPhaseLabel(phase: StepPhase) {
 export default function Home() {
   const [algorithm, setAlgorithm] = useState<AlgorithmId>("insertion");
   const [arraySize, setArraySize] = useState(DEFAULT_ARRAY_SIZE);
+  const [arraySizeInput, setArraySizeInput] = useState(String(DEFAULT_ARRAY_SIZE));
   const [speed, setSpeed] = useState(DEFAULT_SPEED);
+  const [speedInput, setSpeedInput] = useState(String(DEFAULT_SPEED));
   const [benchmarkPattern, setBenchmarkPattern] =
     useState<BenchmarkPattern>("random");
   const [originalValues, setOriginalValues] = useState(INITIAL_VALUES);
@@ -806,8 +808,47 @@ export default function Home() {
   }
 
   function handleArraySizeChange(nextSize: number) {
-    setArraySize(nextSize);
-    createNewArray(nextSize);
+    const clampedSize = Math.min(maximumArraySize, Math.max(minimumArraySize, Math.round(nextSize)));
+    setArraySize(clampedSize);
+    setArraySizeInput(String(clampedSize));
+    createNewArray(clampedSize);
+  }
+
+  function handleArraySizeInputChange(input: string) {
+    setArraySizeInput(input);
+  }
+
+  function normalizeArraySizeInput() {
+    const candidate = Math.round(Number(arraySizeInput));
+    if (!Number.isFinite(candidate)) {
+      setArraySizeInput(String(arraySize));
+      return;
+    }
+    const clampedSize = Math.min(maximumArraySize, Math.max(minimumArraySize, candidate));
+    if (clampedSize !== arraySize) {
+      handleArraySizeChange(clampedSize);
+      return;
+    }
+    setArraySizeInput(String(clampedSize));
+  }
+
+  function handleSpeedChange(nextSpeed: number) {
+    const clampedSpeed = Math.min(100, Math.max(1, Math.round(nextSpeed)));
+    setSpeed(clampedSpeed);
+    setSpeedInput(String(clampedSpeed));
+  }
+
+  function handleSpeedInputChange(input: string) {
+    setSpeedInput(input);
+  }
+
+  function normalizeSpeedInput() {
+    const candidate = Math.round(Number(speedInput));
+    if (!Number.isFinite(candidate)) {
+      setSpeedInput(String(speed));
+      return;
+    }
+    handleSpeedChange(candidate);
   }
 
   const primaryLabel =
@@ -909,7 +950,22 @@ export default function Home() {
 
               <label className="control-field control-field--range">
                 <span className="control-label">
-                  Array size <strong>{arraySize}</strong>
+                  Array size
+                  <input
+                    className="control-number"
+                    type="number"
+                    min={minimumArraySize}
+                    max={maximumArraySize}
+                    step="1"
+                    value={arraySizeInput}
+                    onChange={(event) => handleArraySizeInputChange(event.target.value)}
+                    onBlur={normalizeArraySizeInput}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter") event.currentTarget.blur();
+                    }}
+                    disabled={isLocked}
+                    aria-label="Array size exact value"
+                  />
                 </span>
                 <input
                   type="range"
@@ -925,14 +981,32 @@ export default function Home() {
 
               <label className="control-field control-field--range">
                 <span className="control-label">
-                  Speed <strong>{prefersReducedMotion ? "instant" : String(speed) + "%"}</strong>
+                  Speed
+                  {prefersReducedMotion ? (
+                    <strong>instant</strong>
+                  ) : (
+                    <input
+                      className="control-number"
+                      type="number"
+                      min="1"
+                      max="100"
+                      step="1"
+                      value={speedInput}
+                      onChange={(event) => handleSpeedInputChange(event.target.value)}
+                      onBlur={normalizeSpeedInput}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter") event.currentTarget.blur();
+                      }}
+                      aria-label="Animation speed exact percent"
+                    />
+                  )}
                 </span>
                 <input
                   type="range"
                   min="1"
                   max="100"
                   value={speed}
-                  onChange={(event) => setSpeed(Number(event.target.value))}
+                  onChange={(event) => handleSpeedChange(Number(event.target.value))}
                   aria-label="Animation speed"
                 />
               </label>
