@@ -690,7 +690,7 @@ export default function Home() {
 
   const isLocked = runState === "running" || runState === "paused";
   const playbackDensity = isBogo
-    ? 24
+    ? 48
     : isMeanPartition
       ? 1
       : Math.max(1, Math.ceil(originalValues.length / 48));
