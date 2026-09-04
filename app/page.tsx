@@ -310,7 +310,10 @@ export default function Home() {
         return {
           size,
           insertionWork: insertion.comparisons + insertion.writes,
-          meanWork: meanPartition.comparisons + meanPartition.writes,
+          meanWork:
+            meanPartition.comparisons +
+            meanPartition.rankComparisons +
+            meanPartition.writes,
         };
       }),
     [benchmarkPattern],
@@ -326,7 +329,10 @@ export default function Home() {
 
     return {
       insertion: insertion.comparisons + insertion.writes,
-      meanPartition: meanPartition.comparisons + meanPartition.writes,
+      meanPartition:
+        meanPartition.comparisons +
+        meanPartition.rankComparisons +
+        meanPartition.writes,
     };
   }, [arraySize, benchmarkPattern]);
 
@@ -736,8 +742,8 @@ export default function Home() {
               <h2 id="comparison-title">Compare the work behind the motion.</h2>
               <p>
                 Both algorithms receive the same shuffled sequence of 1 through n.
-                The chart adds each algorithm’s value checks or group-mean reads to
-                its item moves, so it is an operation estimate rather than a timer.
+                The chart totals value checks or group-mean reads, group-ranking
+                checks, and item moves, so it is an operation estimate rather than a timer.
               </p>
             </div>
             <label className="benchmark-select">

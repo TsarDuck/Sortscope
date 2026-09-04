@@ -37,6 +37,7 @@ export type SortStep = {
 
 export type SortMetrics = {
   comparisons: number;
+  rankComparisons: number;
   writes: number;
   rounds: number;
   finalValues: number[];
@@ -136,6 +137,27 @@ function compareMeans(left: MeanChunk, right: MeanChunk) {
 
   if (meanDifference !== 0) return meanDifference;
   return left.originalIndex - right.originalIndex;
+}
+
+function rankMeanChunks(chunks: MeanChunk[]) {
+  const ranked = [...chunks];
+  let comparisons = 0;
+
+  for (let index = 1; index < ranked.length; index += 1) {
+    const candidate = ranked[index];
+    let cursor = index - 1;
+
+    while (cursor >= 0) {
+      comparisons += 1;
+      if (compareMeans(ranked[cursor], candidate) <= 0) break;
+      ranked[cursor + 1] = ranked[cursor];
+      cursor -= 1;
+    }
+
+    ranked[cursor + 1] = candidate;
+  }
+
+  return { chunks: ranked, comparisons };
 }
 
 export function buildInsertionSteps(source: number[]): SortStep[] {
@@ -315,7 +337,7 @@ export function buildMeanPartitionSteps(source: number[]): SortStep[] {
       groups,
     });
 
-    const rankedChunks = [...chunks].sort(compareMeans);
+    const rankedChunks = rankMeanChunks(chunks).chunks;
     valuesReordered += rankedChunks.reduce(
       (total, chunk, nextIndex) =>
         total + (chunk.originalIndex === nextIndex ? 0 : chunk.values.length),
@@ -391,6 +413,7 @@ export function analyzeInsertionSort(source: number[]): SortMetrics {
 
   return {
     comparisons,
+    rankComparisons: 0,
     writes,
     rounds: Math.max(values.length - 1, 0),
     finalValues: values,
@@ -403,11 +426,13 @@ export function analyzeMeanPartitionSort(source: number[]): SortMetrics {
   let groupCount = 2;
   let rounds = 0;
   let meansCalculated = 0;
+  let rankComparisons = 0;
   let valuesReordered = 0;
 
   if (working.length <= 1) {
     return {
       comparisons: 0,
+      rankComparisons: 0,
       writes: 0,
       rounds: 0,
       finalValues: working,
@@ -418,7 +443,9 @@ export function analyzeMeanPartitionSort(source: number[]): SortMetrics {
     rounds += 1;
     const chunks = buildMeanChunks(working, groupCount);
     meansCalculated += chunks.length;
-    const rankedChunks = [...chunks].sort(compareMeans);
+    const ranking = rankMeanChunks(chunks);
+    rankComparisons += ranking.comparisons;
+    const rankedChunks = ranking.chunks;
 
     valuesReordered += rankedChunks.reduce(
       (total, chunk, nextIndex) =>
@@ -430,6 +457,7 @@ export function analyzeMeanPartitionSort(source: number[]): SortMetrics {
     if (isNonDecreasing(working) || groupCount >= sourceValues.length) {
       return {
         comparisons: meansCalculated,
+        rankComparisons,
         writes: valuesReordered,
         rounds,
         finalValues: working,
