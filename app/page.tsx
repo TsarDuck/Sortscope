@@ -67,6 +67,24 @@ type MeanGroup = {
 
 type BenchmarkPattern = "random" | "reverse" | "nearly-sorted";
 
+type BlockPracticeStep = {
+  prompt: string;
+  start: number[];
+  target: number[];
+  hint: string;
+  kind?: "blocks";
+};
+
+type PartitionPracticeStep = {
+  prompt: string;
+  partitions: Array<{ id: string; values: number[]; mean: number }>;
+  targetOrder: string[];
+  hint: string;
+  kind: "partitions";
+};
+
+type PracticeStep = BlockPracticeStep | PartitionPracticeStep;
+
 type SortStep = {
   values: number[];
   pass: number;
@@ -113,7 +131,7 @@ const BENCHMARK_ALGORITHMS = [
 type BenchmarkAlgorithm = (typeof BENCHMARK_ALGORITHMS)[number]["key"];
 type BenchmarkWork = Record<BenchmarkAlgorithm, number>;
 const BOGO_MIN_ATTEMPTS = 1_000;
-const BOGO_SMALL_ARRAY_MAX_ATTEMPTS = 1_000_000_000;
+const BOGO_SMALL_ARRAY_MAX_ATTEMPTS = 999_999_999;
 const BOGO_MID_ARRAY_MAX_ATTEMPTS = 100_000_000;
 const BOGO_LARGE_ARRAY_MAX_ATTEMPTS = 1_000_000;
 const INITIAL_VALUES = [
@@ -152,11 +170,13 @@ const ALGORITHM_DETAILS: Record<
     stageDescription: string;
     eyebrow: string;
     learnTitle: string;
-    learnCopy: string;
+    learnCopy: string[];
     complexity: [string, string, string];
     cardTitle: string;
     cardTag: string;
     steps: string[];
+    examples: Array<{ values: string; detail: string }>;
+    practice: PracticeStep[];
   }
 > = {
   insertion: {
@@ -168,7 +188,10 @@ const ALGORITHM_DETAILS: Record<
     stageDescription: "key placement",
     eyebrow: "THE BIG IDEA",
     learnTitle: "Like sorting cards in your hand.",
-    learnCopy: "Insertion sort grows a tidy section from left to right. It picks up one value, shifts larger neighbors aside, then drops that value into the gap it created.",
+    learnCopy: [
+      "Insertion sort keeps the left side of the row sorted at all times. It then takes the next value from the unsorted side—the key—and finds where that key belongs in the sorted side.",
+      "Instead of swapping the key over and over, it shifts every larger value one place right to open a gap. The key drops into that gap. Because the left side was sorted before and the key is inserted in the right spot, the left side is still sorted afterward.",
+    ],
     complexity: ["BEST O(n)", "AVERAGE O(n²)", "SPACE O(1)"],
     cardTitle: "INSERTION SORT",
     cardTag: "stable · in-place",
@@ -176,6 +199,16 @@ const ALGORITHM_DETAILS: Record<
       "Choose the next value as the key.",
       "Compare it to values in the sorted prefix.",
       "Shift larger values right, then insert the key.",
+    ],
+    examples: [
+      { values: "[5 | 3, 4, 1]", detail: "Treat 5 as a one-value sorted prefix; 3 is the next key." },
+      { values: "[3, 5 | 4, 1]", detail: "3 is smaller than 5, so 5 slides right and 3 uses the new gap." },
+      { values: "[3, 4, 5 | 1]", detail: "Repeat for 4; the sorted prefix grows by one value every pass." },
+    ],
+    practice: [
+      { prompt: "Take 3 and slide it before 5.", start: [5, 3, 4, 1], target: [3, 5, 4, 1], hint: "The key is smaller than the only sorted value." },
+      { prompt: "Now place 4 into the sorted prefix.", start: [3, 5, 4, 1], target: [3, 4, 5, 1], hint: "4 belongs between 3 and 5." },
+      { prompt: "Slide 1 into its final position in the prefix.", start: [3, 4, 5, 1], target: [1, 3, 4, 5], hint: "1 is smaller than every value already in the prefix." },
     ],
   },
   cocktail: {
@@ -187,7 +220,10 @@ const ALGORITHM_DETAILS: Record<
     stageDescription: "forward or backward pass",
     eyebrow: "THE BIG IDEA",
     learnTitle: "Bubble both ways.",
-    learnCopy: "Cocktail sort is a bidirectional bubble sort. A forward sweep settles a large value at the right edge, then a backward sweep settles a small one at the left edge.",
+    learnCopy: [
+      "Cocktail sort is bubble sort in two directions. On a forward sweep it compares neighbors from left to right and swaps a pair when the left value is larger. Large values therefore drift toward the right edge.",
+      "It then turns around. The backward sweep compares neighbors from right to left, letting small values drift toward the left edge. After a forward and backward pair, both outer edges are more settled, so later sweeps only need to inspect the middle.",
+    ],
     complexity: ["BEST O(n)", "AVERAGE O(n²)", "SPACE O(1)"],
     cardTitle: "COCKTAIL SORT",
     cardTag: "stable · in-place",
@@ -195,6 +231,16 @@ const ALGORITHM_DETAILS: Record<
       "Compare neighboring values while moving right.",
       "Swap out-of-order neighbors to settle the largest value.",
       "Reverse direction to settle the smallest remaining value.",
+    ],
+    examples: [
+      { values: "[4, 1, 3, 2] → [1, 4, 3, 2]", detail: "The first forward comparison finds 4 > 1, so those neighbors trade places." },
+      { values: "[1, 4, 3, 2] → [1, 3, 2, 4]", detail: "Continuing right pushes 4 to the far edge, where it is settled." },
+      { values: "[1, 3, 2, 4] → [1, 2, 3, 4]", detail: "The backward sweep fixes the small value that needs to travel left." },
+    ],
+    practice: [
+      { prompt: "Start the forward sweep by moving 1 ahead of 4.", start: [4, 1, 3, 2], target: [1, 4, 3, 2], hint: "Compare the first neighboring pair." },
+      { prompt: "Finish this forward sweep so 4 reaches the settled right edge.", start: [1, 4, 3, 2], target: [1, 3, 2, 4], hint: "The largest value belongs at the far right after a forward pass." },
+      { prompt: "Use the backward sweep to finish the middle pair.", start: [1, 3, 2, 4], target: [1, 2, 3, 4], hint: "The smaller value travels left on the return pass." },
     ],
   },
   selection: {
@@ -206,7 +252,10 @@ const ALGORITHM_DETAILS: Record<
     stageDescription: "minimum placement",
     eyebrow: "THE BIG IDEA",
     learnTitle: "Choose the next spot deliberately.",
-    learnCopy: "Selection sort scans the unsorted part of the row for its smallest value, then swaps that value into the next open position. It makes few swaps, but still has to keep looking through the rest of the row.",
+    learnCopy: [
+      "Selection sort divides the row into a finished left section and an unsorted right section. For each open position on the left, it scans every remaining value to find the smallest one.",
+      "Only after the full scan does it place that minimum in the open position. That means it usually performs very few placements—about one per position—but it still performs many comparisons because it repeatedly searches the rest of the row.",
+    ],
     complexity: ["BEST O(n²)", "AVERAGE O(n²)", "SPACE O(1)"],
     cardTitle: "SELECTION SORT",
     cardTag: "in-place · choice-based",
@@ -214,6 +263,15 @@ const ALGORITHM_DETAILS: Record<
       "Start at the first unsorted position.",
       "Scan the remaining values for the smallest one.",
       "Swap that minimum into the next sorted spot.",
+    ],
+    examples: [
+      { values: "[4, 2, 5, 1]", detail: "The first open spot is position 0, so scan all four values for the minimum." },
+      { values: "minimum = 1", detail: "1 is remembered as the best candidate only after every remaining value has been checked." },
+      { values: "[1 | 2, 5, 4]", detail: "Place 1 first, then repeat the same search for the next open spot." },
+    ],
+    practice: [
+      { prompt: "Place the smallest value, 1, into the first open spot.", start: [4, 2, 5, 1], target: [1, 4, 2, 5], hint: "Selection sort searches the whole row before making this placement." },
+      { prompt: "From the remaining values, place 2 in the next open spot.", start: [1, 4, 2, 5], target: [1, 2, 4, 5], hint: "The finished left section should stay untouched." },
     ],
   },
   heap: {
@@ -225,7 +283,10 @@ const ALGORITHM_DETAILS: Record<
     stageDescription: "heap extraction",
     eyebrow: "THE BIG IDEA",
     learnTitle: "Keep the largest value on top.",
-    learnCopy: "Heap sort arranges the active values into a max heap, where the largest value sits at the root. It swaps that root to the sorted right edge, then sifts a new root down to rebuild the heap.",
+    learnCopy: [
+      "Heap sort treats the row like a compact binary tree. In a max heap, every parent is at least as large as either of its children, so the root at the far left is always the largest active value.",
+      "First it rearranges the row into that heap shape. Then it moves the root to the far right, where that largest value is final. A new root may now be too small, so it is sifted downward until the heap rule is restored. The active heap shrinks by one each time.",
+    ],
     complexity: ["TIME O(n log n)", "IN-PLACE YES", "SPACE O(1)"],
     cardTitle: "HEAP SORT",
     cardTag: "in-place · heap-based",
@@ -233,6 +294,16 @@ const ALGORITHM_DETAILS: Record<
       "Build a max heap from the whole row.",
       "Move the root—the largest value—to the right edge.",
       "Sift the new root down and extract again.",
+    ],
+    examples: [
+      { values: "[3, 1, 4, 2] → [4, 2, 3, 1]", detail: "Rearrange the row so the largest value, 4, reaches the tree root." },
+      { values: "[1, 2, 3 | 4]", detail: "Move the root to the right; 4 is now in its final sorted position." },
+      { values: "[3, 2, 1 | 4]", detail: "Sift the new root down so the remaining active values again obey the heap rule." },
+    ],
+    practice: [
+      { prompt: "Move the largest value, 4, to the heap root on the left.", start: [3, 1, 4, 2], target: [4, 3, 1, 2], hint: "A max heap must expose its largest active value first." },
+      { prompt: "Extract 4 to the sorted right edge.", start: [4, 3, 1, 2], target: [3, 1, 2, 4], hint: "The right edge is outside the active heap once a value is extracted." },
+      { prompt: "Restore the max-heap order among the remaining three values.", start: [3, 1, 2, 4], target: [3, 2, 1, 4], hint: "The root stays largest, then its children follow." },
     ],
   },
   quick: {
@@ -244,7 +315,10 @@ const ALGORITHM_DETAILS: Record<
     stageDescription: "pivot placement",
     eyebrow: "THE BIG IDEA",
     learnTitle: "Put pivots in their final places.",
-    learnCopy: "Quick sort chooses a pivot and partitions the active range so smaller values go left and larger values go right. Each pivot then stays in its final position.",
+    learnCopy: [
+      "Quick sort chooses one value as a pivot. It scans the active range and moves values smaller than the pivot to its left, while values larger than the pivot end up on its right.",
+      "When the scan is finished, the pivot is placed between those two groups. It is now in its final sorted position: nothing on the left can be larger, and nothing on the right can be smaller. Quick sort repeats the same idea independently on the two smaller ranges.",
+    ],
     complexity: ["AVERAGE O(n log n)", "WORST O(n²)", "SPACE O(log n)"],
     cardTitle: "QUICK SORT",
     cardTag: "in-place · pivot-based",
@@ -252,6 +326,16 @@ const ALGORITHM_DETAILS: Record<
       "Choose the rightmost value as the pivot.",
       "Move smaller values to the pivot's left side.",
       "Place the pivot, then partition each remaining side.",
+    ],
+    examples: [
+      { values: "[4, 1, 3 | 2]", detail: "Use 2 as the pivot; the vertical bar marks the value that will end in its final place." },
+      { values: "[1 | 4, 3 | 2]", detail: "Only 1 is smaller than 2, so it belongs on the pivot's left." },
+      { values: "[1, 2 | 3, 4]", detail: "Place the pivot, then sort the left and right ranges separately." },
+    ],
+    practice: [
+      { prompt: "Place the value smaller than pivot 2 on its left side.", start: [4, 1, 3, 2], target: [1, 4, 3, 2], hint: "Only 1 is smaller than the pivot." },
+      { prompt: "Put pivot 2 between the smaller and larger groups.", start: [1, 4, 3, 2], target: [1, 2, 4, 3], hint: "Everything left of 2 must be smaller; everything right must be larger." },
+      { prompt: "Finish the tiny right-side range.", start: [1, 2, 4, 3], target: [1, 2, 3, 4], hint: "Quick sort now works on the range to the pivot's right." },
     ],
   },
   merge: {
@@ -263,7 +347,10 @@ const ALGORITHM_DETAILS: Record<
     stageDescription: "run merging",
     eyebrow: "THE BIG IDEA",
     learnTitle: "Combine sorted pieces.",
-    learnCopy: "Merge sort treats each value as a one-item ordered run, then repeatedly combines neighboring runs by taking the next smallest available value.",
+    learnCopy: [
+      "Merge sort begins with a useful fact: a single value is already sorted. It repeatedly joins neighboring sorted runs into longer sorted runs, doubling the run size each pass.",
+      "To merge two runs, compare their front values and write the smaller front value into a temporary output. Continue until one run is empty, then copy the remaining values from the other run. Because both inputs were sorted, each choice is safe and the combined run is sorted too.",
+    ],
     complexity: ["TIME O(n log n)", "STABLE YES", "SPACE O(n)"],
     cardTitle: "MERGE SORT",
     cardTag: "stable · divide and conquer",
@@ -271,6 +358,16 @@ const ALGORITHM_DETAILS: Record<
       "Start with one-value ordered runs.",
       "Compare the front values of two neighboring runs.",
       "Write the smaller one into a larger merged run.",
+    ],
+    examples: [
+      { values: "[4] [1] [3] [2]", detail: "Each one-value run is already ordered, even though the whole row is not." },
+      { values: "[4] + [1] → [1, 4]", detail: "Compare 4 and 1; write the smaller front value first, then copy what remains." },
+      { values: "[1, 4] + [2, 3] → [1, 2, 3, 4]", detail: "Merge the two sorted pairs by repeatedly taking the smaller front value." },
+    ],
+    practice: [
+      { prompt: "Merge the first two one-value runs into sorted order.", start: [4, 1, 3, 2], target: [1, 4, 3, 2], hint: "The smaller front value is written first." },
+      { prompt: "Merge the second pair into sorted order.", start: [1, 4, 3, 2], target: [1, 4, 2, 3], hint: "Keep each two-value run ordered before the final merge." },
+      { prompt: "Merge the two sorted pairs into one ordered row.", start: [1, 4, 2, 3], target: [1, 2, 3, 4], hint: "Compare the front values of the two runs every time." },
     ],
   },
   bogo: {
@@ -282,7 +379,10 @@ const ALGORITHM_DETAILS: Record<
     stageDescription: "random attempt",
     eyebrow: "CHAOS EXPERIMENT",
     learnTitle: "Let chance do the sorting.",
-    learnCopy: "Bogo sort checks whether the row is ordered. If not, it randomly shuffles every value and tries again. It works at every array size here, but stops at the maximum shuffle count you set.",
+    learnCopy: [
+      "Bogo sort has no strategy for improving the row. It checks whether the row is sorted; if the answer is no, it produces a completely random new order and checks again.",
+      "For n values there are n! possible orders, but only one is fully sorted. That means its odds collapse extremely quickly as n grows. The shuffle cap is not a shortcut to make Bogo practical—it simply stops the experiment before it can run forever.",
+    ],
     complexity: ["BEST O(n)", "EXPECTED O(n · n!)", "LIMIT YOU SET"],
     cardTitle: "BOGO SORT",
     cardTag: "randomized · capped demo",
@@ -290,6 +390,15 @@ const ALGORITHM_DETAILS: Record<
       "Check whether the entire row is ordered.",
       "Shuffle every value when it is not.",
       "Repeat until it works—or the safety limit stops it.",
+    ],
+    examples: [
+      { values: "[3, 1, 2]", detail: "Check adjacent values: 3 > 1, so this attempt has failed." },
+      { values: "shuffle → [2, 3, 1]", detail: "A new random order is not guided by any comparison or rule." },
+      { values: "lucky shuffle → [1, 2, 3]", detail: "Only by chance does one attempt land on the sorted permutation." },
+    ],
+    practice: [
+      { prompt: "For this tiny example, arrange the lucky sorted shuffle.", start: [3, 1, 2], target: [1, 2, 3], hint: "Bogo has no smarter move—you are just modeling the lucky outcome." },
+      { prompt: "Try a second tiny lucky outcome with four values.", start: [2, 4, 1, 3], target: [1, 2, 3, 4], hint: "There is only one successful order among all possible shuffles." },
     ],
   },
   "mean-partition": {
@@ -301,7 +410,10 @@ const ALGORITHM_DETAILS: Record<
     stageDescription: "mean grouping",
     eyebrow: "EXPERIMENTAL IDEA",
     learnTitle: "Sort blocks before sorting values.",
-    learnCopy: "Each round splits the newly arranged row into more balanced groups, calculates every group average, then ranks all groups from low mean to high mean. A mean does not guarantee that a whole block belongs before another one, so the process continues until each group holds one value.",
+    learnCopy: [
+      "Mean partition sort repeatedly cuts the current row into balanced groups: first 2 groups, then 4, then 8, and so on. It computes each group’s arithmetic mean—the sum divided by the number of values—and moves whole groups so lower means are left of higher means.",
+      "A low group mean is only a clue, not proof that every value in that group belongs before every value in another group. That is why the process keeps splitting. Once every group contains one value, its mean is the value itself, so arranging the group means is guaranteed to arrange the row.",
+    ],
     complexity: ["ROUNDS O(log n)", "GUARANTEE SINGLETON ROUND", "SPACE O(n)"],
     cardTitle: "MEAN PARTITION SORT",
     cardTag: "experimental · group-based",
@@ -310,6 +422,34 @@ const ALGORITHM_DETAILS: Record<
       "Calculate the average of every group.",
       "Rank all groups from the smallest mean to the largest.",
       "At singleton groups, each mean is the value itself.",
+    ],
+    examples: [
+      { values: "[1, 100] μ=50.5 | [49, 50] μ=49.5", detail: "The second group has the lower average, even though 100 is still inside the first group." },
+      { values: "[49, 50 | 1, 100]", detail: "Rank the whole groups by mean: 49.5 goes left of 50.5." },
+      { values: "[1] [49] [50] [100]", detail: "After splitting into singleton groups, each displayed mean equals that one value." },
+      { values: "[1, 49, 50, 100]", detail: "Ranking those singleton groups is exactly a normal numeric sort." },
+    ],
+    practice: [
+      {
+        kind: "partitions",
+        prompt: "Drag the lower-mean partition to the left of the higher-mean partition.",
+        partitions: [
+          { id: "high", values: [1, 100], mean: 50.5 },
+          { id: "low", values: [49, 50], mean: 49.5 },
+        ],
+        targetOrder: ["low", "high"],
+        hint: "49.5 is lower than 50.5, so its whole group ranks first." },
+      {
+        kind: "partitions",
+        prompt: "Now the groups are single values. Rank their displayed means from low to high.",
+        partitions: [
+          { id: "forty-nine", values: [49], mean: 49 },
+          { id: "fifty", values: [50], mean: 50 },
+          { id: "one", values: [1], mean: 1 },
+          { id: "hundred", values: [100], mean: 100 },
+        ],
+        targetOrder: ["one", "forty-nine", "fifty", "hundred"],
+        hint: "For a singleton group, μ is just the number written on the block." },
     ],
   },
 };
@@ -638,6 +778,13 @@ export default function Home() {
   const [bogoLiveStep, setBogoLiveStep] = useState<SortStep | null>(null);
   const [bogoCelebration, setBogoCelebration] = useState(false);
   const [soundVolume, setSoundVolume] = useState(50);
+  const [practiceStepIndex, setPracticeStepIndex] = useState(0);
+  const [practiceValues, setPracticeValues] = useState([5, 3, 4, 1]);
+  const [practicePartitionOrder, setPracticePartitionOrder] = useState<string[]>([]);
+  const [practiceSelectedIndex, setPracticeSelectedIndex] = useState<number | null>(null);
+  const [practiceDragIndex, setPracticeDragIndex] = useState<number | null>(null);
+  const [practiceSolved, setPracticeSolved] = useState(false);
+  const [practiceFeedback, setPracticeFeedback] = useState<string | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const lastToneTimeRef = useRef(0);
   const meanBarElementsRef = useRef(new Map<number, HTMLDivElement>());
@@ -649,9 +796,13 @@ export default function Home() {
   const isMeanPartition = algorithm === "mean-partition";
   const isBogo = algorithm === "bogo";
   const bogoAttemptMaximum = getBogoAttemptMaximum(arraySize);
-  const bogoSliderStep = Math.max(BOGO_MIN_ATTEMPTS, Math.round(bogoAttemptMaximum / 10_000));
+  const bogoSliderStep = 1;
   const soundEnabled = soundVolume > 0;
   const algorithmDetails = ALGORITHM_DETAILS[algorithm];
+  const practiceSteps = algorithmDetails.practice;
+  const practiceFinished = practiceStepIndex >= practiceSteps.length;
+  const currentPractice = practiceSteps[Math.min(practiceStepIndex, practiceSteps.length - 1)];
+  const isPartitionPractice = currentPractice.kind === "partitions";
   const algorithmLabel = algorithmDetails.label;
   const stageLabel = algorithmDetails.stageLabel;
   const totalStages = isMeanPartition
@@ -903,8 +1054,8 @@ export default function Home() {
     const oscillator = context.createOscillator();
     const gain = context.createGain();
     const duration = step.phase === "swap" || step.phase === "merge" ? 0.05 : 0.032;
-    const basePeakGain = step.phase === "swap" ? 0.14 : 0.096;
-    const peakGain = basePeakGain * (soundVolume / 100) ** 2;
+    const basePeakGain = step.phase === "swap" ? 0.2 : 0.14;
+    const peakGain = basePeakGain * (soundVolume / 100) ** 2.5;
 
     oscillator.type = step.phase === "swap" || step.phase === "shift" ? "triangle" : "sine";
     oscillator.frequency.setValueAtTime(180 + normalizedValue * 700, now);
@@ -929,7 +1080,7 @@ export default function Home() {
       const gain = context.createGain();
       const startTime = now + index * 0.1;
       const duration = index === notes.length - 1 ? 0.38 : 0.14;
-      const peakGain = 0.11 * (soundVolume / 100) ** 2;
+      const peakGain = 0.16 * (soundVolume / 100) ** 2.5;
 
       oscillator.type = index === notes.length - 1 ? "triangle" : "sine";
       oscillator.frequency.setValueAtTime(frequency, startTime);
@@ -1045,6 +1196,111 @@ export default function Home() {
     if (element) meanBarElementsRef.current.set(value, element);
   }
 
+  function resetPractice(nextAlgorithm = algorithm) {
+    const firstStep = ALGORITHM_DETAILS[nextAlgorithm].practice[0];
+    setPracticeStepIndex(0);
+    setPracticeSelectedIndex(null);
+    setPracticeDragIndex(null);
+    setPracticeSolved(false);
+    setPracticeFeedback(null);
+
+    if (firstStep.kind === "partitions") {
+      setPracticeValues([]);
+      setPracticePartitionOrder(firstStep.partitions.map((partition) => partition.id));
+      return;
+    }
+
+    setPracticeValues([...firstStep.start]);
+    setPracticePartitionOrder([]);
+  }
+
+  function movePracticeItem(fromIndex: number, toIndex: number) {
+    if (practiceFinished || fromIndex === toIndex) return;
+
+    if (isPartitionPractice) {
+      setPracticePartitionOrder((currentOrder) => {
+        const nextOrder = [...currentOrder];
+        const [moved] = nextOrder.splice(fromIndex, 1);
+        nextOrder.splice(toIndex, 0, moved);
+        return nextOrder;
+      });
+    } else {
+      setPracticeValues((currentValues) => {
+        const nextValues = [...currentValues];
+        const [moved] = nextValues.splice(fromIndex, 1);
+        nextValues.splice(toIndex, 0, moved);
+        return nextValues;
+      });
+    }
+
+    setPracticeSelectedIndex(null);
+    setPracticeSolved(false);
+    setPracticeFeedback(null);
+  }
+
+  function handlePracticeBlockClick(index: number) {
+    if (practiceFinished) return;
+    if (practiceSelectedIndex === null) {
+      setPracticeSelectedIndex(index);
+      return;
+    }
+
+    if (practiceSelectedIndex === index) {
+      setPracticeSelectedIndex(null);
+      return;
+    }
+
+    movePracticeItem(practiceSelectedIndex, index);
+  }
+
+  function checkPracticeStep() {
+    const isCorrect = isPartitionPractice
+      ? currentPractice.targetOrder.every(
+          (partitionId, index) => practicePartitionOrder[index] === partitionId,
+        )
+      : currentPractice.target.every((value, index) => practiceValues[index] === value);
+
+    if (isCorrect) {
+      setPracticeSolved(true);
+      setPracticeFeedback(
+        practiceStepIndex === practiceSteps.length - 1
+          ? "Correct—this completes the walkthrough."
+          : "Correct. You followed the rule for this step; continue to the next one.",
+      );
+      return;
+    }
+
+    setPracticeSolved(false);
+    setPracticeFeedback("Not quite. Hint: " + currentPractice.hint);
+  }
+
+  function advancePracticeStep() {
+    const nextStepIndex = practiceStepIndex + 1;
+    if (nextStepIndex >= practiceSteps.length) {
+      setPracticeStepIndex(practiceSteps.length);
+      setPracticeSelectedIndex(null);
+      setPracticeDragIndex(null);
+      setPracticeSolved(false);
+      return;
+    }
+
+    const nextStep = practiceSteps[nextStepIndex];
+    setPracticeStepIndex(nextStepIndex);
+    setPracticeSelectedIndex(null);
+    setPracticeDragIndex(null);
+    setPracticeSolved(false);
+    setPracticeFeedback(null);
+
+    if (nextStep.kind === "partitions") {
+      setPracticeValues([]);
+      setPracticePartitionOrder(nextStep.partitions.map((partition) => partition.id));
+      return;
+    }
+
+    setPracticeValues([...nextStep.start]);
+    setPracticePartitionOrder([]);
+  }
+
   function handleAlgorithmChange(nextAlgorithm: AlgorithmId) {
     setBogoCelebration(false);
     bogoSessionRef.current = null;
@@ -1054,6 +1310,7 @@ export default function Home() {
     setSteps([]);
     setStepIndex(0);
     setRunState("ready");
+    resetPractice(nextAlgorithm);
   }
 
   function handlePrimaryAction() {
@@ -1562,7 +1819,11 @@ export default function Home() {
           <div className="learn-copy">
             <p className="eyebrow">{algorithmDetails.eyebrow}</p>
             <h2 id="learn-title">{algorithmDetails.learnTitle}</h2>
-            <p>{algorithmDetails.learnCopy}</p>
+            <div className="learn-copy__explanation">
+              {algorithmDetails.learnCopy.map((paragraph) => (
+                <p key={paragraph}>{paragraph}</p>
+              ))}
+            </div>
             <div className="complexity-row" aria-label={algorithmLabel + " characteristics"}>
               {algorithmDetails.complexity.map((item) => {
                 const [label, ...detail] = item.split(" ");
@@ -1577,13 +1838,120 @@ export default function Home() {
               <span>{algorithmDetails.cardTag}</span>
             </div>
             <ol className="algorithm-steps">
-              {algorithmDetails.steps.map((step, index) => (
+              {algorithmDetails.steps.map((step, index) => {
+                const example = algorithmDetails.examples[index];
+                return (
                 <li key={step}>
                   <i>{String(index + 1).padStart(2, "0")}</i>
-                  <span>{step}</span>
+                  <div className="algorithm-step__body">
+                    <strong>{step}</strong>
+                    <code>{example.values}</code>
+                    <p>{example.detail}</p>
+                  </div>
                 </li>
-              ))}
+                );
+              })}
             </ol>
+          </div>
+
+          <div className="practice-lab" aria-labelledby="practice-title">
+            <div className="practice-lab__header">
+              <div>
+                <p className="eyebrow">TRY IT YOURSELF</p>
+                <h3 id="practice-title">Move the blocks, then check the rule.</h3>
+              </div>
+              <span>
+                {practiceFinished
+                  ? "complete"
+                  : "step " + String(practiceStepIndex + 1) + " of " + String(practiceSteps.length)}
+              </span>
+            </div>
+            <p className="practice-lab__prompt">
+              {practiceFinished
+                ? "You completed this small walkthrough. Restart it any time to practice the moves again."
+                : currentPractice.prompt}
+            </p>
+            <p className="practice-lab__help">
+              Drag a block to slide it into a new place, or select one block and then select its destination.
+            </p>
+            <div className="practice-board" role="group" aria-label={algorithmLabel + " interactive practice blocks"}>
+              {isPartitionPractice
+                ? practicePartitionOrder.map((partitionId, index) => {
+                    const partition = currentPractice.partitions.find(
+                      (candidate) => candidate.id === partitionId,
+                    );
+                    if (!partition) return null;
+                    return (
+                      <button
+                        className={
+                          "practice-block practice-block--partition " +
+                          (practiceSelectedIndex === index ? "practice-block--selected" : "")
+                        }
+                        type="button"
+                        key={partition.id}
+                        draggable={!practiceFinished}
+                        onDragStart={() => setPracticeDragIndex(index)}
+                        onDragOver={(event) => event.preventDefault()}
+                        onDrop={(event) => {
+                          event.preventDefault();
+                          if (practiceDragIndex !== null) movePracticeItem(practiceDragIndex, index);
+                        }}
+                        onDragEnd={() => setPracticeDragIndex(null)}
+                        onClick={() => handlePracticeBlockClick(index)}
+                        aria-pressed={practiceSelectedIndex === index}
+                      >
+                        <span>[{partition.values.join(", ")}]</span>
+                        <strong>μ {formatMean(partition.mean)}</strong>
+                      </button>
+                    );
+                  })
+                : practiceValues.map((value, index) => (
+                    <button
+                      className={
+                        "practice-block " +
+                        (practiceSelectedIndex === index ? "practice-block--selected" : "")
+                      }
+                      type="button"
+                      key={value}
+                      draggable={!practiceFinished}
+                      onDragStart={() => setPracticeDragIndex(index)}
+                      onDragOver={(event) => event.preventDefault()}
+                      onDrop={(event) => {
+                        event.preventDefault();
+                        if (practiceDragIndex !== null) movePracticeItem(practiceDragIndex, index);
+                      }}
+                      onDragEnd={() => setPracticeDragIndex(null)}
+                      onClick={() => handlePracticeBlockClick(index)}
+                      aria-pressed={practiceSelectedIndex === index}
+                    >
+                      {value}
+                    </button>
+                  ))}
+            </div>
+            <div className="practice-lab__actions">
+              {practiceFinished ? (
+                <button className="button button--secondary" type="button" onClick={() => resetPractice()}>
+                  Restart walkthrough
+                </button>
+              ) : (
+                <>
+                  <button className="button button--secondary" type="button" onClick={checkPracticeStep}>
+                    Check step
+                  </button>
+                  <button className="text-button" type="button" onClick={() => resetPractice()}>
+                    Reset walkthrough
+                  </button>
+                  {practiceSolved && (
+                    <button className="button button--primary" type="button" onClick={advancePracticeStep}>
+                      {practiceStepIndex === practiceSteps.length - 1 ? "Finish walkthrough" : "Next step"}
+                    </button>
+                  )}
+                </>
+              )}
+            </div>
+            <p className={"practice-lab__feedback " + (practiceSolved ? "practice-lab__feedback--success" : "")} aria-live="polite">
+              {practiceFeedback ?? ""}
+            </p>
           </div>
         </section>
 
