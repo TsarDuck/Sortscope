@@ -131,7 +131,7 @@ test("bogo sort either succeeds by shuffle or reports its safety limit honestly"
   );
 
   assert.deepEqual(source, [2, 1]);
-  assert.equal(BOGO_MAX_ATTEMPTS, 10_000);
+  assert.equal(BOGO_MAX_ATTEMPTS, 100_000);
   assert.deepEqual(finalValues(success), [1, 2]);
   assert.equal(success.at(-1)?.phase, "complete");
   assert.equal(limited.at(-1)?.phase, "limited");

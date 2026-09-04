@@ -67,7 +67,7 @@ type MeanChunk = {
   originalIndex: number;
 };
 
-export const BOGO_MAX_ATTEMPTS = 10_000;
+export const BOGO_MAX_ATTEMPTS = 100_000;
 
 export function createInitialStep(
   values: number[],
@@ -1194,8 +1194,10 @@ export function buildBogoSteps(
   const values = [...source];
   let comparisons = 0;
   let writes = 0;
-  const snapshotInterval =
-    values.length > 128 ? 50 : values.length > 64 ? 25 : values.length > 24 ? 10 : 5;
+  const snapshotInterval = Math.max(
+    values.length > 128 ? 50 : values.length > 64 ? 25 : values.length > 24 ? 10 : 5,
+    Math.ceil(attemptLimit / 200),
+  );
 
   const initialCheck = countSortedCheck(values);
   comparisons += initialCheck.comparisons;
