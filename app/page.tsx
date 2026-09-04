@@ -612,6 +612,7 @@ export default function Home() {
   const [runState, setRunState] = useState<RunState>("ready");
   const [bogoCelebration, setBogoCelebration] = useState(false);
   const [soundEnabled, setSoundEnabled] = useState(true);
+  const [soundVolume, setSoundVolume] = useState(50);
   const audioContextRef = useRef<AudioContext | null>(null);
   const lastToneTimeRef = useRef(0);
   const prefersReducedMotion = usePrefersReducedMotion();
@@ -708,6 +709,7 @@ export default function Home() {
       return;
     }
 
+    if (soundEnabled) playBogoVictorySound();
     setBogoCelebration(true);
     const timer = window.setTimeout(() => setBogoCelebration(false), 4800);
     return () => window.clearTimeout(timer);
@@ -788,7 +790,8 @@ export default function Home() {
     const oscillator = context.createOscillator();
     const gain = context.createGain();
     const duration = step.phase === "swap" || step.phase === "merge" ? 0.05 : 0.032;
-    const peakGain = step.phase === "swap" ? 0.035 : 0.024;
+    const basePeakGain = step.phase === "swap" ? 0.07 : 0.048;
+    const peakGain = basePeakGain * (soundVolume / 100);
 
     oscillator.type = step.phase === "swap" || step.phase === "shift" ? "triangle" : "sine";
     oscillator.frequency.setValueAtTime(180 + normalizedValue * 700, now);
@@ -799,6 +802,32 @@ export default function Home() {
     gain.connect(context.destination);
     oscillator.start(now);
     oscillator.stop(now + duration + 0.01);
+  }
+
+  function playBogoVictorySound() {
+    const context = audioContextRef.current;
+    if (!context || context.state !== "running" || soundVolume <= 0) return;
+
+    const now = context.currentTime;
+    const notes = [523.25, 659.25, 783.99, 1_046.5];
+
+    notes.forEach((frequency, index) => {
+      const oscillator = context.createOscillator();
+      const gain = context.createGain();
+      const startTime = now + index * 0.1;
+      const duration = index === notes.length - 1 ? 0.38 : 0.14;
+      const peakGain = 0.055 * (soundVolume / 100);
+
+      oscillator.type = index === notes.length - 1 ? "triangle" : "sine";
+      oscillator.frequency.setValueAtTime(frequency, startTime);
+      gain.gain.setValueAtTime(0.0001, startTime);
+      gain.gain.exponentialRampToValueAtTime(peakGain, startTime + 0.012);
+      gain.gain.exponentialRampToValueAtTime(0.0001, startTime + duration);
+      oscillator.connect(gain);
+      gain.connect(context.destination);
+      oscillator.start(startTime);
+      oscillator.stop(startTime + duration + 0.02);
+    });
   }
 
   useEffect(() => {
@@ -1107,6 +1136,22 @@ export default function Home() {
                   value={speed}
                   onChange={(event) => handleSpeedChange(Number(event.target.value))}
                   aria-label="Animation speed"
+                />
+              </label>
+
+              <label className="control-field control-field--range">
+                <span className="control-label">
+                  Sound volume
+                  <strong>{soundEnabled ? soundVolume + "%" : "off"}</strong>
+                </span>
+                <input
+                  type="range"
+                  min="0"
+                  max="100"
+                  value={soundVolume}
+                  onChange={(event) => setSoundVolume(Number(event.target.value))}
+                  disabled={!soundEnabled}
+                  aria-label="Sorting sound volume"
                 />
               </label>
 
