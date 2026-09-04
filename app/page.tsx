@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { type CSSProperties, useEffect, useMemo, useState } from "react";
 import {
   BOGO_MAX_ATTEMPTS,
   analyzeCocktailSort,
@@ -699,10 +699,11 @@ export default function Home() {
   }, [currentStep.phase, isBogo, runState]);
 
   const isLocked = runState === "running" || runState === "paused";
+  const isLargeArray = originalValues.length > DEFAULT_ARRAY_SIZE;
   const playbackDensity = isBogo ? 48 : 1;
   const speedDelay = 720 - speed * 7.13;
   const minimumFrameDelay =
-    originalValues.length > DEFAULT_ARRAY_SIZE && !isBogo ? 16 : 7;
+    isLargeArray && !isBogo ? 16 : 7;
   const usesEvenMergePacing =
     algorithm === "merge" &&
     currentStep.phase !== "ready" &&
@@ -714,6 +715,13 @@ export default function Home() {
     : usesEvenMergePacing
       ? Math.max(minimumFrameDelay, mergePassDuration / mergeFramesInCurrentPass)
       : Math.max(minimumFrameDelay, speedDelay / playbackDensity);
+  const shouldInterpolateDenseBars =
+    isLargeArray && !isBogo && !prefersReducedMotion && speed <= 50;
+  const denseBarTransitionStyle = shouldInterpolateDenseBars
+    ? ({
+        "--bar-transition-duration": String(Math.min(260, Math.max(90, delay * 0.75))) + "ms",
+      } as CSSProperties)
+    : undefined;
   const progress =
     runState === "complete"
       ? 100
@@ -1079,7 +1087,15 @@ export default function Home() {
                   <strong>{currentStep.key}</strong>
                 </div>
               )}
-              <div className={"bars " + (originalValues.length > DEFAULT_ARRAY_SIZE ? "bars--dense" : "")} aria-hidden="true">
+              <div
+                className={
+                  "bars " +
+                  (isLargeArray ? "bars--dense " : "") +
+                  (shouldInterpolateDenseBars ? "bars--smooth" : "")
+                }
+                style={denseBarTransitionStyle}
+                aria-hidden="true"
+              >
                 {visibleValues.map((value, index) => {
                   const isGap = index === currentStep.gapIndex;
                   const shownValue = isGap && currentStep.key !== null ? currentStep.key : value;
