@@ -1,5 +1,6 @@
 export type AlgorithmId =
   | "insertion"
+  | "bubble"
   | "cocktail"
   | "selection"
   | "heap"
@@ -59,6 +60,7 @@ export type SortMetrics = {
   rounds: number;
   finalValues: number[];
   meanComputationOperations?: number;
+  refinementOperations?: number;
 };
 
 export type BogoSession = {
@@ -77,6 +79,8 @@ type MeanChunk = {
   values: number[];
   sum: number;
   originalIndex: number;
+  min?: number;
+  max?: number;
 };
 
 export const BOGO_MAX_ATTEMPTS = 1_000_000;
@@ -89,6 +93,7 @@ export function createInitialStep(
   const isMeanPartition = algorithm === "mean-partition";
   const messages: Record<AlgorithmId, string> = {
     insertion: "The first value starts as a sorted one-item prefix.",
+    bubble: "Neighboring values will trade places as the largest bubbles right.",
     cocktail: "The row will sweep forward and backward, swapping neighbors.",
     selection: "Find the smallest remaining value and place it at the front.",
     heap: "Build a max heap, then repeatedly move its largest value to the end.",
@@ -148,13 +153,31 @@ export function formatMean(mean: number) {
   return Number.isInteger(mean) ? String(mean) : mean.toFixed(1);
 }
 
-function buildMeanChunks(values: number[], groupCount: number): MeanChunk[] {
-  return partitionBalanced(values, groupCount).map((group, index) => ({
-    id: index,
-    values: group,
-    sum: group.reduce((sum, value) => sum + value, 0),
-    originalIndex: index,
-  }));
+function createMeanChunk(
+  values: number[],
+  id: number,
+  originalIndex: number,
+  includeBounds = false,
+): MeanChunk {
+  let sum = 0;
+  let min = Infinity;
+  let max = -Infinity;
+
+  for (const value of values) {
+    sum += value;
+    if (includeBounds) {
+      min = Math.min(min, value);
+      max = Math.max(max, value);
+    }
+  }
+
+  return {
+    id,
+    values,
+    sum,
+    originalIndex,
+    ...(includeBounds ? { min, max } : {}),
+  };
 }
 
 function describeMeanGroups(chunks: MeanChunk[]): MeanGroup[] {
@@ -186,21 +209,139 @@ function rankMeanChunks(chunks: MeanChunk[]) {
   const ranked = [...chunks];
   let comparisons = 0;
 
-  for (let index = 1; index < ranked.length; index += 1) {
-    const candidate = ranked[index];
-    let cursor = index - 1;
-
-    while (cursor >= 0) {
-      comparisons += 1;
-      if (compareMeans(ranked[cursor], candidate) <= 0) break;
-      ranked[cursor + 1] = ranked[cursor];
-      cursor -= 1;
-    }
-
-    ranked[cursor + 1] = candidate;
-  }
+  ranked.sort((left, right) => {
+    comparisons += 1;
+    return compareMeans(left, right);
+  });
 
   return { chunks: ranked, comparisons };
+}
+
+function getRefinementBlockSize(length: number) {
+  return Math.min(16, Math.max(2, Math.ceil(length / 4)));
+}
+
+function hasRefinementEligibleGroups(chunks: MeanChunk[], blockSize: number) {
+  return chunks.length > 0 && chunks.every((chunk) => chunk.values.length <= blockSize);
+}
+
+function getOverlappingChunkIds(chunks: MeanChunk[]) {
+  if (chunks.length < 2) return new Set<number>();
+
+  const prefixMaximums: number[] = [];
+  const suffixMinimums: number[] = Array.from({ length: chunks.length });
+  let runningMaximum = -Infinity;
+  let runningMinimum = Infinity;
+
+  for (let index = 0; index < chunks.length; index += 1) {
+    runningMaximum = Math.max(runningMaximum, chunks[index].max ?? -Infinity);
+    prefixMaximums[index] = runningMaximum;
+  }
+
+  for (let index = chunks.length - 1; index >= 0; index -= 1) {
+    runningMinimum = Math.min(runningMinimum, chunks[index].min ?? Infinity);
+    suffixMinimums[index] = runningMinimum;
+  }
+
+  const overlapping = new Set<number>();
+  let componentStart = 0;
+
+  for (let index = 0; index < chunks.length - 1; index += 1) {
+    const isSafeBoundary = prefixMaximums[index] <= suffixMinimums[index + 1];
+    if (!isSafeBoundary) continue;
+
+    if (index > componentStart) {
+      for (let member = componentStart; member <= index; member += 1) {
+        overlapping.add(chunks[member].id);
+      }
+    }
+    componentStart = index + 1;
+  }
+
+  if (componentStart < chunks.length - 1) {
+    for (let member = componentStart; member < chunks.length; member += 1) {
+      overlapping.add(chunks[member].id);
+    }
+  }
+
+  return overlapping;
+}
+
+function splitMeanChunk(chunk: MeanChunk, useMeanPivot: boolean) {
+  if (chunk.values.length <= 1) return [chunk.values];
+
+  if (useMeanPivot) {
+    const mean = chunk.sum / chunk.values.length;
+    const lower = chunk.values.filter((value) => value <= mean);
+    const upper = chunk.values.filter((value) => value > mean);
+
+    if (lower.length > 0 && upper.length > 0) return [lower, upper];
+  }
+
+  return partitionBalanced(chunk.values, 2);
+}
+
+function splitForNextMeanRound(
+  currentChunks: MeanChunk[],
+  targetGroupCount: number,
+  useRefinement: boolean,
+  overlappingChunkIds: Set<number>,
+  refinementBlockSize: number,
+) {
+  const additionalGroups = targetGroupCount - currentChunks.length;
+  const eligibleChunks = currentChunks
+    .map((chunk, index) => ({ chunk, index }))
+    .filter(({ chunk }) => chunk.values.length > 1)
+    .sort((left, right) => {
+      const leftIsOverlapping = overlappingChunkIds.has(left.chunk.id) ? 1 : 0;
+      const rightIsOverlapping = overlappingChunkIds.has(right.chunk.id) ? 1 : 0;
+      if (leftIsOverlapping !== rightIsOverlapping) {
+        return rightIsOverlapping - leftIsOverlapping;
+      }
+      return right.chunk.values.length - left.chunk.values.length || left.index - right.index;
+    });
+  const selectedIndexes = new Set(
+    eligibleChunks.slice(0, Math.max(0, additionalGroups)).map(({ index }) => index),
+  );
+  let childValues = currentChunks.flatMap((chunk, index) => {
+    const shouldRefine =
+      useRefinement &&
+      overlappingChunkIds.has(chunk.id) &&
+      chunk.values.length <= refinementBlockSize;
+    return selectedIndexes.has(index)
+      ? splitMeanChunk(chunk, shouldRefine)
+      : [[...chunk.values]];
+  });
+  let refinementSplits = currentChunks.filter(
+    (chunk, index) =>
+      selectedIndexes.has(index) &&
+      useRefinement &&
+      overlappingChunkIds.has(chunk.id) &&
+      chunk.values.length <= refinementBlockSize,
+  ).length;
+
+  // Strict mean pivots can create singleton children early. Split the largest
+  // remaining group as needed so the 2, 4, 8… round schedule still advances.
+  while (childValues.length < targetGroupCount) {
+    let largestIndex = -1;
+    for (let index = 0; index < childValues.length; index += 1) {
+      if (
+        childValues[index].length > 1 &&
+        (largestIndex === -1 || childValues[index].length > childValues[largestIndex].length)
+      ) {
+        largestIndex = index;
+      }
+    }
+
+    if (largestIndex === -1) break;
+    childValues = [
+      ...childValues.slice(0, largestIndex),
+      ...partitionBalanced(childValues[largestIndex], 2),
+      ...childValues.slice(largestIndex + 1),
+    ];
+  }
+
+  return { childValues, refinementSplits };
 }
 
 export function buildInsertionSteps(
@@ -313,8 +454,8 @@ export function buildInsertionSteps(
 export function buildMeanPartitionSteps(source: number[]): SortStep[] {
   const steps = [createInitialStep(source, "mean-partition")];
   const values = [...source];
-  let working = [...source];
-  let groupCount = 2;
+  const refinementBlockSize = getRefinementBlockSize(values.length);
+  let chunks = [createMeanChunk([...source], 0, 0)];
   let round = 0;
   let meansCalculated = 0;
   let valuesReordered = 0;
@@ -339,12 +480,41 @@ export function buildMeanPartitionSteps(source: number[]): SortStep[] {
 
   while (true) {
     round += 1;
-    const chunks = buildMeanChunks(working, groupCount);
-    const groups = describeMeanGroups(chunks);
-    meansCalculated += chunks.length;
+    const targetGroupCount = Math.min(values.length, chunks.length * 2);
+    const useRefinement = hasRefinementEligibleGroups(chunks, refinementBlockSize);
+    const overlappingChunkIds = useRefinement ? getOverlappingChunkIds(chunks) : new Set<number>();
+    const split = splitForNextMeanRound(
+      chunks,
+      targetGroupCount,
+      useRefinement,
+      overlappingChunkIds,
+      refinementBlockSize,
+    );
+    const captureBounds = split.childValues.every(
+      (group) => group.length <= refinementBlockSize,
+    );
+    const nextChunks = split.childValues.map((group, index) =>
+      createMeanChunk(group, index, index, captureBounds),
+    );
+    const groups = describeMeanGroups(nextChunks);
+    meansCalculated += nextChunks.length;
+    const splitMessage =
+      split.refinementSplits > 0
+        ? "Round " +
+          round +
+          ": the overlap guard splits " +
+          split.refinementSplits +
+          " small " +
+          (split.refinementSplits === 1 ? "group" : "groups") +
+          " around their own means."
+        : "Round " +
+          round +
+          ": split the row into " +
+          nextChunks.length +
+          " balanced groups.";
 
     steps.push({
-      values: [...working],
+      values: nextChunks.flatMap((chunk) => chunk.values),
       pass: round,
       phase: "split",
       key: null,
@@ -355,24 +525,19 @@ export function buildMeanPartitionSteps(source: number[]): SortStep[] {
       sortedCount: 0,
       comparisons: meansCalculated,
       writes: valuesReordered,
-      message:
-        "Round " +
-        round +
-        ": split the row into " +
-        chunks.length +
-        " balanced groups.",
+      message: splitMessage,
       groups,
     });
 
     const meanMessage =
-      chunks.length <= 8
+      nextChunks.length <= 8
         ? "Group means: " +
           groups.map((group) => "μ " + formatMean(group.mean)).join(", ") +
           "."
-        : "Measure the averages for all " + chunks.length + " groups.";
+        : "Measure the averages for all " + nextChunks.length + " groups.";
 
     steps.push({
-      values: [...working],
+      values: nextChunks.flatMap((chunk) => chunk.values),
       pass: round,
       phase: "average",
       key: null,
@@ -387,13 +552,10 @@ export function buildMeanPartitionSteps(source: number[]): SortStep[] {
       groups,
     });
 
-    const rankedChunks = rankMeanChunks(chunks).chunks;
-    valuesReordered += rankedChunks.reduce(
-      (total, chunk, nextIndex) =>
-        total + (chunk.originalIndex === nextIndex ? 0 : chunk.values.length),
-      0,
-    );
-    working = rankedChunks.flatMap((chunk) => chunk.values);
+    const ranking = rankMeanChunks(nextChunks);
+    const rankedChunks = ranking.chunks;
+    valuesReordered += rankedChunks.reduce((total, chunk) => total + chunk.values.length, 0);
+    const working = rankedChunks.flatMap((chunk) => chunk.values);
 
     steps.push({
       values: [...working],
@@ -426,15 +588,15 @@ export function buildMeanPartitionSteps(source: number[]): SortStep[] {
         comparisons: meansCalculated,
         writes: valuesReordered,
         message:
-          groupCount >= values.length
+          rankedChunks.length >= values.length
             ? "Singleton groups make each mean equal its value. Sorted."
             : "The row is already ordered, so no further splitting is needed.",
       });
       return steps;
     }
 
-    if (groupCount >= values.length) break;
-    groupCount = Math.min(values.length, groupCount * 2);
+    if (rankedChunks.length >= values.length) break;
+    chunks = rankedChunks;
   }
 
   return steps;
@@ -827,6 +989,124 @@ export function getBogoSessionStep(session: BogoSession): SortStep {
     writes: session.writes,
     message: "Shuffle " + session.attempts + ": still not ordered, so try again.",
   });
+}
+
+export function buildBubbleSteps(source: number[]): SortStep[] {
+  const steps = [createInitialStep(source, "bubble")];
+  const values = [...source];
+  const settled = new Set<number>();
+  const compactFrames = values.length > COMPACT_FRAME_THRESHOLD;
+  const visualInterval = Math.max(
+    1,
+    Math.ceil((values.length * Math.max(values.length - 1, 1)) / 1000),
+  );
+  let comparisons = 0;
+  let writes = 0;
+  let pass = 0;
+
+  for (let upper = values.length - 1; upper > 0; upper -= 1) {
+    pass += 1;
+    let swapped = false;
+
+    if (!compactFrames) {
+      steps.push(
+        makeStep(values, {
+          pass,
+          phase: "select",
+          comparisons,
+          writes,
+          settled: getSettledIndices(settled),
+          message: "Pass " + pass + ": bubble the largest remaining value to the right.",
+        }),
+      );
+    }
+
+    for (let index = 0; index < upper; index += 1) {
+      comparisons += 1;
+      if (!compactFrames) {
+        steps.push(
+          makeStep(values, {
+            pass,
+            phase: "compare",
+            comparing: index,
+            shifting: index + 1,
+            comparisons,
+            writes,
+            settled: getSettledIndices(settled),
+            message: "Compare neighboring values " + values[index] + " and " + values[index + 1] + ".",
+          }),
+        );
+      }
+
+      if (values[index] > values[index + 1]) {
+        [values[index], values[index + 1]] = [values[index + 1], values[index]];
+        writes += 2;
+        swapped = true;
+        if (!compactFrames) {
+          steps.push(
+            makeStep(values, {
+              pass,
+              phase: "swap",
+              comparing: index,
+              shifting: index + 1,
+              comparisons,
+              writes,
+              settled: getSettledIndices(settled),
+              message: "Swap them so the larger value keeps moving right.",
+            }),
+          );
+        }
+      }
+
+      if (compactFrames && (index % visualInterval === 0 || index === upper - 1)) {
+        steps.push(
+          makeStep(values, {
+            pass,
+            phase: "sweep",
+            comparing: index,
+            shifting: index + 1,
+            comparisons,
+            writes,
+            settled: getSettledIndices(settled),
+            message: "Pass " + pass + ": the orange pair bubbles right through the row.",
+          }),
+        );
+      }
+    }
+
+    settled.add(upper);
+    steps.push(
+      makeStep(values, {
+        pass,
+        phase: "insert",
+        inserting: upper,
+        comparisons,
+        writes,
+        settled: getSettledIndices(settled),
+        message: "The largest remaining value is fixed at the right edge.",
+      }),
+    );
+
+    if (!swapped) {
+      for (let index = 0; index < upper; index += 1) settled.add(index);
+      break;
+    }
+  }
+
+  values.forEach((_, index) => settled.add(index));
+  steps.push(
+    makeStep(values, {
+      pass,
+      phase: "complete",
+      comparisons,
+      writes,
+      sortedCount: values.length,
+      settled: getSettledIndices(settled),
+      message: "Every pass bubbled one more largest value into its final place.",
+    }),
+  );
+
+  return steps;
 }
 
 export function buildCocktailSteps(source: number[]): SortStep[] {
@@ -1409,6 +1689,35 @@ export function analyzeInsertionSort(source: number[]): SortMetrics {
   };
 }
 
+export function analyzeBubbleSort(source: number[]): SortMetrics {
+  const values = [...source];
+  let comparisons = 0;
+  let writes = 0;
+  let rounds = 0;
+
+  for (let upper = values.length - 1; upper > 0; upper -= 1) {
+    rounds += 1;
+    let swapped = false;
+    for (let index = 0; index < upper; index += 1) {
+      comparisons += 1;
+      if (values[index] > values[index + 1]) {
+        [values[index], values[index + 1]] = [values[index + 1], values[index]];
+        writes += 2;
+        swapped = true;
+      }
+    }
+    if (!swapped) break;
+  }
+
+  return {
+    comparisons,
+    rankComparisons: 0,
+    writes,
+    rounds,
+    finalValues: values,
+  };
+}
+
 export function analyzeCocktailSort(source: number[]): SortMetrics {
   const values = [...source];
   let lower = 0;
@@ -1634,41 +1943,65 @@ export function analyzeMergeSort(source: number[]): SortMetrics {
 
 export function analyzeMeanPartitionSort(source: number[]): SortMetrics {
   const sourceValues = [...source];
-  let working = [...source];
-  let groupCount = 2;
+  const refinementBlockSize = getRefinementBlockSize(sourceValues.length);
+  let chunks = [createMeanChunk([...sourceValues], 0, 0)];
   let rounds = 0;
   let meansCalculated = 0;
   let meanComputationOperations = 0;
+  let refinementOperations = 0;
   let rankComparisons = 0;
   let outputWrites = 0;
 
-  if (working.length <= 1) {
+  if (sourceValues.length <= 1) {
     return {
       comparisons: 0,
       rankComparisons: 0,
       writes: 0,
       rounds: 0,
-      finalValues: working,
+      finalValues: sourceValues,
       meanComputationOperations: 0,
+      refinementOperations: 0,
     };
   }
 
   while (true) {
     rounds += 1;
-    const chunks = buildMeanChunks(working, groupCount);
-    meansCalculated += chunks.length;
-    // Every round reads and sums every active value, then divides once per group.
-    meanComputationOperations += working.length + chunks.length;
-    const ranking = rankMeanChunks(chunks);
+    const targetGroupCount = Math.min(sourceValues.length, chunks.length * 2);
+    const useRefinement = hasRefinementEligibleGroups(chunks, refinementBlockSize);
+    const overlappingChunkIds = useRefinement ? getOverlappingChunkIds(chunks) : new Set<number>();
+    const split = splitForNextMeanRound(
+      chunks,
+      targetGroupCount,
+      useRefinement,
+      overlappingChunkIds,
+      refinementBlockSize,
+    );
+    const captureBounds = split.childValues.every(
+      (group) => group.length <= refinementBlockSize,
+    );
+    const nextChunks = split.childValues.map((group, index) =>
+      createMeanChunk(group, index, index, captureBounds),
+    );
+    meansCalculated += nextChunks.length;
+    // Each round scans every value for its group sum and divides once per group.
+    meanComputationOperations += sourceValues.length + nextChunks.length;
+    if (captureBounds) {
+      // Min/max values are gathered during the same group scan once groups are small.
+      refinementOperations += sourceValues.length * 2;
+    }
+    if (useRefinement) {
+      // Prefix/suffix range checks find only the blocks that truly overlap.
+      refinementOperations += chunks.length * 3 + split.refinementSplits;
+    }
+    const ranking = rankMeanChunks(nextChunks);
     rankComparisons += ranking.comparisons;
     const rankedChunks = ranking.chunks;
 
-    // The current implementation materializes a new row of every value after
-    // each ranking, even if some groups happened to remain in place.
-    outputWrites += working.length;
-    working = rankedChunks.flatMap((chunk) => chunk.values);
+    // Each ranking materializes one newly ordered row of values.
+    outputWrites += sourceValues.length;
+    const working = rankedChunks.flatMap((chunk) => chunk.values);
 
-    if (isNonDecreasing(working) || groupCount >= sourceValues.length) {
+    if (isNonDecreasing(working) || rankedChunks.length >= sourceValues.length) {
       return {
         comparisons: meansCalculated,
         rankComparisons,
@@ -1676,9 +2009,10 @@ export function analyzeMeanPartitionSort(source: number[]): SortMetrics {
         rounds,
         finalValues: working,
         meanComputationOperations,
+        refinementOperations,
       };
     }
 
-    groupCount = Math.min(sourceValues.length, groupCount * 2);
+    chunks = rankedChunks;
   }
 }

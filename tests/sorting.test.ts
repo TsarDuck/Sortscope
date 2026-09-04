@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   BOGO_MAX_ATTEMPTS,
   advanceBogoSession,
+  analyzeBubbleSort,
   analyzeCocktailSort,
   analyzeHeapSort,
   analyzeInsertionSort,
@@ -11,6 +12,7 @@ import {
   analyzeQuickSort,
   analyzeSelectionSort,
   buildBogoSteps,
+  buildBubbleSteps,
   buildCocktailSteps,
   buildHeapSortSteps,
   buildInsertionSteps,
@@ -52,6 +54,18 @@ test("mean partition sort refines blocks until it reaches numeric order", () => 
   assert.equal(isNonDecreasing(finalValues(steps)), true);
 });
 
+test("mean partition saves its overlap guard for adaptive small groups", () => {
+  const source = [1, 16, 2, 15, 3, 14, 4, 13, 5, 12, 6, 11, 7, 10, 8, 9];
+  const steps = buildMeanPartitionSteps(source);
+  const splitSteps = steps.filter((step) => step.phase === "split");
+
+  assert.deepEqual(splitSteps.slice(0, 2).map((step) => step.groups?.length), [2, 4]);
+  assert.ok(splitSteps[1].groups?.every((group) => group.end - group.start === 4));
+  assert.match(splitSteps[2].message, /overlap guard/);
+  assert.deepEqual(finalValues(steps), [...source].sort((left, right) => left - right));
+  assert.ok((analyzeMeanPartitionSort(source).refinementOperations ?? 0) > 0);
+});
+
 test("balanced partitions cover every value without creating empty groups", () => {
   assert.deepEqual(partitionBalanced([1, 2, 3, 4, 5], 4), [[1, 2], [3], [4], [5]]);
   assert.deepEqual(partitionBalanced([1, 2, 3, 4, 5, 6], 4), [[1, 2], [3, 4], [5], [6]]);
@@ -79,8 +93,9 @@ test("mean partition workload includes every grouping read and rebuilt output", 
   assert.ok(reverse.rankComparisons > sorted.rankComparisons);
 });
 
-test("cocktail, selection, heap, quick, and merge sort finish in numeric order without mutating the source", () => {
+test("bubble, cocktail, selection, heap, quick, and merge sort finish in numeric order without mutating the source", () => {
   const builders = [
+    buildBubbleSteps,
     buildCocktailSteps,
     buildSelectionSteps,
     buildHeapSortSteps,
@@ -200,6 +215,7 @@ test("sorting metric analyzers preserve a clean 1 through 256 final line", () =>
   const expected = Array.from({ length: 256 }, (_, index) => index + 1);
 
   assert.deepEqual(analyzeInsertionSort(source).finalValues, expected);
+  assert.deepEqual(analyzeBubbleSort(source).finalValues, expected);
   assert.deepEqual(analyzeCocktailSort(source).finalValues, expected);
   assert.deepEqual(analyzeSelectionSort(source).finalValues, expected);
   assert.deepEqual(analyzeHeapSort(source).finalValues, expected);

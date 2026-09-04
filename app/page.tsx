@@ -2,6 +2,7 @@
 
 import {
   type CSSProperties,
+  type PointerEvent as ReactPointerEvent,
   useEffect,
   useLayoutEffect,
   useMemo,
@@ -11,6 +12,7 @@ import {
 import {
   BOGO_MAX_ATTEMPTS,
   type BogoSession,
+  analyzeBubbleSort,
   advanceBogoSession,
   analyzeCocktailSort,
   analyzeHeapSort,
@@ -20,6 +22,7 @@ import {
   analyzeQuickSort,
   analyzeSelectionSort,
   buildCocktailSteps,
+  buildBubbleSteps,
   buildHeapSortSteps,
   buildMeanPartitionSteps,
   buildMergeSortSteps,
@@ -32,6 +35,7 @@ import {
 
 type AlgorithmId =
   | "insertion"
+  | "bubble"
   | "cocktail"
   | "selection"
   | "heap"
@@ -120,6 +124,7 @@ const DEFAULT_ARRAY_SIZE = 24;
 const DEFAULT_SPEED = 62;
 const BENCHMARK_SIZES = [16, 32, 64, 128, 256];
 const BENCHMARK_ALGORITHMS = [
+  { key: "bubble", label: "Bubble sort", className: "bubble" },
   { key: "insertion", label: "Insertion sort", className: "insertion" },
   { key: "cocktail", label: "Cocktail sort", className: "cocktail" },
   { key: "selection", label: "Selection sort", className: "selection" },
@@ -130,7 +135,7 @@ const BENCHMARK_ALGORITHMS = [
 ] as const;
 type BenchmarkAlgorithm = (typeof BENCHMARK_ALGORITHMS)[number]["key"];
 type BenchmarkWork = Record<BenchmarkAlgorithm, number>;
-const BOGO_MIN_ATTEMPTS = 1_000;
+const BOGO_MIN_ATTEMPTS = 1;
 const BOGO_SMALL_ARRAY_MAX_ATTEMPTS = 999_999_999;
 const BOGO_MID_ARRAY_MAX_ATTEMPTS = 100_000_000;
 const BOGO_LARGE_ARRAY_MAX_ATTEMPTS = 1_000_000;
@@ -181,7 +186,7 @@ const ALGORITHM_DETAILS: Record<
 > = {
   insertion: {
     label: "Insertion sort",
-    number: "01",
+    number: "04",
     heroCopy: "Slow down a real insertion sort and see the sorted prefix grow one deliberate move at a time.",
     controlTitle: "Build a sorted prefix",
     stageLabel: "pass",
@@ -211,9 +216,41 @@ const ALGORITHM_DETAILS: Record<
       { prompt: "Slide 1 into its final position in the prefix.", start: [3, 4, 5, 1], target: [1, 3, 4, 5], hint: "1 is smaller than every value already in the prefix." },
     ],
   },
+  bubble: {
+    label: "Bubble sort",
+    number: "02",
+    heroCopy: "Compare neighboring values and let the largest one bubble to the right on every pass.",
+    controlTitle: "Bubble the largest value right",
+    stageLabel: "pass",
+    stageDescription: "rightward neighbor sweep",
+    eyebrow: "THE BIG IDEA",
+    learnTitle: "Let one large value rise at a time.",
+    learnCopy: [
+      "Bubble sort walks from left to right, looking at one neighboring pair at a time. If the pair is backwards, it swaps them. A large value can therefore keep trading places with its next neighbor and travel toward the right edge in one pass.",
+      "After a full pass, the largest value that was still unsorted must be at the far right, so it never needs to be checked again. The next pass stops one position earlier. Bubble sort is simple and easy to see, but it repeats many neighbor comparisons on large rows.",
+    ],
+    complexity: ["BEST O(n)", "AVERAGE O(n²)", "SPACE O(1)"],
+    cardTitle: "BUBBLE SORT",
+    cardTag: "stable · neighbor swaps",
+    steps: [
+      "Compare the first pair of neighbors.",
+      "Swap them only when the left value is larger.",
+      "Continue right until the largest remaining value settles.",
+    ],
+    examples: [
+      { values: "[4, 1, 3, 2]", detail: "Begin with 4 and 1. They are backwards, so 4 needs to move right." },
+      { values: "[1, 4, 3, 2] → [1, 3, 4, 2]", detail: "4 meets 3 next and swaps again, continuing its trip right." },
+      { values: "[1, 3, 2, 4]", detail: "After one full sweep, 4 is fixed at the far right; later passes work only to its left." },
+    ],
+    practice: [
+      { prompt: "Start the bubble by moving 1 ahead of 4.", start: [4, 1, 3, 2], target: [1, 4, 3, 2], hint: "The first pair is backwards: 4 is larger than 1." },
+      { prompt: "Keep 4 bubbling right past 3.", start: [1, 4, 3, 2], target: [1, 3, 4, 2], hint: "Compare the pair containing 4 and 3." },
+      { prompt: "Finish the sweep by sending 4 to the right edge.", start: [1, 3, 4, 2], target: [1, 3, 2, 4], hint: "4 is still larger than the value beside it." },
+    ],
+  },
   cocktail: {
     label: "Cocktail sort",
-    number: "02",
+    number: "03",
     heroCopy: "Sweep in both directions so large values drift right while small values travel back left.",
     controlTitle: "Sweep in both directions",
     stageLabel: "sweep",
@@ -245,7 +282,7 @@ const ALGORITHM_DETAILS: Record<
   },
   selection: {
     label: "Selection sort",
-    number: "03",
+    number: "05",
     heroCopy: "Find the smallest remaining value, place it next, and grow the sorted left edge one choice at a time.",
     controlTitle: "Select the next minimum",
     stageLabel: "selection",
@@ -276,7 +313,7 @@ const ALGORITHM_DETAILS: Record<
   },
   heap: {
     label: "Heap sort",
-    number: "04",
+    number: "06",
     heroCopy: "Build a max heap, move its largest value to the end, then restore the heap and repeat.",
     controlTitle: "Extract values from a max heap",
     stageLabel: "heap pass",
@@ -308,7 +345,7 @@ const ALGORITHM_DETAILS: Record<
   },
   quick: {
     label: "Quick sort",
-    number: "05",
+    number: "07",
     heroCopy: "Choose a pivot, split smaller and larger values around it, then repeat on each side.",
     controlTitle: "Partition around a pivot",
     stageLabel: "partition",
@@ -316,31 +353,31 @@ const ALGORITHM_DETAILS: Record<
     eyebrow: "THE BIG IDEA",
     learnTitle: "Put pivots in their final places.",
     learnCopy: [
-      "Quick sort chooses one value as a pivot. It scans the active range and moves values smaller than the pivot to its left, while values larger than the pivot end up on its right.",
-      "When the scan is finished, the pivot is placed between those two groups. It is now in its final sorted position: nothing on the left can be larger, and nothing on the right can be smaller. Quick sort repeats the same idea independently on the two smaller ranges.",
+      "Quick sort first chooses a pivot—this visualizer uses the rightmost value. Leave the pivot parked there for a moment and scan only the values before it. Keep an imaginary smaller-values area at the left edge: when you find a value no larger than the pivot, move it into the next open spot in that area.",
+      "For [4, 1, 3 | 2], the pivot is 2. 4 is too large, so it remains on the future right side. 1 is small enough, so it moves into the smaller-values area. Then place 2 directly after that area: [1, 2 | 4, 3]. The pivot is now final; repeat the same tiny job only inside the left and right ranges.",
     ],
     complexity: ["AVERAGE O(n log n)", "WORST O(n²)", "SPACE O(log n)"],
     cardTitle: "QUICK SORT",
     cardTag: "in-place · pivot-based",
     steps: [
-      "Choose the rightmost value as the pivot.",
-      "Move smaller values to the pivot's left side.",
-      "Place the pivot, then partition each remaining side.",
+      "Park the rightmost pivot and scan the values before it.",
+      "Grow a left area containing only values no larger than the pivot.",
+      "Place the pivot after that area, then repeat on each side.",
     ],
     examples: [
-      { values: "[4, 1, 3 | 2]", detail: "Use 2 as the pivot; the vertical bar marks the value that will end in its final place." },
-      { values: "[1 | 4, 3 | 2]", detail: "Only 1 is smaller than 2, so it belongs on the pivot's left." },
-      { values: "[1, 2 | 3, 4]", detail: "Place the pivot, then sort the left and right ranges separately." },
+      { values: "[4, 1, 3 | 2]", detail: "2 is the parked pivot. Scan 4, then 1, then 3; do not compare the pivot with the whole row at once." },
+      { values: "[1 | 4, 3 | 2]", detail: "Only 1 belongs in the smaller area. 4 and 3 are simply waiting on the other side for now." },
+      { values: "[1, 2 | 4, 3]", detail: "Swap the pivot into the gap after 1. Its final position is now fixed; only [4, 3] still needs work." },
     ],
     practice: [
-      { prompt: "Place the value smaller than pivot 2 on its left side.", start: [4, 1, 3, 2], target: [1, 4, 3, 2], hint: "Only 1 is smaller than the pivot." },
-      { prompt: "Put pivot 2 between the smaller and larger groups.", start: [1, 4, 3, 2], target: [1, 2, 4, 3], hint: "Everything left of 2 must be smaller; everything right must be larger." },
-      { prompt: "Finish the tiny right-side range.", start: [1, 2, 4, 3], target: [1, 2, 3, 4], hint: "Quick sort now works on the range to the pivot's right." },
+      { prompt: "Pivot 2 stays parked at the far right. Move only the smaller value, 1, into the left area.", start: [4, 1, 3, 2], target: [1, 4, 3, 2], hint: "1 is the only value no larger than pivot 2; 4 and 3 wait to its right." },
+      { prompt: "Now slide the parked pivot 2 into the gap immediately after the smaller area.", start: [1, 4, 3, 2], target: [1, 2, 4, 3], hint: "The pivot belongs after 1 and before both 4 and 3." },
+      { prompt: "Ignore the fixed [1, 2] left side. Sort only the remaining right-side pair.", start: [1, 2, 4, 3], target: [1, 2, 3, 4], hint: "Quick sort now works only on the smaller range [4, 3]." },
     ],
   },
   merge: {
     label: "Merge sort",
-    number: "06",
+    number: "08",
     heroCopy: "Build larger ordered runs by repeatedly merging pairs of smaller ordered runs.",
     controlTitle: "Merge ordered runs",
     stageLabel: "merge pass",
@@ -372,7 +409,7 @@ const ALGORITHM_DETAILS: Record<
   },
   bogo: {
     label: "Bogo sort",
-    number: "07",
+    number: "01",
     heroCopy: "Shuffle the whole row and hope it lands in order—a deliberately impractical sorting experiment.",
     controlTitle: "Shuffle and hope",
     stageLabel: "shuffle",
@@ -403,31 +440,31 @@ const ALGORITHM_DETAILS: Record<
   },
   "mean-partition": {
     label: "Mean partition sort",
-    number: "08",
-    heroCopy: "Split the newly arranged row into 2, 4, 8, and more balanced groups, then rank every group by its average.",
-    controlTitle: "Rank groups by their mean",
+    number: "09",
+    heroCopy: "Rank broad groups by their averages, then use an adaptive overlap guard once the groups become small.",
+    controlTitle: "Rank groups, then guard overlaps",
     stageLabel: "round",
-    stageDescription: "mean grouping",
-    eyebrow: "EXPERIMENTAL IDEA",
-    learnTitle: "Sort blocks before sorting values.",
+    stageDescription: "adaptive mean grouping",
+    eyebrow: "THE BIG IDEA",
+    learnTitle: "Use broad groups first; inspect small groups later.",
     learnCopy: [
-      "Mean partition sort repeatedly cuts the current row into balanced groups: first 2 groups, then 4, then 8, and so on. It computes each group’s arithmetic mean—the sum divided by the number of values—and moves whole groups so lower means are left of higher means.",
-      "A low group mean is only a clue, not proof that every value in that group belongs before every value in another group. That is why the process keeps splitting. Once every group contains one value, its mean is the value itself, so arranging the group means is guaranteed to arrange the row.",
+      "Mean partition sort repeatedly cuts the current row into groups: first 2, then 4, then 8, and so on. It computes each group’s arithmetic mean—the sum divided by the number of values—and moves whole groups so lower means are left of higher means. Those early wide groups are deliberately cheap: the algorithm does not spend time inspecting every value relationship yet.",
+      "Once groups reach roughly one quarter of the original row, capped at 16 values, the overlap guard turns on. It records each small group’s minimum and maximum. Groups whose ranges overlap are split around their own mean, separating low and high values before the next mean ranking. Safe boundaries remain untouched; singleton groups still make the final result exact because a one-value mean is that value.",
     ],
-    complexity: ["ROUNDS O(log n)", "RANKING O(n²) WORST", "SPACE O(n)"],
+    complexity: ["PASSES O(log n)", "WORK O(n log n)", "SPACE O(n)"],
     cardTitle: "MEAN PARTITION SORT",
-    cardTag: "experimental · group-based",
+    cardTag: "adaptive · group-based",
     steps: [
       "Split the current row into 2, 4, 8… balanced groups.",
       "Calculate the average of every group.",
-      "Rank all groups from the smallest mean to the largest.",
-      "At singleton groups, each mean is the value itself.",
+      "When small group ranges overlap, split those groups around their means.",
+      "Rank all groups; singleton-group means are the values themselves.",
     ],
     examples: [
       { values: "[1, 100] μ=50.5 | [49, 50] μ=49.5", detail: "The second group has the lower average, even though 100 is still inside the first group." },
-      { values: "[49, 50 | 1, 100]", detail: "Rank the whole groups by mean: 49.5 goes left of 50.5." },
-      { values: "[1] [49] [50] [100]", detail: "After splitting into singleton groups, each displayed mean equals that one value." },
-      { values: "[1, 49, 50, 100]", detail: "Ranking those singleton groups is exactly a normal numeric sort." },
+      { values: "[49, 50 | 1, 100]", detail: "The broad mean pass ranks 49.5 before 50.5; this is fast, but not yet a proof of order." },
+      { values: "49–50 overlaps 1–100", detail: "Once groups are small, their ranges expose the crossing. Both groups are split around their own means." },
+      { values: "[1] [49] [50] [100]", detail: "At singleton groups, each mean equals its value, so ranking the groups gives the exact numeric order." },
     ],
     practice: [
       {
@@ -524,12 +561,14 @@ function getWorkEstimate(metrics: {
   rankComparisons: number;
   writes: number;
   meanComputationOperations?: number;
+  refinementOperations?: number;
 }) {
   return (
     metrics.comparisons +
     metrics.rankComparisons +
     metrics.writes +
-    (metrics.meanComputationOperations ?? 0)
+    (metrics.meanComputationOperations ?? 0) +
+    (metrics.refinementOperations ?? 0)
   );
 }
 
@@ -700,7 +739,7 @@ function getBarClass(
     return "bar--idle";
   }
 
-  if (algorithm === "cocktail") {
+  if (algorithm === "bubble" || algorithm === "cocktail") {
     if (step.phase === "complete" || step.settled?.includes(index)) return "bar--sorted";
     if (
       (step.phase === "swap" || step.phase === "sweep") &&
@@ -774,6 +813,7 @@ export default function Home() {
   const [speed, setSpeed] = useState(DEFAULT_SPEED);
   const [speedInput, setSpeedInput] = useState(String(DEFAULT_SPEED));
   const [bogoAttemptLimit, setBogoAttemptLimit] = useState(BOGO_MAX_ATTEMPTS);
+  const [bogoAttemptInput, setBogoAttemptInput] = useState(String(BOGO_MAX_ATTEMPTS));
   const [benchmarkPattern, setBenchmarkPattern] =
     useState<BenchmarkPattern>("random");
   const [originalValues, setOriginalValues] = useState(INITIAL_VALUES);
@@ -789,12 +829,28 @@ export default function Home() {
   const [practicePartitionOrder, setPracticePartitionOrder] = useState<string[]>([]);
   const [practiceSelectedIndex, setPracticeSelectedIndex] = useState<number | null>(null);
   const [practiceDragIndex, setPracticeDragIndex] = useState<number | null>(null);
+  const [practiceDraggingId, setPracticeDraggingId] = useState<string | null>(null);
+  const [practiceDragOffset, setPracticeDragOffset] = useState({ x: 0, y: 0 });
+  const [practiceDropIndex, setPracticeDropIndex] = useState<number | null>(null);
   const [practiceSolved, setPracticeSolved] = useState(false);
   const [practiceFeedback, setPracticeFeedback] = useState<string | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const lastToneTimeRef = useRef(0);
+  const lastBogoTextureTimeRef = useRef(0);
   const meanBarElementsRef = useRef(new Map<number, HTMLDivElement>());
   const meanBarPositionsRef = useRef(new Map<number, number>());
+  const practiceBoardRef = useRef<HTMLDivElement | null>(null);
+  const practiceBlockElementsRef = useRef(new Map<string, HTMLButtonElement>());
+  const practiceBlockPositionsRef = useRef(new Map<string, { left: number; top: number }>());
+  const practicePointerRef = useRef<{
+    id: string;
+    fromIndex: number;
+    pointerId: number;
+    startX: number;
+    startY: number;
+    moved: boolean;
+  } | null>(null);
+  const suppressPracticeClickRef = useRef(false);
   const bogoSessionRef = useRef<BogoSession | null>(null);
   const [meanSlideOffsets, setMeanSlideOffsets] = useState<Record<number, number>>({});
   const [meanSlideStage, setMeanSlideStage] = useState<"idle" | "prepare" | "animate">("idle");
@@ -826,6 +882,7 @@ export default function Home() {
     () =>
       BENCHMARK_SIZES.map((size) => {
         const benchmarkValues = makeBenchmarkArray(size, benchmarkPattern);
+        const bubble = analyzeBubbleSort(benchmarkValues);
         const insertion = analyzeInsertionSort(benchmarkValues);
         const cocktail = analyzeCocktailSort(benchmarkValues);
         const selection = analyzeSelectionSort(benchmarkValues);
@@ -837,6 +894,7 @@ export default function Home() {
         return {
           size,
           work: {
+            bubble: getWorkEstimate(bubble),
             insertion: getWorkEstimate(insertion),
             cocktail: getWorkEstimate(cocktail),
             selection: getWorkEstimate(selection),
@@ -849,12 +907,9 @@ export default function Home() {
       }),
     [benchmarkPattern],
   );
-  const benchmarkMaximum = Math.max(
-    1,
-    ...benchmarkData.flatMap((entry) => Object.values(entry.work)),
-  );
   const selectedBenchmark = useMemo(() => {
     const benchmarkValues = makeBenchmarkArray(arraySize, benchmarkPattern);
+    const bubble = analyzeBubbleSort(benchmarkValues);
     const insertion = analyzeInsertionSort(benchmarkValues);
     const cocktail = analyzeCocktailSort(benchmarkValues);
     const selection = analyzeSelectionSort(benchmarkValues);
@@ -864,6 +919,7 @@ export default function Home() {
     const meanPartition = analyzeMeanPartitionSort(benchmarkValues);
 
     return {
+      bubble: getWorkEstimate(bubble),
       insertion: getWorkEstimate(insertion),
       cocktail: getWorkEstimate(cocktail),
       selection: getWorkEstimate(selection),
@@ -969,6 +1025,34 @@ export default function Home() {
     };
   }, [currentStep.pass, currentStep.phase, isMeanPartition, prefersReducedMotion, visibleValues]);
 
+  useLayoutEffect(() => {
+    const previousPositions = practiceBlockPositionsRef.current;
+    const nextPositions = capturePracticeBlockPositions();
+
+    if (!prefersReducedMotion) {
+      nextPositions.forEach((nextPosition, id) => {
+        const previousPosition = previousPositions.get(id);
+        const element = practiceBlockElementsRef.current.get(id);
+        if (!previousPosition || !element) return;
+
+        const deltaX = previousPosition.left - nextPosition.left;
+        const deltaY = previousPosition.top - nextPosition.top;
+        if (Math.abs(deltaX) < 1 && Math.abs(deltaY) < 1) return;
+
+        element.getAnimations().forEach((animation) => animation.cancel());
+        element.animate(
+          [
+            { transform: "translate(" + deltaX + "px, " + deltaY + "px) scale(1.025)" },
+            { transform: "translate(0, 0) scale(1)" },
+          ],
+          { duration: 330, easing: "cubic-bezier(.22, .9, .3, 1)" },
+        );
+      });
+    }
+
+    practiceBlockPositionsRef.current = nextPositions;
+  }, [practicePartitionOrder, practiceStepIndex, practiceValues, prefersReducedMotion]);
+
   const isLocked = runState === "running" || runState === "paused";
   const isLargeArray = originalValues.length > DEFAULT_ARRAY_SIZE;
   const playbackDensity = isBogo ? 48 : 1;
@@ -976,6 +1060,10 @@ export default function Home() {
   const meanSlideDuration = Math.round(Math.max(520, 1_050 - speed * 5.3));
   const meanStaticDelay = Math.max(190, 620 - speed * 4);
   const minimumFrameDelay = isLargeArray && !isBogo ? 16 : 7;
+  const bogoSlowMotionDelay =
+    isBogo && originalValues.length <= DEFAULT_ARRAY_SIZE
+      ? Math.round(440 * (1 - (speed - 1) / 99) ** 3)
+      : 0;
   const usesEvenMergePacing =
     algorithm === "merge" &&
     currentStep.phase !== "ready" &&
@@ -1047,7 +1135,7 @@ export default function Home() {
     if (!context || context.state !== "running" || step.values.length === 0) return;
 
     const now = context.currentTime;
-    const cooldown = isBogo ? 0.12 : isLargeArray ? 0.045 : 0.028;
+    const cooldown = isLargeArray ? 0.045 : 0.028;
     if (now - lastToneTimeRef.current < cooldown) return;
     lastToneTimeRef.current = now;
 
@@ -1072,6 +1160,37 @@ export default function Home() {
     gain.connect(context.destination);
     oscillator.start(now);
     oscillator.stop(now + duration + 0.01);
+  }
+
+  function playBogoShuffleTexture(attempt: number) {
+    const context = audioContextRef.current;
+    if (!context || context.state !== "running" || soundVolume <= 0) return;
+
+    const now = context.currentTime;
+    if (now - lastBogoTextureTimeRef.current < 0.13) return;
+    lastBogoTextureTimeRef.current = now;
+
+    const oscillator = context.createOscillator();
+    const filter = context.createBiquadFilter();
+    const gain = context.createGain();
+    const motion = ((attempt * 0.61803398875) % 1 + 1) % 1;
+    const frequency = 145 + motion * 330;
+    const peakGain = 0.075 * (soundVolume / 100) ** 2.5;
+
+    oscillator.type = "triangle";
+    oscillator.frequency.setValueAtTime(frequency, now);
+    oscillator.frequency.exponentialRampToValueAtTime(frequency * 0.72, now + 0.07);
+    filter.type = "bandpass";
+    filter.frequency.setValueAtTime(750 + motion * 500, now);
+    filter.Q.value = 1.1;
+    gain.gain.setValueAtTime(0.0001, now);
+    gain.gain.exponentialRampToValueAtTime(peakGain, now + 0.004);
+    gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.075);
+    oscillator.connect(filter);
+    filter.connect(gain);
+    gain.connect(context.destination);
+    oscillator.start(now);
+    oscillator.stop(now + 0.09);
   }
 
   function playBogoVictorySound() {
@@ -1108,6 +1227,7 @@ export default function Home() {
 
   useEffect(() => {
     if (
+      isBogo ||
       !soundEnabled ||
       runState !== "running" ||
       stepIndex === 0 ||
@@ -1117,7 +1237,19 @@ export default function Home() {
     }
 
     playSortingTone(currentStep);
-  }, [currentStep, runState, soundEnabled, stepIndex]);
+  }, [currentStep, isBogo, runState, soundEnabled, stepIndex]);
+
+  useEffect(() => {
+    if (!isBogo || !soundEnabled || runState !== "running") return;
+
+    const playTexture = () => {
+      const session = bogoSessionRef.current;
+      if (session && !session.done) playBogoShuffleTexture(session.attempts);
+    };
+    playTexture();
+    const timer = window.setInterval(playTexture, 145);
+    return () => window.clearInterval(timer);
+  }, [isBogo, runState, soundEnabled, soundVolume]);
 
   useEffect(() => {
     if (!isBogo || runState !== "running") return;
@@ -1131,10 +1263,14 @@ export default function Home() {
     const runBatch = () => {
       if (cancelled || bogoSessionRef.current !== session) return;
 
-      const deadline = performance.now() + 8;
-      do {
+      if (bogoSlowMotionDelay > 0) {
         advanceBogoSession(session);
-      } while (!session.done && performance.now() < deadline);
+      } else {
+        const deadline = performance.now() + 8;
+        do {
+          advanceBogoSession(session);
+        } while (!session.done && performance.now() < deadline);
+      }
 
       setBogoLiveStep(getBogoSessionStep(session));
       if (session.done) {
@@ -1142,7 +1278,7 @@ export default function Home() {
         return;
       }
 
-      timer = window.setTimeout(runBatch, 0);
+      timer = window.setTimeout(runBatch, bogoSlowMotionDelay);
     };
 
     timer = window.setTimeout(runBatch, 0);
@@ -1150,7 +1286,7 @@ export default function Home() {
       cancelled = true;
       if (timer !== undefined) window.clearTimeout(timer);
     };
-  }, [isBogo, runState]);
+  }, [bogoSlowMotionDelay, isBogo, runState]);
 
   useEffect(() => {
     if (isBogo || runState !== "running" || steps.length === 0) return;
@@ -1207,6 +1343,10 @@ export default function Home() {
     setPracticeStepIndex(0);
     setPracticeSelectedIndex(null);
     setPracticeDragIndex(null);
+    setPracticeDraggingId(null);
+    setPracticeDragOffset({ x: 0, y: 0 });
+    setPracticeDropIndex(null);
+    practicePointerRef.current = null;
     setPracticeSolved(false);
     setPracticeFeedback(null);
 
@@ -1220,32 +1360,69 @@ export default function Home() {
     setPracticePartitionOrder([]);
   }
 
-  function movePracticeItem(fromIndex: number, toIndex: number) {
+  function capturePracticeBlockPositions() {
+    const positions = new Map<string, { left: number; top: number }>();
+    practiceBlockElementsRef.current.forEach((element, id) => {
+      const { left, top } = element.getBoundingClientRect();
+      positions.set(id, { left, top });
+    });
+    return positions;
+  }
+
+  function setPracticeBlockRef(id: string, element: HTMLButtonElement | null) {
+    if (element) {
+      practiceBlockElementsRef.current.set(id, element);
+      return;
+    }
+    practiceBlockElementsRef.current.delete(id);
+  }
+
+  function evaluatePracticeMove(nextValues: number[], nextPartitionOrder: string[]) {
+    const isCorrect = isPartitionPractice
+      ? currentPractice.targetOrder.every(
+          (partitionId, index) => nextPartitionOrder[index] === partitionId,
+        )
+      : currentPractice.target.every((value, index) => nextValues[index] === value);
+
+    setPracticeSolved(isCorrect);
+    setPracticeFeedback(
+      isCorrect
+        ? practiceStepIndex === practiceSteps.length - 1
+          ? "Correct—this completes the walkthrough."
+          : "Correct. Your move follows the rule; continue to the next step."
+        : "Not quite. Hint: " + currentPractice.hint,
+    );
+  }
+
+  function movePracticeItem(fromIndex: number, toIndex: number, capturePosition = true) {
     if (practiceFinished || fromIndex === toIndex) return;
+    if (capturePosition) {
+      practiceBlockPositionsRef.current = capturePracticeBlockPositions();
+    }
 
     if (isPartitionPractice) {
-      setPracticePartitionOrder((currentOrder) => {
-        const nextOrder = [...currentOrder];
-        const [moved] = nextOrder.splice(fromIndex, 1);
-        nextOrder.splice(toIndex, 0, moved);
-        return nextOrder;
-      });
+      const nextOrder = [...practicePartitionOrder];
+      const [moved] = nextOrder.splice(fromIndex, 1);
+      nextOrder.splice(toIndex, 0, moved);
+      setPracticePartitionOrder(nextOrder);
+      evaluatePracticeMove(practiceValues, nextOrder);
     } else {
-      setPracticeValues((currentValues) => {
-        const nextValues = [...currentValues];
-        const [moved] = nextValues.splice(fromIndex, 1);
-        nextValues.splice(toIndex, 0, moved);
-        return nextValues;
-      });
+      const nextValues = [...practiceValues];
+      const [moved] = nextValues.splice(fromIndex, 1);
+      nextValues.splice(toIndex, 0, moved);
+      setPracticeValues(nextValues);
+      evaluatePracticeMove(nextValues, practicePartitionOrder);
     }
 
     setPracticeSelectedIndex(null);
-    setPracticeSolved(false);
-    setPracticeFeedback(null);
   }
 
   function handlePracticeBlockClick(index: number) {
     if (practiceFinished) return;
+    if (suppressPracticeClickRef.current) {
+      suppressPracticeClickRef.current = false;
+      return;
+    }
     if (practiceSelectedIndex === null) {
       setPracticeSelectedIndex(index);
       return;
@@ -1259,25 +1436,81 @@ export default function Home() {
     movePracticeItem(practiceSelectedIndex, index);
   }
 
-  function checkPracticeStep() {
-    const isCorrect = isPartitionPractice
-      ? currentPractice.targetOrder.every(
-          (partitionId, index) => practicePartitionOrder[index] === partitionId,
-        )
-      : currentPractice.target.every((value, index) => practiceValues[index] === value);
+  function getPracticeDropIndex(clientX: number, clientY: number) {
+    const board = practiceBoardRef.current;
+    if (!board) return null;
 
-    if (isCorrect) {
-      setPracticeSolved(true);
-      setPracticeFeedback(
-        practiceStepIndex === practiceSteps.length - 1
-          ? "Correct—this completes the walkthrough."
-          : "Correct. You followed the rule for this step; continue to the next one.",
-      );
-      return;
+    const blocks = Array.from(board.querySelectorAll<HTMLButtonElement>("[data-practice-index]"));
+    let nearestIndex: number | null = null;
+    let nearestDistance = Infinity;
+
+    blocks.forEach((block) => {
+      const rect = block.getBoundingClientRect();
+      const centerX = rect.left + rect.width / 2;
+      const centerY = rect.top + rect.height / 2;
+      const distance = (clientX - centerX) ** 2 + (clientY - centerY) ** 2;
+      if (distance < nearestDistance) {
+        nearestDistance = distance;
+        nearestIndex = Number(block.dataset.practiceIndex);
+      }
+    });
+
+    return nearestIndex;
+  }
+
+  function finishPracticeDrag(cancelled = false) {
+    const drag = practicePointerRef.current;
+    if (!drag) return;
+
+    const destination = practiceDropIndex;
+    const shouldMove = !cancelled && drag.moved && destination !== null && destination !== drag.fromIndex;
+    if (shouldMove) {
+      practiceBlockPositionsRef.current = capturePracticeBlockPositions();
+      suppressPracticeClickRef.current = true;
+      movePracticeItem(drag.fromIndex, destination, false);
     }
 
-    setPracticeSolved(false);
-    setPracticeFeedback("Not quite. Hint: " + currentPractice.hint);
+    practicePointerRef.current = null;
+    setPracticeDragIndex(null);
+    setPracticeDraggingId(null);
+    setPracticeDragOffset({ x: 0, y: 0 });
+    setPracticeDropIndex(null);
+  }
+
+  function handlePracticePointerDown(
+    event: ReactPointerEvent<HTMLButtonElement>,
+    index: number,
+    id: string,
+  ) {
+    if (practiceFinished || event.button !== 0) return;
+    event.currentTarget.setPointerCapture(event.pointerId);
+    practicePointerRef.current = {
+      id,
+      fromIndex: index,
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      moved: false,
+    };
+    setPracticeDragIndex(index);
+    setPracticeDraggingId(id);
+    setPracticeDragOffset({ x: 0, y: 0 });
+    setPracticeDropIndex(index);
+  }
+
+  function handlePracticePointerMove(event: ReactPointerEvent<HTMLButtonElement>) {
+    const drag = practicePointerRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+
+    const x = event.clientX - drag.startX;
+    const y = event.clientY - drag.startY;
+    if (Math.abs(x) + Math.abs(y) > 5) drag.moved = true;
+    if (!drag.moved) return;
+
+    event.preventDefault();
+    setPracticeDragOffset({ x, y });
+    const destination = getPracticeDropIndex(event.clientX, event.clientY);
+    setPracticeDropIndex((current) => (current === destination ? current : destination));
   }
 
   function advancePracticeStep() {
@@ -1286,6 +1519,10 @@ export default function Home() {
       setPracticeStepIndex(practiceSteps.length);
       setPracticeSelectedIndex(null);
       setPracticeDragIndex(null);
+      setPracticeDraggingId(null);
+      setPracticeDragOffset({ x: 0, y: 0 });
+      setPracticeDropIndex(null);
+      practicePointerRef.current = null;
       setPracticeSolved(false);
       return;
     }
@@ -1294,6 +1531,10 @@ export default function Home() {
     setPracticeStepIndex(nextStepIndex);
     setPracticeSelectedIndex(null);
     setPracticeDragIndex(null);
+    setPracticeDraggingId(null);
+    setPracticeDragOffset({ x: 0, y: 0 });
+    setPracticeDropIndex(null);
+    practicePointerRef.current = null;
     setPracticeSolved(false);
     setPracticeFeedback(null);
 
@@ -1348,6 +1589,8 @@ export default function Home() {
     const sequence =
       algorithm === "mean-partition"
         ? buildMeanPartitionSteps(originalValues)
+        : algorithm === "bubble"
+          ? buildBubbleSteps(originalValues)
         : algorithm === "cocktail"
           ? buildCocktailSteps(originalValues)
           : algorithm === "selection"
@@ -1370,6 +1613,7 @@ export default function Home() {
     const nextBogoAttemptMaximum = getBogoAttemptMaximum(clampedSize);
     if (bogoAttemptLimit > nextBogoAttemptMaximum) {
       setBogoAttemptLimit(nextBogoAttemptMaximum);
+      setBogoAttemptInput(String(nextBogoAttemptMaximum));
     }
     setArraySize(clampedSize);
     setArraySizeInput(String(clampedSize));
@@ -1419,6 +1663,16 @@ export default function Home() {
       Math.max(BOGO_MIN_ATTEMPTS, Math.round(nextLimit)),
     );
     setBogoAttemptLimit(clampedLimit);
+    setBogoAttemptInput(String(clampedLimit));
+  }
+
+  function normalizeBogoAttemptInput() {
+    const candidate = Math.round(Number(bogoAttemptInput));
+    if (!Number.isFinite(candidate)) {
+      setBogoAttemptInput(String(bogoAttemptLimit));
+      return;
+    }
+    handleBogoAttemptLimitChange(candidate);
   }
 
   const primaryLabel =
@@ -1508,14 +1762,15 @@ export default function Home() {
                     disabled={isLocked}
                     aria-label="Sorting algorithm"
                   >
-                    <option value="insertion">Insertion sort</option>
+                    <option value="bogo">Bogo sort</option>
+                    <option value="bubble">Bubble sort</option>
                     <option value="cocktail">Cocktail sort</option>
+                    <option value="insertion">Insertion sort</option>
                     <option value="selection">Selection sort</option>
                     <option value="heap">Heap sort</option>
                     <option value="quick">Quick sort</option>
                     <option value="merge">Merge sort</option>
                     <option value="mean-partition">Mean partition sort</option>
-                    <option value="bogo">Bogo sort</option>
                   </select>
                 </label>
 
@@ -1523,7 +1778,21 @@ export default function Home() {
                   <label className="control-field control-field--range bogo-attempt-limit">
                     <span className="control-label">
                       Max shuffles
-                      <strong>{bogoAttemptLimit.toLocaleString("en-US")}</strong>
+                      <input
+                        className="control-number control-number--bogo"
+                        type="number"
+                        min={BOGO_MIN_ATTEMPTS}
+                        max={bogoAttemptMaximum}
+                        step="1"
+                        value={bogoAttemptInput}
+                        onChange={(event) => setBogoAttemptInput(event.target.value)}
+                        onBlur={normalizeBogoAttemptInput}
+                        onKeyDown={(event) => {
+                          if (event.key === "Enter") event.currentTarget.blur();
+                        }}
+                        disabled={isLocked}
+                        aria-label="Maximum Bogo Sort shuffles exact value"
+                      />
                     </span>
                     <input
                       type="range"
@@ -1761,6 +2030,13 @@ export default function Home() {
                     <span><i className="legend__swatch legend__swatch--swap" />partition swap</span>
                     <span><i className="legend__swatch legend__swatch--sorted" />placed pivot</span>
                   </>
+                ) : algorithm === "bubble" ? (
+                  <>
+                    <span><i className="legend__swatch legend__swatch--idle" />unsorted</span>
+                    <span><i className="legend__swatch legend__swatch--compare" />neighbors checked</span>
+                    <span><i className="legend__swatch legend__swatch--swap" />swap</span>
+                    <span><i className="legend__swatch legend__swatch--sorted" />settled right edge</span>
+                  </>
                 ) : algorithm === "cocktail" ? (
                   <>
                     <span><i className="legend__swatch legend__swatch--idle" />unsorted</span>
@@ -1864,7 +2140,7 @@ export default function Home() {
             <div className="practice-lab__header">
               <div>
                 <p className="eyebrow">TRY IT YOURSELF</p>
-                <h3 id="practice-title">Move the blocks, then check the rule.</h3>
+                <h3 id="practice-title">Move the blocks and see the rule.</h3>
               </div>
               <span>
                 {practiceFinished
@@ -1878,61 +2154,102 @@ export default function Home() {
                 : currentPractice.prompt}
             </p>
             <p className="practice-lab__help">
-              Drag a block to slide it into a new place, or select one block and then select its destination.
+              Pick up a block and drag it into place, or select one block and then select its destination. Each move is checked immediately.
             </p>
-            <div className="practice-board" role="group" aria-label={algorithmLabel + " interactive practice blocks"}>
+            <div
+              className="practice-board"
+              ref={practiceBoardRef}
+              role="group"
+              aria-label={algorithmLabel + " interactive practice blocks"}
+            >
               {isPartitionPractice
                 ? practicePartitionOrder.map((partitionId, index) => {
                     const partition = currentPractice.partitions.find(
                       (candidate) => candidate.id === partitionId,
                     );
                     if (!partition) return null;
+                    const practiceItemId = "partition-" + partition.id;
+                    const isDragging = practiceDraggingId === practiceItemId;
                     return (
                       <button
                         className={
                           "practice-block practice-block--partition " +
-                          (practiceSelectedIndex === index ? "practice-block--selected" : "")
+                          (practiceSelectedIndex === index ? "practice-block--selected " : "") +
+                          (isDragging ? "practice-block--dragging " : "") +
+                          (practiceDropIndex === index && practiceDragIndex !== index
+                            ? "practice-block--drop-target"
+                            : "")
                         }
                         type="button"
                         key={partition.id}
-                        draggable={!practiceFinished}
-                        onDragStart={() => setPracticeDragIndex(index)}
-                        onDragOver={(event) => event.preventDefault()}
-                        onDrop={(event) => {
-                          event.preventDefault();
-                          if (practiceDragIndex !== null) movePracticeItem(practiceDragIndex, index);
-                        }}
-                        onDragEnd={() => setPracticeDragIndex(null)}
+                        ref={(element) => setPracticeBlockRef(practiceItemId, element)}
+                        data-practice-index={index}
+                        onPointerDown={(event) => handlePracticePointerDown(event, index, practiceItemId)}
+                        onPointerMove={handlePracticePointerMove}
+                        onPointerUp={() => finishPracticeDrag()}
+                        onPointerCancel={() => finishPracticeDrag(true)}
                         onClick={() => handlePracticeBlockClick(index)}
                         aria-pressed={practiceSelectedIndex === index}
+                        aria-grabbed={isDragging}
+                        style={
+                          isDragging
+                            ? {
+                                transform:
+                                  "translate(" +
+                                  practiceDragOffset.x +
+                                  "px, " +
+                                  practiceDragOffset.y +
+                                  "px) scale(1.04)",
+                              }
+                            : undefined
+                        }
                       >
                         <span>[{partition.values.join(", ")}]</span>
                         <strong>μ {formatMean(partition.mean)}</strong>
                       </button>
                     );
                   })
-                : practiceValues.map((value, index) => (
-                    <button
-                      className={
-                        "practice-block " +
-                        (practiceSelectedIndex === index ? "practice-block--selected" : "")
-                      }
-                      type="button"
-                      key={value}
-                      draggable={!practiceFinished}
-                      onDragStart={() => setPracticeDragIndex(index)}
-                      onDragOver={(event) => event.preventDefault()}
-                      onDrop={(event) => {
-                        event.preventDefault();
-                        if (practiceDragIndex !== null) movePracticeItem(practiceDragIndex, index);
-                      }}
-                      onDragEnd={() => setPracticeDragIndex(null)}
-                      onClick={() => handlePracticeBlockClick(index)}
-                      aria-pressed={practiceSelectedIndex === index}
-                    >
-                      {value}
-                    </button>
-                  ))}
+                : practiceValues.map((value, index) => {
+                      const practiceItemId = "value-" + value;
+                      const isDragging = practiceDraggingId === practiceItemId;
+                      return (
+                        <button
+                          className={
+                            "practice-block " +
+                            (practiceSelectedIndex === index ? "practice-block--selected " : "") +
+                            (isDragging ? "practice-block--dragging " : "") +
+                            (practiceDropIndex === index && practiceDragIndex !== index
+                              ? "practice-block--drop-target"
+                              : "")
+                          }
+                          type="button"
+                          key={value}
+                          ref={(element) => setPracticeBlockRef(practiceItemId, element)}
+                          data-practice-index={index}
+                          onPointerDown={(event) => handlePracticePointerDown(event, index, practiceItemId)}
+                          onPointerMove={handlePracticePointerMove}
+                          onPointerUp={() => finishPracticeDrag()}
+                          onPointerCancel={() => finishPracticeDrag(true)}
+                          onClick={() => handlePracticeBlockClick(index)}
+                          aria-pressed={practiceSelectedIndex === index}
+                          aria-grabbed={isDragging}
+                          style={
+                            isDragging
+                              ? {
+                                  transform:
+                                    "translate(" +
+                                    practiceDragOffset.x +
+                                    "px, " +
+                                    practiceDragOffset.y +
+                                    "px) scale(1.04)",
+                                }
+                              : undefined
+                          }
+                        >
+                          {value}
+                        </button>
+                      );
+                    })}
             </div>
             <div className="practice-lab__actions">
               {practiceFinished ? (
@@ -1941,9 +2258,6 @@ export default function Home() {
                 </button>
               ) : (
                 <>
-                  <button className="button button--secondary" type="button" onClick={checkPracticeStep}>
-                    Check step
-                  </button>
                   <button className="text-button" type="button" onClick={() => resetPractice()}>
                     Reset walkthrough
                   </button>
@@ -1970,7 +2284,8 @@ export default function Home() {
                 Every deterministic algorithm receives the same shuffled sequence of 1 through n.
                 These totals combine comparisons and writes, so they are operation estimates rather
                 than timers. Mean Partition also counts every value read and rewritten during each
-                grouping round, plus its group-ranking comparisons. Bogo Sort stays out of this chart
+                grouping round, its group-ranking comparisons, and its late small-group overlap guard.
+                Bogo Sort stays out of this chart
                 because its expected work grows factorially, even though the live visualizer allows it
                 up to 256 values.
               </p>
@@ -1992,47 +2307,45 @@ export default function Home() {
           <div
             className="benchmark-chart"
             role="img"
-            aria-label={"Estimated work for insertion, cocktail, selection, heap, quick, merge, and mean partition sort on " + benchmarkPattern + " arrays from 16 through 256 values."}
+            aria-label={"Estimated work for bubble, insertion, cocktail, selection, heap, quick, merge, and mean partition sort on " + benchmarkPattern + " arrays from 16 through 256 values."}
           >
-            <div className="benchmark-chart__scale">
-              <span>{formatCount(benchmarkMaximum)} work units</span>
-              <span>0</span>
-            </div>
-            <div className="benchmark-columns" aria-hidden="true">
-              {benchmarkData.map((entry) => {
-                return (
-                  <div className="benchmark-group" key={entry.size}>
-                    <div className="benchmark-bars">
-                      {BENCHMARK_ALGORITHMS.map((benchmarkAlgorithm) => {
-                        const height = Math.max(
-                          3,
-                          (entry.work[benchmarkAlgorithm.key] / benchmarkMaximum) * 100,
-                        );
-                        return (
-                          <div
-                            className={"benchmark-bar benchmark-bar--" + benchmarkAlgorithm.className}
-                            key={benchmarkAlgorithm.key}
-                            style={{ height: String(height) + "%" }}
-                          />
-                        );
-                      })}
-                    </div>
-                    <span>n={entry.size}</span>
-                  </div>
-                );
-              })}
-            </div>
-            <div className="benchmark-legend" aria-hidden="true">
+            <p className="benchmark-chart__note">
+              Each column compares algorithms at that exact array size. Meter length uses a log scale so the faster algorithms remain visible; the printed number is the exact work estimate.
+            </p>
+            <div className="benchmark-matrix">
+              <div className="benchmark-matrix__header">
+                <span>Algorithm</span>
+                {benchmarkData.map((entry) => <span key={entry.size}>n={entry.size}</span>)}
+              </div>
               {BENCHMARK_ALGORITHMS.map((benchmarkAlgorithm) => (
-                <span key={benchmarkAlgorithm.key}>
-                  <i className={"benchmark-legend__swatch benchmark-legend__swatch--" + benchmarkAlgorithm.className} />
-                  {benchmarkAlgorithm.label}
-                </span>
+                <div className="benchmark-matrix__row" key={benchmarkAlgorithm.key}>
+                  <span className="benchmark-matrix__label">
+                    <i className={"benchmark-legend__swatch benchmark-legend__swatch--" + benchmarkAlgorithm.className} />
+                    {benchmarkAlgorithm.label}
+                  </span>
+                  {benchmarkData.map((entry) => {
+                    const work = entry.work[benchmarkAlgorithm.key];
+                    const columnMaximum = Math.max(1, ...Object.values(entry.work));
+                    const ratio = Math.log1p(work) / Math.log1p(columnMaximum);
+                    return (
+                      <span className="benchmark-matrix__cell" key={entry.size}>
+                        <strong>{formatCount(work)}</strong>
+                        <i>
+                          <b
+                            className={"benchmark-meter--" + benchmarkAlgorithm.className}
+                            style={{ width: String(ratio * 100) + "%" }}
+                          />
+                        </i>
+                      </span>
+                    );
+                  })}
+                </div>
               ))}
             </div>
           </div>
 
           <div className="benchmark-current" aria-label={"Current benchmark at " + arraySize + " values"}>
+            <p className="benchmark-current__title">Exact totals at n={arraySize}</p>
             {BENCHMARK_ALGORITHMS.map((benchmarkAlgorithm) => {
               const work = selectedBenchmark[benchmarkAlgorithm.key];
               return (
