@@ -60,6 +60,7 @@ function totalWork(metrics: {
   rankComparisons: number;
   writes: number;
   meanComputationOperations?: number;
+  meanRankingArithmeticOperations?: number;
   refinementOperations?: number;
 }) {
   return (
@@ -67,6 +68,7 @@ function totalWork(metrics: {
     metrics.rankComparisons +
     metrics.writes +
     (metrics.meanComputationOperations ?? 0) +
+    (metrics.meanRankingArithmeticOperations ?? 0) +
     (metrics.refinementOperations ?? 0)
   );
 }
@@ -81,34 +83,42 @@ test("insertion sort finishes in numeric order without mutating its source", () 
   assert.equal(steps.at(-1)?.writes, 4);
 });
 
-test("range-guard adaptive uses one broad scout before a certified local finish", () => {
+test("adaptive mean uses a size-scaled mean cascade before its certified local finish", () => {
   const source = Array.from(
-    { length: 32 },
-    (_, index) => (index % 2 === 0 ? index / 2 + 1 : 32 - (index - 1) / 2),
+    { length: 64 },
+    (_, index) => (index % 2 === 0 ? index / 2 + 1 : 64 - (index - 1) / 2),
   );
   const steps = buildRangeGuardMeanSteps(source);
   const splitSteps = steps.filter((step) => step.phase === "split");
 
-  assert.equal(splitSteps[0]?.groups?.length, 2);
-  assert.match(splitSteps[0]?.message ?? "", /two broad mean groups/);
-  assert.match(splitSteps[1]?.message ?? "", /Range guard finds/);
+  assert.deepEqual(
+    splitSteps.slice(0, 3).map((step) => step.groups?.length),
+    [2, 4, 8],
+  );
+  assert.match(splitSteps[0]?.message ?? "", /Mean cascade round 1/);
+  assert.match(splitSteps[3]?.message ?? "", /Adaptive mean guard finds/);
   assert.deepEqual(finalValues(steps), [...source].sort((left, right) => left - right));
-  assert.ok((analyzeRangeGuardMeanSort(source).refinementOperations ?? 0) > 0);
-  assert.ok(steps.filter((step) => step.phase === "reorder").length > 2);
+  const metrics = analyzeRangeGuardMeanSort(source);
+  assert.equal(metrics.comparisons, 0);
+  assert.ok(metrics.rankComparisons > 0);
+  assert.ok((metrics.meanComputationOperations ?? 0) > 0);
+  assert.ok((metrics.meanRankingArithmeticOperations ?? 0) > 0);
+  assert.ok((metrics.refinementOperations ?? 0) > 0);
+  assert.ok(steps.filter((step) => step.phase === "reorder").length > 3);
   assert.deepEqual(source, Array.from(
-    { length: 32 },
-    (_, index) => (index % 2 === 0 ? index / 2 + 1 : 32 - (index - 1) / 2),
+    { length: 64 },
+    (_, index) => (index % 2 === 0 ? index / 2 + 1 : 64 - (index - 1) / 2),
   ));
 });
 
-test("range-guard adaptive respects duplicate-safe range boundaries", () => {
+test("adaptive mean respects duplicate-safe range boundaries", () => {
   const source = [
     16, 1, 15, 2, 14, 3, 13, 4, 12, 5, 11, 6, 10, 7, 9, 8,
     31, 16, 30, 17, 29, 18, 28, 19, 27, 20, 26, 21, 25, 22, 24, 23,
   ];
   const guarded = buildRangeGuardMeanSteps(source);
   const rangeScan = guarded.find(
-    (step) => step.phase === "split" && step.message.includes("Range guard finds"),
+    (step) => step.phase === "split" && step.message.includes("Adaptive mean guard finds"),
   );
 
   assert.match(rangeScan?.message ?? "", /2 certified independent value regions/);
@@ -116,7 +126,7 @@ test("range-guard adaptive respects duplicate-safe range boundaries", () => {
   assert.deepEqual(finalValues(guarded), [...source].sort((left, right) => left - right));
 });
 
-test("range-guard adaptive finishes generic values exactly without mutating its source", () => {
+test("adaptive mean finishes generic values exactly without mutating its source", () => {
   for (const source of [
     [5, 5, 2, 2, 1, -3, 8, -1, 0, 8],
     [3.5, -1.25, 3.5, 0, -8.75, 2.25, 2.25],
@@ -137,7 +147,7 @@ test("balanced partitions cover every value without creating empty groups", () =
   assert.deepEqual(partitionBalanced([1, 2, 3, 4, 5, 6], 4), [[1, 2], [3, 4], [5], [6]]);
 });
 
-test("range-guard adaptive stays below heap on the Efficiency Lab arrangements", () => {
+test("adaptive mean stays below heap on the Efficiency Lab arrangements", () => {
   for (const size of [16, 32, 64, 128, 256]) {
     for (const pattern of ["random", "reverse", "nearly-sorted"] as const) {
       const values = makeBenchmarkValues(size, pattern);
@@ -146,7 +156,7 @@ test("range-guard adaptive stays below heap on the Efficiency Lab arrangements",
 
       assert.ok(
         guardedWork < heapWork,
-        "Expected Range-Guard Adaptive to beat Heap at n=" + size + " for " + pattern + ".",
+        "Expected Adaptive Mean to beat Heap at n=" + size + " for " + pattern + ".",
       );
     }
   }
@@ -240,11 +250,23 @@ test("bogo sessions can yield between attempts without losing their selected lim
   const limited = createBogoSession([2, 1], 3);
   while (!limited.done) advanceBogoSession(limited, () => 0.999);
 
+  const unlimited = createBogoSession([2, 1], null);
+  advanceBogoSession(unlimited, () => 0.999);
+
   assert.equal(success.attemptLimit, 4);
   assert.equal(getBogoSessionStep(success).phase, "complete");
   assert.deepEqual(getBogoSessionStep(success).values, [1, 2]);
   assert.equal(limited.attempts, 3);
   assert.equal(getBogoSessionStep(limited).phase, "limited");
+  assert.equal(unlimited.attemptLimit, null);
+  assert.equal(unlimited.done, false);
+  assert.equal(unlimited.limited, false);
+  assert.equal(getBogoSessionStep(unlimited).phase, "shuffle");
+
+  advanceBogoSession(unlimited, () => 0);
+  assert.equal(unlimited.done, true);
+  assert.equal(unlimited.limited, false);
+  assert.equal(getBogoSessionStep(unlimited).phase, "complete");
 });
 
 test("dense algorithms retain a bounded number of useful render snapshots", () => {

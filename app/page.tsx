@@ -98,6 +98,8 @@ type MedianPracticeStep = {
 
 type PracticeStep = BlockPracticeStep | PartitionPracticeStep | MedianPracticeStep;
 
+type PracticeMoveResult = "solved" | "progress" | "wrong";
+
 type SortStep = {
   values: number[];
   pass: number;
@@ -141,14 +143,12 @@ const BENCHMARK_ALGORITHMS = [
   { key: "heap", label: "Heap sort", className: "heap" },
   { key: "quick", label: "Quick sort", className: "quick" },
   { key: "merge", label: "Merge sort", className: "merge" },
-  { key: "rangeGuardMean", label: "Range-Guard Adaptive sort", className: "range-guard" },
+  { key: "rangeGuardMean", label: "Adaptive Mean sort", className: "range-guard" },
 ] as const;
 type BenchmarkAlgorithm = (typeof BENCHMARK_ALGORITHMS)[number]["key"];
 type BenchmarkWork = Record<BenchmarkAlgorithm, number>;
 const BOGO_MIN_ATTEMPTS = 1;
-const BOGO_SMALL_ARRAY_MAX_ATTEMPTS = 999_999_999;
-const BOGO_MID_ARRAY_MAX_ATTEMPTS = 100_000_000;
-const BOGO_LARGE_ARRAY_MAX_ATTEMPTS = 1_000_000;
+const BOGO_STANDARD_MAX_ATTEMPTS = 999_999_999;
 const INITIAL_VALUES = [
   17, 5, 22, 8, 19, 3, 14, 24, 1, 12, 7, 20, 10, 23, 4, 16, 9, 21, 2, 18,
   6, 15, 11, 13,
@@ -162,17 +162,6 @@ const BOGO_CONFETTI = Array.from({ length: 64 }, (_, index) => ({
   color: BOGO_CONFETTI_COLORS[index % BOGO_CONFETTI_COLORS.length],
   shape: index % 3,
 }));
-
-function getBogoAttemptMaximum(size: number) {
-  if (size < DEFAULT_ARRAY_SIZE) return BOGO_SMALL_ARRAY_MAX_ATTEMPTS;
-  if (size <= 144) return BOGO_MID_ARRAY_MAX_ATTEMPTS;
-
-  const scale = (size - 144) / (256 - 144);
-  return Math.round(
-    BOGO_MID_ARRAY_MAX_ATTEMPTS *
-      (BOGO_LARGE_ARRAY_MAX_ATTEMPTS / BOGO_MID_ARRAY_MAX_ATTEMPTS) ** scale,
-  );
-}
 
 function getTheoreticalWork(
   algorithm: BenchmarkAlgorithm,
@@ -203,38 +192,43 @@ function getTheoreticalWork(
     case "merge":
       return 2 * n * logN;
     case "rangeGuardMean":
-      // One broad mean scout, then an exact natural-run merge only inside the
-      // unresolved range components. It remains O(n log n) in the worst case,
-      // with a small linear setup cost rather than repeated whole-row passes.
-      return 2 * n * logN + 2 * n;
+      // A capped 2→4→8→16 mean-band cascade uses lightweight block handles,
+      // then resolves only the range components that still overlap.
+      return 2.25 * n * logN + 2 * n;
   }
 }
 
-const ALGORITHM_DETAILS: Record<
-  AlgorithmId,
-  {
-    label: string;
-    number: string;
-    heroCopy: string;
-    controlTitle: string;
-    stageLabel: string;
-    stageDescription: string;
-    eyebrow: string;
-    learnTitle: string;
-    learnCopy: string[];
-    complexity: [string, string, string];
-    cardTitle: string;
-    cardTag: string;
-    steps: string[];
-    examples: Array<{ values: string; detail: string }>;
-    practice: PracticeStep[];
-  }
-> = {
+type AlgorithmInsight = {
+  title: string;
+  copy: string;
+};
+
+type AlgorithmDetails = {
+  label: string;
+  number: string;
+  heroCopy: string;
+  controlTitle: string;
+  stageLabel: string;
+  stageDescription: string;
+  eyebrow: string;
+  learnTitle: string;
+  learnCopy: string[];
+  complexity: [string, string, string];
+  cardTitle: string;
+  cardTag: string;
+  steps: string[];
+  examples: Array<{ values: string; detail: string }>;
+  benefits: AlgorithmInsight[];
+  tradeoffs: AlgorithmInsight[];
+  practice: PracticeStep[];
+};
+
+const ALGORITHM_DETAILS: Record<AlgorithmId, AlgorithmDetails> = {
   insertion: {
     label: "Insertion sort",
     number: "04",
-    heroCopy: "Slow down a real insertion sort and see the sorted prefix grow one deliberate move at a time.",
-    controlTitle: "Build a sorted prefix",
+    heroCopy: "Take the next value and slide it into its place inside the sorted left side.",
+    controlTitle: "Insert the next value into place",
     stageLabel: "pass",
     stageDescription: "key placement",
     eyebrow: "THE BIG IDEA",
@@ -256,10 +250,33 @@ const ALGORITHM_DETAILS: Record<
       { values: "[3, 5 | 4, 1]", detail: "3 is smaller than 5, so 5 slides right and 3 uses the new gap." },
       { values: "[3, 4, 5 | 1]", detail: "Repeat for 4; the sorted prefix grows by one value every pass." },
     ],
+    benefits: [
+      { title: "Excellent when nearly ordered", copy: "It leaves the sorted left side alone and shifts only the values that are genuinely out of place." },
+      { title: "Small and stable", copy: "It works in the original row and keeps equal values in their original order." },
+    ],
+    tradeoffs: [
+      { title: "Long slides add up", copy: "A small value near the end may have to travel past many earlier values." },
+      { title: "Not for heavy disorder", copy: "A large shuffled row creates so many shifts that faster divide-and-conquer sorts usually win." },
+    ],
     practice: [
-      { prompt: "Take 3 and slide it before 5.", start: [5, 3, 4, 1], target: [3, 5, 4, 1], hint: "The key is smaller than the only sorted value." },
-      { prompt: "Now place 4 into the sorted prefix.", start: [3, 5, 4, 1], target: [3, 4, 5, 1], hint: "4 belongs between 3 and 5." },
-      { prompt: "Slide 1 into its final position in the prefix.", start: [3, 4, 5, 1], target: [1, 3, 4, 5], hint: "1 is smaller than every value already in the prefix." },
+      {
+        prompt: "Use two swaps to carry the key, 1, left through the sorted prefix.",
+        start: [2, 5, 1, 4, 3],
+        target: [1, 2, 5, 4, 3],
+        hint: "First move 1 past 5, then past 2. The prefix should read [1, 2, 5].",
+      },
+      {
+        prompt: "Insert the next key, 4, into the prefix.",
+        start: [1, 2, 5, 4, 3],
+        target: [1, 2, 4, 5, 3],
+        hint: "4 only needs to pass 5.",
+      },
+      {
+        prompt: "Carry the last key, 3, left until the whole row is ordered.",
+        start: [1, 2, 4, 5, 3],
+        target: [1, 2, 3, 4, 5],
+        hint: "Move 3 past 5, then past 4.",
+      },
     ],
   },
   bubble: {
@@ -288,11 +305,39 @@ const ALGORITHM_DETAILS: Record<
       { values: "[1, 4, 3, 2] → [1, 3, 4, 2]", detail: "4 meets 3 next and swaps again, continuing its trip right." },
       { values: "[1, 3, 2, 4]", detail: "After one full sweep, 4 is fixed at the far right; later passes work only to its left." },
     ],
+    benefits: [
+      { title: "Very easy to follow", copy: "Every decision looks at neighbors, so each swap has an obvious local reason." },
+      { title: "Can stop early", copy: "A pass with no swaps proves that an already ordered row is finished." },
+    ],
+    tradeoffs: [
+      { title: "Big values move slowly", copy: "A value can travel only one seat at a time, which creates many repeated passes." },
+      { title: "Poor at scale", copy: "On a large scrambled row it keeps revisiting nearly the same neighboring pairs." },
+    ],
     practice: [
-      { prompt: "Start the bubble by moving 1 ahead of 4.", start: [4, 1, 3, 2], target: [1, 4, 3, 2], hint: "The first pair is backwards: 4 is larger than 1." },
-      { prompt: "Keep 4 bubbling right past 3.", start: [1, 4, 3, 2], target: [1, 3, 4, 2], hint: "Compare the pair containing 4 and 3." },
-      { prompt: "Finish the sweep by sending 4 to the right edge.", start: [1, 3, 4, 2], target: [1, 3, 2, 4], hint: "4 is still larger than the value beside it." },
-      { prompt: "One more short pass fixes the middle pair and completes the sorted row.", start: [1, 3, 2, 4], target: [1, 2, 3, 4], hint: "Compare 3 and 2; the settled 4 stays at the right edge." },
+      {
+        prompt: "Start the bubble by moving 1 ahead of 4.",
+        start: [4, 1, 3, 2, 5],
+        target: [1, 4, 3, 2, 5],
+        hint: "The first pair is backwards: 4 is larger than 1.",
+      },
+      {
+        prompt: "Keep 4 bubbling right past 3.",
+        start: [1, 4, 3, 2, 5],
+        target: [1, 3, 4, 2, 5],
+        hint: "Compare the neighboring pair containing 4 and 3.",
+      },
+      {
+        prompt: "Finish the first sweep by sending 4 past 2.",
+        start: [1, 3, 4, 2, 5],
+        target: [1, 3, 2, 4, 5],
+        hint: "4 is still larger than the value beside it; 5 is already settled.",
+      },
+      {
+        prompt: "Make the last neighboring swap to complete the five-value row.",
+        start: [1, 3, 2, 4, 5],
+        target: [1, 2, 3, 4, 5],
+        hint: "Compare 3 and 2; the two rightmost values stay in place.",
+      },
     ],
   },
   cocktail: {
@@ -321,10 +366,45 @@ const ALGORITHM_DETAILS: Record<
       { values: "[1, 4, 3, 2] → [1, 3, 2, 4]", detail: "Continuing right pushes 4 to the far edge, where it is settled." },
       { values: "[1, 3, 2, 4] → [1, 2, 3, 4]", detail: "The backward sweep fixes the small value that needs to travel left." },
     ],
+    benefits: [
+      { title: "Helps both ends", copy: "The forward sweep pushes a large value right, and the return sweep lets a small value travel left immediately." },
+      { title: "A useful stepping stone", copy: "It keeps Bubble Sort's simple neighbor rule while showing why direction can matter." },
+    ],
+    tradeoffs: [
+      { title: "Still neighbor by neighbor", copy: "Even with the return trip, distant values move only one place per comparison." },
+      { title: "Same big-picture cost", copy: "Two directions help some arrangements but do not remove the many passes on a large scrambled row." },
+    ],
     practice: [
-      { prompt: "Start the forward sweep by moving 1 ahead of 4.", start: [4, 1, 3, 2], target: [1, 4, 3, 2], hint: "Compare the first neighboring pair." },
-      { prompt: "Finish this forward sweep so 4 reaches the settled right edge.", start: [1, 4, 3, 2], target: [1, 3, 2, 4], hint: "The largest value belongs at the far right after a forward pass." },
-      { prompt: "Use the backward sweep to finish the middle pair.", start: [1, 3, 2, 4], target: [1, 2, 3, 4], hint: "The smaller value travels left on the return pass." },
+      {
+        prompt: "Start the forward sweep by moving 1 ahead of 5.",
+        start: [5, 1, 3, 2, 4],
+        target: [1, 5, 3, 2, 4],
+        hint: "The first neighboring pair is backwards.",
+      },
+      {
+        prompt: "Keep 5 moving right past 3.",
+        start: [1, 5, 3, 2, 4],
+        target: [1, 3, 5, 2, 4],
+        hint: "On a forward sweep, the larger neighbor keeps traveling right.",
+      },
+      {
+        prompt: "Keep the forward sweep going past 2.",
+        start: [1, 3, 5, 2, 4],
+        target: [1, 3, 2, 5, 4],
+        hint: "5 is still the large value in this neighboring pair.",
+      },
+      {
+        prompt: "Settle 5 at the right edge to finish the forward sweep.",
+        start: [1, 3, 2, 5, 4],
+        target: [1, 3, 2, 4, 5],
+        hint: "Swap the final backward neighboring pair in the forward direction.",
+      },
+      {
+        prompt: "Now use the backward sweep to carry 2 left into place.",
+        start: [1, 3, 2, 4, 5],
+        target: [1, 2, 3, 4, 5],
+        hint: "The return sweep fixes the small value that needs to travel left.",
+      },
     ],
   },
   selection: {
@@ -353,9 +433,39 @@ const ALGORITHM_DETAILS: Record<
       { values: "minimum = 1", detail: "1 is remembered as the best candidate only after every remaining value has been checked." },
       { values: "[1 | 2, 5, 4]", detail: "Place 1 first, then repeat the same search for the next open spot." },
     ],
+    benefits: [
+      { title: "Few placements", copy: "It scans a lot, but normally makes only one final swap for each new sorted position." },
+      { title: "Predictable", copy: "It does about the same amount of searching whether the row starts almost sorted or very scrambled." },
+    ],
+    tradeoffs: [
+      { title: "Cannot take the easy win", copy: "It still searches the rest of the row even when the next value is already the smallest." },
+      { title: "May disturb ties", copy: "A normal swap can change the order of equal-looking items that carry other information." },
+    ],
     practice: [
-      { prompt: "Place the smallest value, 1, into the first open spot.", start: [4, 2, 5, 1], target: [1, 4, 2, 5], hint: "Selection sort searches the whole row before making this placement." },
-      { prompt: "From the remaining values, place 2 in the next open spot.", start: [1, 4, 2, 5], target: [1, 2, 4, 5], hint: "The finished left section should stay untouched." },
+      {
+        prompt: "Scan the full row, then place the smallest value, 1, first.",
+        start: [5, 4, 2, 1, 3],
+        target: [1, 4, 2, 5, 3],
+        hint: "Selection sort swaps the minimum, 1, with the first open position.",
+      },
+      {
+        prompt: "From the remaining values, place 2 in the next open spot.",
+        start: [1, 4, 2, 5, 3],
+        target: [1, 2, 4, 5, 3],
+        hint: "The finished 1 stays untouched while 2 moves into the second position.",
+      },
+      {
+        prompt: "Find the next minimum, 3, and place it third.",
+        start: [1, 2, 4, 5, 3],
+        target: [1, 2, 3, 5, 4],
+        hint: "Scan the unsorted tail before swapping 3 into the next open spot.",
+      },
+      {
+        prompt: "Make the final selection swap to finish the row.",
+        start: [1, 2, 3, 5, 4],
+        target: [1, 2, 3, 4, 5],
+        hint: "4 is now the smallest remaining value.",
+      },
     ],
   },
   heap: {
@@ -384,11 +494,51 @@ const ALGORITHM_DETAILS: Record<
       { values: "[1, 2, 3 | 4]", detail: "Move the root to the right; 4 is now in its final sorted position." },
       { values: "[3, 2, 1 | 4]", detail: "Sift the new root down so the remaining active values again obey the heap rule." },
     ],
+    benefits: [
+      { title: "Reliable on any arrangement", copy: "The heap rule always exposes the largest remaining value, giving dependable performance on difficult rows." },
+      { title: "Low extra memory", copy: "It reorganizes the original row instead of needing a second full output row." },
+    ],
+    tradeoffs: [
+      { title: "Harder to read", copy: "The tree-shaped rule makes values jump in ways that are less intuitive than neighboring swaps or merges." },
+      { title: "Does not preserve ties", copy: "Equal-looking items can change relative order as values are sifted through the heap." },
+    ],
     practice: [
-      { prompt: "Move the largest value, 4, to the heap root on the left.", start: [3, 1, 4, 2], target: [4, 3, 1, 2], hint: "A max heap must expose its largest active value first." },
-      { prompt: "Extract 4 to the sorted right edge.", start: [4, 3, 1, 2], target: [3, 1, 2, 4], hint: "The right edge is outside the active heap once a value is extracted." },
-      { prompt: "Restore the max-heap order among the remaining three values.", start: [3, 1, 2, 4], target: [3, 2, 1, 4], hint: "The root stays largest, then its children follow." },
-      { prompt: "Extract the remaining heap values to finish the ordered row.", start: [3, 2, 1, 4], target: [1, 2, 3, 4], hint: "The largest active value, 3, goes beside 4; the final two are already in order." },
+      {
+        prompt: "Build the six-value max heap by moving 6 to the root.",
+        start: [4, 6, 5, 2, 3, 1],
+        target: [6, 4, 5, 2, 3, 1],
+        hint: "The root must be at least as large as both of its children.",
+      },
+      {
+        prompt: "Extract 6, then sift the new root down to restore the five-value heap.",
+        start: [6, 4, 5, 2, 3, 1],
+        target: [5, 4, 1, 2, 3, 6],
+        hint: "First send 6 to the far right. Then move the larger child, 5, to the root.",
+      },
+      {
+        prompt: "Extract 5 and restore the next smaller heap.",
+        start: [5, 4, 1, 2, 3, 6],
+        target: [4, 3, 1, 2, 5, 6],
+        hint: "Send 5 beside 6, then sift 4 above the temporary root.",
+      },
+      {
+        prompt: "Extract 4 and repair the three-value heap.",
+        start: [4, 3, 1, 2, 5, 6],
+        target: [3, 2, 1, 4, 5, 6],
+        hint: "After 4 reaches its settled position, 3 should return to the root.",
+      },
+      {
+        prompt: "Extract 3 and sift 2 back to the root.",
+        start: [3, 2, 1, 4, 5, 6],
+        target: [2, 1, 3, 4, 5, 6],
+        hint: "The remaining two-value heap still needs its larger value on top.",
+      },
+      {
+        prompt: "Extract 2 to complete the ordered six-value row.",
+        start: [2, 1, 3, 4, 5, 6],
+        target: [1, 2, 3, 4, 5, 6],
+        hint: "The final two active values are a tiny max heap.",
+      },
     ],
   },
   quick: {
@@ -417,10 +567,39 @@ const ALGORITHM_DETAILS: Record<
       { values: "[1 | 4, 3 | 2]", detail: "Only 1 belongs in the smaller area. 4 and 3 are simply waiting on the other side for now." },
       { values: "[1, 2 | 4, 3]", detail: "Swap the pivot into the gap after 1. Its final position is now fixed; only [4, 3] still needs work." },
     ],
+    benefits: [
+      { title: "Usually very fast", copy: "A useful pivot breaks one big job into smaller independent jobs, so it often finishes quickly in practice." },
+      { title: "Locks in progress", copy: "Once a pivot is placed, that exact value never has to move again." },
+    ],
+    tradeoffs: [
+      { title: "Pivot choice matters", copy: "A poor pivot can keep creating lopsided pieces and make the sort do much more work." },
+      { title: "Can look chaotic", copy: "Partition swaps may scramble the middle even while several pivots are already final." },
+    ],
     practice: [
-      { prompt: "Pivot 2 stays parked at the far right. Move only the smaller value, 1, into the left area.", start: [4, 1, 3, 2], target: [1, 4, 3, 2], hint: "1 is the only value no larger than pivot 2; 4 and 3 wait to its right." },
-      { prompt: "Now slide the parked pivot 2 into the gap immediately after the smaller area.", start: [1, 4, 3, 2], target: [1, 2, 4, 3], hint: "The pivot belongs after 1 and before both 4 and 3." },
-      { prompt: "Ignore the fixed [1, 2] left side. Sort only the remaining right-side pair.", start: [1, 2, 4, 3], target: [1, 2, 3, 4], hint: "Quick sort now works only on the smaller range [4, 3]." },
+      {
+        prompt: "Use the rightmost pivot, 4, to partition this eight-value row.",
+        start: [6, 1, 7, 3, 8, 2, 5, 4],
+        target: [1, 3, 2, 4, 8, 7, 5, 6],
+        hint: "Move 1, then 3, then 2 into the left area before placing pivot 4 after them.",
+      },
+      {
+        prompt: "Work only inside the left range [1, 3, 2] and place pivot 2.",
+        start: [1, 3, 2, 4, 8, 7, 5, 6],
+        target: [1, 2, 3, 4, 8, 7, 5, 6],
+        hint: "1 stays left of pivot 2; swap the pivot into the gap before 3.",
+      },
+      {
+        prompt: "Now partition the right range with pivot 6.",
+        start: [1, 2, 3, 4, 8, 7, 5, 6],
+        target: [1, 2, 3, 4, 5, 6, 8, 7],
+        hint: "5 belongs on the pivot's left; then place 6 immediately after it.",
+      },
+      {
+        prompt: "Finish the final two-value right range.",
+        start: [1, 2, 3, 4, 5, 6, 8, 7],
+        target: [1, 2, 3, 4, 5, 6, 7, 8],
+        hint: "The earlier pivots stay fixed while 7 and 8 swap.",
+      },
     ],
   },
   merge: {
@@ -449,10 +628,57 @@ const ALGORITHM_DETAILS: Record<
       { values: "[4] + [1] → [1, 4]", detail: "Compare 4 and 1; write the smaller front value first, then copy what remains." },
       { values: "[1, 4] + [2, 3] → [1, 2, 3, 4]", detail: "Merge the two sorted pairs by repeatedly taking the smaller front value." },
     ],
+    benefits: [
+      { title: "Dependable speed", copy: "It combines ordered pieces in a steady pattern, so a sorted or reverse row does not surprise it with a slowdown." },
+      { title: "Keeps ties in order", copy: "When equal values meet, it can retain their original order—useful when values carry labels too." },
+    ],
+    tradeoffs: [
+      { title: "Needs workspace", copy: "It builds temporary merged runs, so a large sort needs another row's worth of working memory." },
+      { title: "Planned passes still happen", copy: "It does not get as much of a free win from an almost sorted row as a highly adaptive sort can." },
+    ],
     practice: [
-      { prompt: "Merge the first two one-value runs into sorted order.", start: [4, 1, 3, 2], target: [1, 4, 3, 2], hint: "The smaller front value is written first." },
-      { prompt: "Merge the second pair into sorted order.", start: [1, 4, 3, 2], target: [1, 4, 2, 3], hint: "Keep each two-value run ordered before the final merge." },
-      { prompt: "Merge the two sorted pairs into one ordered row.", start: [1, 4, 2, 3], target: [1, 2, 3, 4], hint: "Compare the front values of the two runs every time." },
+      {
+        prompt: "Sort the first one-value pair into the run [1, 5].",
+        start: [5, 1, 6, 2, 7, 3, 8, 4],
+        target: [1, 5, 6, 2, 7, 3, 8, 4],
+        hint: "Each one-value run is already ordered; write the smaller front value first.",
+      },
+      {
+        prompt: "Sort the second pair into [2, 6].",
+        start: [1, 5, 6, 2, 7, 3, 8, 4],
+        target: [1, 5, 2, 6, 7, 3, 8, 4],
+        hint: "Keep the first completed run [1, 5] untouched.",
+      },
+      {
+        prompt: "Sort the third pair into [3, 7].",
+        start: [1, 5, 2, 6, 7, 3, 8, 4],
+        target: [1, 5, 2, 6, 3, 7, 8, 4],
+        hint: "Only the third neighboring pair needs to change.",
+      },
+      {
+        prompt: "Sort the final pair into [4, 8].",
+        start: [1, 5, 2, 6, 3, 7, 8, 4],
+        target: [1, 5, 2, 6, 3, 7, 4, 8],
+        hint: "After this, all four two-value runs are ordered.",
+      },
+      {
+        prompt: "Merge [1, 5] with [2, 6] into one four-value run.",
+        start: [1, 5, 2, 6, 3, 7, 4, 8],
+        target: [1, 2, 5, 6, 3, 7, 4, 8],
+        hint: "2 is the next smallest front value, so it belongs before 5.",
+      },
+      {
+        prompt: "Merge [3, 7] with [4, 8] into the other four-value run.",
+        start: [1, 2, 5, 6, 3, 7, 4, 8],
+        target: [1, 2, 5, 6, 3, 4, 7, 8],
+        hint: "4 needs to come before 7 while the completed left run stays untouched.",
+      },
+      {
+        prompt: "Complete the final merge of the two ordered four-value runs.",
+        start: [1, 2, 5, 6, 3, 4, 7, 8],
+        target: [1, 2, 3, 4, 5, 6, 7, 8],
+        hint: "Bring 3 and then 4 left through [5, 6]. Each helpful swap remains on the board.",
+      },
     ],
   },
   bogo: {
@@ -481,56 +707,82 @@ const ALGORITHM_DETAILS: Record<
       { values: "shuffle → [2, 3, 1]", detail: "A new random order is not guided by any comparison or rule." },
       { values: "lucky shuffle → [1, 2, 3]", detail: "Only by chance does one attempt land on the sorted permutation." },
     ],
+    benefits: [
+      { title: "Makes randomness visible", copy: "Its whole rule is shuffle, check, repeat, so it makes clear why useful sorting needs a plan." },
+      { title: "Fine for a tiny experiment", copy: "On a few values it is a memorable way to see how quickly the number of possible orders explodes." },
+    ],
+    tradeoffs: [
+      { title: "Throws progress away", copy: "A failed shuffle keeps no useful part of the previous order; it starts the whole guess over." },
+      { title: "Usually cannot finish", copy: "The odds become tiny so quickly that the safety cap will normally stop a larger example before luck does." },
+    ],
     practice: [
-      { prompt: "For this tiny example, arrange the lucky sorted shuffle.", start: [3, 1, 2], target: [1, 2, 3], hint: "Bogo has no smarter move—you are just modeling the lucky outcome." },
-      { prompt: "Try a second tiny lucky outcome with four values.", start: [2, 4, 1, 3], target: [1, 2, 3, 4], hint: "There is only one successful order among all possible shuffles." },
+      {
+        prompt: "For this tiny example, arrange the lucky sorted shuffle.",
+        start: [3, 1, 2],
+        target: [1, 2, 3],
+        hint: "Bogo has no smarter move—you are just modeling the lucky outcome one swap at a time.",
+      },
+      {
+        prompt: "Try a second tiny lucky outcome with four values.",
+        start: [2, 4, 1, 3],
+        target: [1, 2, 3, 4],
+        hint: "There is only one successful order among all possible shuffles.",
+      },
     ],
   },
   "range-guard-mean": {
-    label: "Range-Guard Adaptive sort",
+    label: "Adaptive Mean sort",
     number: "09",
-    heroCopy: "Use one broad mean rank to scout the row, then finish only the value ranges that still cross.",
-    controlTitle: "Certify ranges, then finish locally",
+    heroCopy: "Rank progressively narrower mean bands, prove the safe boundaries, then finish only the overlaps.",
+    controlTitle: "Cascade mean bands, then certify ranges",
     stageLabel: "round",
-    stageDescription: "adaptive range finish",
+    stageDescription: "mean cascade + range finish",
     eyebrow: "THE BIG IDEA",
-    learnTitle: "Use averages to scout, ranges to prove, and local work to finish.",
+    learnTitle: "Use means to arrange broad bands, then let ranges decide what still needs exact work.",
     learnCopy: [
-      "Range-Guard Adaptive sort begins with two broad balanced groups and ranks those groups by their arithmetic means. That first move is a fast scouting signal: a smaller average often belongs earlier, but it is not proof that every value in the group belongs earlier.",
-      "The guard then asks one exact question at each possible boundary: is the largest value on the left no bigger than the smallest value on the right? When the answer is yes, that boundary is certified, so the two sides can be finished independently—even when they share an equal edge value. When ranges cross, only that combined region needs more work.",
-      "Each unresolved region finishes with an adaptive natural merge. Runs that are already increasing stay put, strictly decreasing runs reverse once, and only the remaining runs merge together. Small rows skip the scouting setup entirely because a direct adaptive finish takes less work.",
+      "Adaptive Mean sort starts with two balanced bands, ranks their arithmetic means, then repeats with four, eight, or sixteen narrower bands as the row grows. The bands themselves stay intact while lightweight handles change order, so the mean phase is a real driver of the layout rather than a one-time hint.",
+      "A smaller average is useful but never proof: [1, 100] has a middling mean even though its values belong at opposite ends. After the final mean round, the guard asks whether the largest value on the left is no bigger than the smallest value on the right. Only that exact range test can certify a boundary.",
+      "Certified regions stay independent. Any regions whose ranges still overlap finish with adaptive natural merges: increasing runs stay put, decreasing runs reverse once, and only the remaining runs merge. Tiny rows use the direct finish because extra mean-band setup would cost more than it saves.",
     ],
     complexity: ["BEST O(n)", "WORST O(n log n)", "SPACE O(n)"],
-    cardTitle: "RANGE-GUARD ADAPTIVE SORT",
-    cardTag: "adaptive · certified regions",
+    cardTitle: "ADAPTIVE MEAN SORT",
+    cardTag: "mean-led · certified regions",
     steps: [
-      "Split the row into two broad balanced groups and rank their means.",
-      "Scan for certified boundaries: max(left side) ≤ min(right side).",
-      "Treat each span between certified boundaries as an independent value region.",
-      "Finish only those regions with natural runs and stable local merges.",
+      "Split into two broad mean bands, then progressively narrower ones.",
+      "Rank each round's band handles by their exact arithmetic means.",
+      "Certify boundaries only when max(left) ≤ min(right).",
+      "Finish only overlapping regions with natural runs and stable merges.",
     ],
     examples: [
-      { values: "[1, 100] μ=50.5 | [48, 49] μ=48.5", detail: "The right group scouts earlier by mean, but its range still crosses the left group: max(48, 49) is not enough to prove where 1 and 100 belong." },
+      { values: "2 bands → 4 bands → 8 bands", detail: "Each round splits the current bands in half and ranks only their mean-bearing handles, keeping every band's values together." },
+      { values: "[1, 100] μ=50.5 | [48, 49] μ=48.5", detail: "The right band ranks earlier by mean, but its range still crosses the left band—so the mean is guidance, not proof." },
       { values: "max([1, 16]) = 16 ≤ min([16, 31]) = 16", detail: "This is a certified boundary. Equal edge values are safe: every left value is still no larger than every right value." },
-      { values: "[1, 4] + [2, 3] → [1, 2, 3, 4]", detail: "An unresolved region is finished by merging its natural increasing runs, rather than repeatedly rebuilding the whole row." },
-      { values: "certified regions → one row", detail: "Once each local region is exact, concatenating the regions is globally sorted by the range proof." },
+      { values: "overlap region [1, 4] + [2, 3] → [1, 2, 3, 4]", detail: "Only an overlapping region needs an exact natural merge before all certified regions can join." },
+    ],
+    benefits: [
+      { title: "Mean bands guide the early layout", copy: "It repeatedly ranks broad-to-narrow groups by average, giving the row a useful first structure before exact work begins." },
+      { title: "Proof limits cleanup", copy: "Range boundaries that truly cannot cross let separate regions finish independently instead of repairing the whole row." },
+    ],
+    tradeoffs: [
+      { title: "An average can hide outliers", copy: "A middle-looking mean never proves that every value in its band belongs in the middle, so the guard remains essential." },
+      { title: "Not a universal Heap replacement", copy: "Its measured work can beat Heap Sort in this lab, but both have the same worst-case growth and input shape still matters." },
     ],
     practice: [
       {
         kind: "partitions",
-        prompt: "These mean-ranked ranges are already certified: the left maximum is 16 and the right minimum is 16. Keep the lower range before the higher range.",
+        prompt: "These mean-ranked ranges are already certified: the lower range ends at 3 and the higher range begins at 4. Keep the lower range first.",
         partitions: [
-          { id: "high-range", values: [16, 17, 31], mean: 21.3 },
-          { id: "low-range", values: [1, 2, 16], mean: 6.3 },
+          { id: "high-range", values: [4, 5, 6], mean: 5 },
+          { id: "low-range", values: [1, 2, 3], mean: 2 },
         ],
         targetOrder: ["low-range", "high-range"],
-        hint: "Because 16 ≤ 16, every value in the first range can safely stay before every value in the second.",
+        hint: "Because 3 ≤ 4, every value in the lower range can safely stay before every value in the higher range.",
       },
       {
-        prompt: "Now merge the two natural runs into their exact local order.",
-        start: [1, 4, 2, 3],
-        target: [1, 2, 3, 4],
-        hint: "Take the smaller front value from [1, 4] or [2, 3] each time.",
+        prompt: "Now finish only the six-value region whose ranges still overlap.",
+        start: [1, 2, 5, 3, 4, 6],
+        target: [1, 2, 3, 4, 5, 6],
+        hint: "Merge the natural runs [1, 2, 5] and [3, 4, 6]; only 5 needs to travel right.",
       },
     ],
   },
@@ -570,6 +822,37 @@ function makeRandomArray(length: number) {
   return values;
 }
 
+function arraysMatch(left: number[], right: number[]) {
+  return left.length === right.length && left.every((value, index) => value === right[index]);
+}
+
+function getPracticeTargetDistance(values: number[], target: number[]) {
+  if (values.length !== target.length) return Number.POSITIVE_INFINITY;
+
+  const targetRanks = new Map<number, number>();
+  for (let index = 0; index < target.length; index += 1) {
+    const value = target[index];
+    if (targetRanks.has(value)) return Number.POSITIVE_INFINITY;
+    targetRanks.set(value, index);
+  }
+
+  const ranks: number[] = [];
+  for (const value of values) {
+    const rank = targetRanks.get(value);
+    if (rank === undefined) return Number.POSITIVE_INFINITY;
+    ranks.push(rank);
+  }
+
+  let inversions = 0;
+  for (let left = 0; left < ranks.length; left += 1) {
+    for (let right = left + 1; right < ranks.length; right += 1) {
+      if (ranks[left] > ranks[right]) inversions += 1;
+    }
+  }
+
+  return inversions;
+}
+
 function makeBenchmarkArray(length: number, pattern: BenchmarkPattern) {
   const values = Array.from({ length }, (_, index) => index + 1);
 
@@ -598,7 +881,7 @@ function makeBenchmarkArray(length: number, pattern: BenchmarkPattern) {
 }
 
 function formatCount(value: number) {
-  return value.toLocaleString("en-US");
+  return Math.round(value).toLocaleString("en-US");
 }
 
 function getWorkEstimate(metrics: {
@@ -606,6 +889,7 @@ function getWorkEstimate(metrics: {
   rankComparisons: number;
   writes: number;
   meanComputationOperations?: number;
+  meanRankingArithmeticOperations?: number;
   refinementOperations?: number;
 }) {
   return (
@@ -613,6 +897,7 @@ function getWorkEstimate(metrics: {
     metrics.rankComparisons +
     metrics.writes +
     (metrics.meanComputationOperations ?? 0) +
+    (metrics.meanRankingArithmeticOperations ?? 0) +
     (metrics.refinementOperations ?? 0)
   );
 }
@@ -749,15 +1034,6 @@ function getBarClass(
     return "bar--idle";
   }
 
-  if (algorithm === "merge") {
-    if (step.phase === "complete") return "bar--sorted";
-    if (step.phase === "merge" && index === step.inserting) return "bar--merge";
-    if (step.phase === "compare" && (index === step.comparing || index === step.shifting)) {
-      return "bar--compare";
-    }
-    return "bar--idle";
-  }
-
   if (algorithm === "bogo") {
     if (step.phase === "complete") return "bar--sorted";
     if (step.phase === "limited") return "bar--limited";
@@ -767,10 +1043,9 @@ function getBarClass(
 
   if (algorithm === "quick") {
     if (step.phase === "complete") return "bar--sorted";
-    // At dense sizes, coloring every newly placed pivot creates a noisy striped
-    // row. Keep the in-progress state quiet and reserve the green line for the
-    // completed sort; the active pivot and swap still show the current action.
-    if (step.values.length <= DEFAULT_ARRAY_SIZE && step.settled?.includes(index)) {
+    // A settled pivot is in its final index. Keep that proof visible at every
+    // array size while the active pivot and swaps show the current partition.
+    if (step.settled?.includes(index)) {
       return "bar--sorted";
     }
     if (step.phase === "select" && index === step.inserting) return "bar--key";
@@ -844,6 +1119,35 @@ function getBarClass(
   return "bar--idle";
 }
 
+type RenderedBarItem = {
+  value: number;
+  token: string;
+  isGap: boolean;
+};
+
+function getRenderedBarItems(step: SortStep): RenderedBarItem[] {
+  const occurrences = new Map<number, number>();
+
+  return step.values.map((value, index) => {
+    const isGap = index === step.gapIndex && step.key !== null;
+    const shownValue = isGap ? step.key! : value;
+    const occurrence = occurrences.get(shownValue) ?? 0;
+    occurrences.set(shownValue, occurrence + 1);
+
+    return {
+      value: shownValue,
+      token: String(shownValue) + ":" + String(occurrence),
+      isGap,
+    };
+  });
+}
+
+function haveSameBarTokens(left: RenderedBarItem[], right: RenderedBarItem[]) {
+  if (left.length !== right.length) return false;
+  const rightTokens = new Set(right.map((item) => item.token));
+  return left.every((item) => rightTokens.has(item.token));
+}
+
 function getPhaseLabel(phase: StepPhase) {
   const labels: Record<StepPhase, string> = {
     ready: "Ready",
@@ -874,6 +1178,7 @@ export default function Home() {
   const [speedInput, setSpeedInput] = useState(String(DEFAULT_SPEED));
   const [bogoAttemptLimit, setBogoAttemptLimit] = useState(BOGO_MAX_ATTEMPTS);
   const [bogoAttemptInput, setBogoAttemptInput] = useState(String(BOGO_MAX_ATTEMPTS));
+  const [bogoRunsUntilSolved, setBogoRunsUntilSolved] = useState(false);
   const [benchmarkPattern, setBenchmarkPattern] =
     useState<BenchmarkPattern>("random");
   const [benchmarkView, setBenchmarkView] = useState<BenchmarkView>("theory");
@@ -902,6 +1207,9 @@ export default function Home() {
   const lastBogoTextureTimeRef = useRef(0);
   const meanBarElementsRef = useRef(new Map<number, HTMLDivElement>());
   const meanBarPositionsRef = useRef(new Map<number, number>());
+  const motionBarElementsRef = useRef(new Map<string, HTMLDivElement>());
+  const motionBarPositionsRef = useRef(new Map<string, number>());
+  const motionBarTokensRef = useRef<string[]>([]);
   const practiceBoardRef = useRef<HTMLDivElement | null>(null);
   const practiceBlockElementsRef = useRef(new Map<string, HTMLButtonElement>());
   const practiceBlockPositionsRef = useRef(new Map<string, { left: number; top: number }>());
@@ -918,10 +1226,12 @@ export default function Home() {
   const bogoSessionRef = useRef<BogoSession | null>(null);
   const [meanSlideOffsets, setMeanSlideOffsets] = useState<Record<number, number>>({});
   const [meanSlideStage, setMeanSlideStage] = useState<"idle" | "prepare" | "animate">("idle");
+  const [motionSlideOffsets, setMotionSlideOffsets] = useState<Record<string, number>>({});
+  const [motionSlideStage, setMotionSlideStage] = useState<"idle" | "prepare" | "animate">("idle");
   const prefersReducedMotion = usePrefersReducedMotion();
   const usesRangeGroups = algorithm === "range-guard-mean";
   const isBogo = algorithm === "bogo";
-  const bogoAttemptMaximum = getBogoAttemptMaximum(arraySize);
+  const bogoAttemptMaximum = BOGO_STANDARD_MAX_ATTEMPTS;
   const bogoSliderStep = 1;
   const soundEnabled = soundVolume > 0;
   const algorithmDetails = ALGORITHM_DETAILS[algorithm];
@@ -937,7 +1247,9 @@ export default function Home() {
       ? Math.max(1, steps.at(-1)?.pass ?? 1)
       : Math.max(1, Math.ceil(Math.log2(Math.max(originalValues.length, 1))) + 1)
     : isBogo
-      ? bogoAttemptLimit
+      ? bogoRunsUntilSolved
+        ? null
+        : bogoAttemptLimit
       : algorithm === "merge"
         ? Math.max(1, Math.ceil(Math.log2(Math.max(originalValues.length, 1))))
         : algorithm === "heap"
@@ -1043,6 +1355,11 @@ export default function Home() {
     [algorithm, bogoLiveStep, isBogo, stepIndex, steps, values],
   );
   const visibleValues = currentStep.values;
+  const renderedBarItems = getRenderedBarItems(currentStep);
+  const previousVisualStep = !isBogo && stepIndex > 0 ? steps[stepIndex - 1] : null;
+  const previousRenderedBarItems = previousVisualStep
+    ? getRenderedBarItems(previousVisualStep)
+    : [];
   const mergePassFrameCounts = useMemo(() => {
     if (algorithm !== "merge") return new Map<number, number>();
 
@@ -1053,6 +1370,14 @@ export default function Home() {
       return counts;
     }, new Map<number, number>());
   }, [algorithm, steps]);
+  const motionSlideDuration = Math.round(Math.max(170, 880 - speed * 9.4));
+  const shouldInterpolateMoves =
+    !isBogo && !usesRangeGroups && !prefersReducedMotion && speed < 75;
+  const isSafeVisualMove =
+    shouldInterpolateMoves &&
+    previousVisualStep !== null &&
+    haveSameBarTokens(previousRenderedBarItems, renderedBarItems) &&
+    previousRenderedBarItems.some((item, index) => item.token !== renderedBarItems[index]?.token);
 
   useEffect(() => {
     if (!isBogo || runState !== "complete" || currentStep.phase !== "complete") {
@@ -1087,7 +1412,7 @@ export default function Home() {
     const nextPositions = captureMeanBarPositions();
     const shouldAnimateMeanMove =
       currentStep.phase === "reorder" ||
-      (currentStep.phase === "split" && currentStep.message.includes("Range guard"));
+      (currentStep.phase === "split" && currentStep.message.includes("Adaptive mean guard"));
     if (!shouldAnimateMeanMove) {
       meanBarPositionsRef.current = nextPositions;
       return;
@@ -1130,6 +1455,76 @@ export default function Home() {
   }, [currentStep.message, currentStep.pass, currentStep.phase, usesRangeGroups, prefersReducedMotion, visibleValues]);
 
   useLayoutEffect(() => {
+    const captureMotionBarPositions = () => {
+      const positions = new Map<string, number>();
+
+      renderedBarItems.forEach((item) => {
+        const bar = motionBarElementsRef.current.get(item.token);
+        if (bar) positions.set(item.token, bar.getBoundingClientRect().left);
+      });
+
+      return positions;
+    };
+
+    const nextTokens = renderedBarItems.map((item) => item.token);
+    if (!shouldInterpolateMoves) {
+      motionBarPositionsRef.current = captureMotionBarPositions();
+      motionBarTokensRef.current = nextTokens;
+      setMotionSlideOffsets((current) => (Object.keys(current).length === 0 ? current : {}));
+      setMotionSlideStage((stage) => (stage === "idle" ? stage : "idle"));
+      return;
+    }
+
+    const nextPositions = captureMotionBarPositions();
+    const previousTokens = motionBarTokensRef.current;
+    const hasSameTokens =
+      previousTokens.length === nextTokens.length &&
+      previousTokens.every((token) => nextTokens.includes(token));
+
+    if (!isSafeVisualMove || !hasSameTokens) {
+      motionBarPositionsRef.current = nextPositions;
+      motionBarTokensRef.current = nextTokens;
+      return;
+    }
+
+    const offsets: Record<string, number> = {};
+    let hasMovement = false;
+
+    nextPositions.forEach((nextLeft, token) => {
+      const previousLeft = motionBarPositionsRef.current.get(token);
+      if (previousLeft === undefined) return;
+
+      const offset = previousLeft - nextLeft;
+      if (Math.abs(offset) < 1) return;
+      offsets[token] = offset;
+      hasMovement = true;
+    });
+
+    motionBarPositionsRef.current = nextPositions;
+    motionBarTokensRef.current = nextTokens;
+    if (!hasMovement) return;
+
+    setMotionSlideOffsets(offsets);
+    setMotionSlideStage("prepare");
+
+    let settleFrame: number | undefined;
+    let releaseTimer: number | undefined;
+    const startFrame = window.requestAnimationFrame(() => {
+      settleFrame = window.requestAnimationFrame(() => {
+        setMotionSlideOffsets({});
+        setMotionSlideStage("animate");
+        releaseTimer = window.setTimeout(() => setMotionSlideStage("idle"), motionSlideDuration);
+      });
+    });
+
+    return () => {
+      window.cancelAnimationFrame(startFrame);
+      if (settleFrame !== undefined) window.cancelAnimationFrame(settleFrame);
+      if (releaseTimer !== undefined) window.clearTimeout(releaseTimer);
+    };
+  }, [currentStep, isSafeVisualMove, motionSlideDuration, shouldInterpolateMoves]);
+
+  useLayoutEffect(() => {
     const previousPositions = practiceBlockPositionsRef.current;
     const nextPositions = capturePracticeBlockPositions();
 
@@ -1157,7 +1552,8 @@ export default function Home() {
     practiceBlockPositionsRef.current = nextPositions;
   }, [practicePartitionOrder, practiceStepIndex, practiceValues, prefersReducedMotion]);
 
-  const isLocked = runState === "running" || runState === "paused";
+  const isRunning = runState === "running";
+  const isLocked = isRunning || runState === "paused";
   const isLargeArray = originalValues.length > DEFAULT_ARRAY_SIZE;
   const playbackDensity = isBogo ? 48 : 1;
   const speedDelay = 720 - speed * 7.13;
@@ -1172,17 +1568,20 @@ export default function Home() {
     algorithm === "merge" &&
     currentStep.phase !== "ready" &&
     currentStep.phase !== "complete";
-  const mergePassDuration = Math.max(600, 3_400 - speed * 28);
+  const mergeSlowdown = 1 - (speed - 1) / 99;
+  const mergePassDuration = Math.round(600 + 6_000 * mergeSlowdown ** 1.5);
   const mergeFramesInCurrentPass = mergePassFrameCounts.get(currentStep.pass) ?? 1;
   const delay = prefersReducedMotion
     ? 18
     : usesRangeGroups
       ? currentStep.phase === "reorder" ||
-          (currentStep.phase === "split" && currentStep.message.includes("Range guard"))
+          (currentStep.phase === "split" && currentStep.message.includes("Adaptive mean guard"))
         ? meanSlideDuration + 120
         : meanStaticDelay
       : usesEvenMergePacing
       ? Math.max(minimumFrameDelay, mergePassDuration / mergeFramesInCurrentPass)
+      : isSafeVisualMove
+        ? motionSlideDuration + 100
       : Math.max(minimumFrameDelay, speedDelay / playbackDensity);
   const shouldInterpolateDenseBars =
     isLargeArray && !isBogo && !prefersReducedMotion && speed <= 50;
@@ -1199,12 +1598,19 @@ export default function Home() {
         ...(denseBarTransitionStyle ?? {}),
         "--mean-slide-duration": String(meanSlideDuration) + "ms",
       } as CSSProperties)
+    : shouldInterpolateMoves
+      ? ({
+          ...(denseBarTransitionStyle ?? {}),
+          "--bar-slide-duration": String(motionSlideDuration) + "ms",
+        } as CSSProperties)
     : denseBarTransitionStyle;
   const progress =
     runState === "complete"
       ? 100
       : isBogo
-        ? Math.round((currentStep.pass / Math.max(bogoAttemptLimit, 1)) * 100)
+        ? bogoRunsUntilSolved
+          ? 0
+          : Math.round((currentStep.pass / Math.max(bogoAttemptLimit, 1)) * 100)
       : steps.length > 1
         ? Math.round((stepIndex / (steps.length - 1)) * 100)
         : 0;
@@ -1215,12 +1621,21 @@ export default function Home() {
       ? "Bogo Sort stopped after the shuffle safety limit. Try a new array or another algorithm."
       : runState === "complete"
         ? usesRangeGroups
-          ? "Sorting complete. " + currentStep.comparisons + " tracked checks and " + currentStep.writes + " moved values."
+          ? "Sorting complete. " + currentStep.comparisons + " tracked checks and " + currentStep.writes + " tracked moves."
           : "Sorting complete. " + currentStep.comparisons + " comparisons and " + currentStep.writes + " array writes."
       : runState === "paused"
-        ? "Paused during " + stageLabel + " " + currentStep.pass + " of " + totalStages + "."
+        ? "Paused during " +
+          stageLabel +
+          " " +
+          currentStep.pass +
+          (isBogo && bogoRunsUntilSolved ? " with no shuffle cap." : " of " + totalStages + ".")
         : runState === "running"
-          ? algorithmLabel + " is working through " + stageLabel + " " + currentStep.pass + " of " + totalStages + "."
+          ? algorithmLabel +
+            " is working through " +
+            stageLabel +
+            " " +
+            currentStep.pass +
+            (isBogo && bogoRunsUntilSolved ? " with no shuffle cap." : " of " + totalStages + ".")
           : "Ready to demonstrate " + algorithmLabel + ".";
 
   function ensureAudioContext() {
@@ -1252,14 +1667,26 @@ export default function Home() {
     const normalizedValue = Math.min(1, Math.max(0, activeValue / largestValue));
     const oscillator = context.createOscillator();
     const gain = context.createGain();
-    const duration = step.phase === "swap" || step.phase === "merge" ? 0.05 : 0.032;
-    const basePeakGain = step.phase === "swap" ? 0.2 : 0.14;
+    const isImpact =
+      step.phase === "swap" ||
+      step.phase === "shift" ||
+      step.phase === "insert" ||
+      step.phase === "merge" ||
+      step.phase === "reorder";
+    const duration = isImpact ? 0.046 : 0.028;
+    const basePeakGain = isImpact ? 0.22 : 0.15;
     const peakGain = basePeakGain * (soundVolume / 100) ** 2.5;
+    const semitone = Math.round(normalizedValue * 24);
+    const frequency = 174.61 * 2 ** (semitone / 12);
 
-    oscillator.type = step.phase === "swap" || step.phase === "shift" ? "triangle" : "sine";
-    oscillator.frequency.setValueAtTime(180 + normalizedValue * 700, now);
+    // Use the same short, quantized triangle voice that makes Selection Sort's
+    // moves feel crisp. Quantized pitches keep rapid comparisons legible rather
+    // than turning into a smooth sine-wave wash.
+    oscillator.type = "triangle";
+    oscillator.frequency.setValueAtTime(frequency, now);
     gain.gain.setValueAtTime(0.0001, now);
-    gain.gain.exponentialRampToValueAtTime(peakGain, now + 0.004);
+    gain.gain.exponentialRampToValueAtTime(peakGain, now + 0.002);
+    gain.gain.exponentialRampToValueAtTime(Math.max(0.0001, peakGain * 0.38), now + 0.008);
     gain.gain.exponentialRampToValueAtTime(0.0001, now + duration);
     oscillator.connect(gain);
     gain.connect(context.destination);
@@ -1448,6 +1875,14 @@ export default function Home() {
     if (element) meanBarElementsRef.current.set(value, element);
   }
 
+  function setMotionBarRef(token: string, element: HTMLDivElement | null) {
+    if (element) {
+      motionBarElementsRef.current.set(token, element);
+      return;
+    }
+    motionBarElementsRef.current.delete(token);
+  }
+
   function clearPracticeUndo() {
     if (practiceUndoTimerRef.current !== null) {
       window.clearTimeout(practiceUndoTimerRef.current);
@@ -1503,25 +1938,50 @@ export default function Home() {
     practiceBlockElementsRef.current.delete(id);
   }
 
-  function evaluatePracticeMove(nextValues: number[], nextPartitionOrder: string[]) {
-    const isCorrect =
-      currentPractice.kind === "partitions"
-        ? currentPractice.targetOrder.every(
-            (partitionId, index) => nextPartitionOrder[index] === partitionId,
-          )
-        : currentPractice.kind === "median"
-          ? false
-          : currentPractice.target.every((value, index) => nextValues[index] === value);
+  function evaluatePracticeMove(
+    nextValues: number[],
+    nextPartitionOrder: string[],
+  ): PracticeMoveResult {
+    if (currentPractice.kind === "partitions") {
+      const isCorrect = currentPractice.targetOrder.every(
+        (partitionId, index) => nextPartitionOrder[index] === partitionId,
+      );
+      setPracticeSolved(isCorrect);
+      setPracticeFeedback(
+        isCorrect
+          ? practiceStepIndex === practiceSteps.length - 1
+            ? "Correct—this completes the walkthrough."
+            : "Correct. Your move follows the rule; continue to the next step."
+          : "Not quite. Hint: " + currentPractice.hint,
+      );
+      return isCorrect ? "solved" : "wrong";
+    }
 
-    setPracticeSolved(isCorrect);
-    setPracticeFeedback(
-      isCorrect
-        ? practiceStepIndex === practiceSteps.length - 1
+    if (currentPractice.kind === "median") {
+      setPracticeSolved(false);
+      return "wrong";
+    }
+
+    if (arraysMatch(nextValues, currentPractice.target)) {
+      setPracticeSolved(true);
+      setPracticeFeedback(
+        practiceStepIndex === practiceSteps.length - 1
           ? "Correct—this completes the walkthrough."
-          : "Correct. Your move follows the rule; continue to the next step."
+          : "Correct. Your move follows the rule; continue to the next step.",
+      );
+      return "solved";
+    }
+
+    const previousDistance = getPracticeTargetDistance(practiceValues, currentPractice.target);
+    const nextDistance = getPracticeTargetDistance(nextValues, currentPractice.target);
+    const madeProgress = nextDistance < previousDistance;
+    setPracticeSolved(false);
+    setPracticeFeedback(
+      madeProgress
+        ? "Good move—this arrangement is closer to this step's target. Keep going."
         : "Not quite. Hint: " + currentPractice.hint,
     );
-    return isCorrect;
+    return madeProgress ? "progress" : "wrong";
   }
 
   function handleMedianPracticeChoice(value: number) {
@@ -1574,7 +2034,7 @@ export default function Home() {
       const [moved] = nextOrder.splice(fromIndex, 1);
       nextOrder.splice(toIndex, 0, moved);
       setPracticePartitionOrder(nextOrder);
-      if (!evaluatePracticeMove(practiceValues, nextOrder)) {
+      if (evaluatePracticeMove(practiceValues, nextOrder) === "wrong") {
         schedulePracticeUndo(practiceValues, previousOrder);
       }
     } else {
@@ -1582,7 +2042,7 @@ export default function Home() {
       const nextValues = [...practiceValues];
       [nextValues[fromIndex], nextValues[toIndex]] = [nextValues[toIndex], nextValues[fromIndex]];
       setPracticeValues(nextValues);
-      if (!evaluatePracticeMove(nextValues, practicePartitionOrder)) {
+      if (evaluatePracticeMove(nextValues, practicePartitionOrder) === "wrong") {
         schedulePracticeUndo(previousValues, practicePartitionOrder);
       }
     }
@@ -1761,7 +2221,10 @@ export default function Home() {
         // before the normal interval has time to produce an audible note.
         void audioContext.resume().then(() => playBogoShuffleTexture(0)).catch(() => undefined);
       }
-      const session = createBogoSession(originalValues, bogoAttemptLimit);
+      const session = createBogoSession(
+        originalValues,
+        bogoRunsUntilSolved ? null : bogoAttemptLimit,
+      );
       bogoSessionRef.current = session;
       setValues([...originalValues]);
       setSteps([]);
@@ -1797,11 +2260,6 @@ export default function Home() {
 
   function handleArraySizeChange(nextSize: number) {
     const clampedSize = Math.min(maximumArraySize, Math.max(minimumArraySize, Math.round(nextSize)));
-    const nextBogoAttemptMaximum = getBogoAttemptMaximum(clampedSize);
-    if (bogoAttemptLimit > nextBogoAttemptMaximum) {
-      setBogoAttemptLimit(nextBogoAttemptMaximum);
-      setBogoAttemptInput(String(nextBogoAttemptMaximum));
-    }
     setArraySize(clampedSize);
     setArraySizeInput(String(clampedSize));
     createNewArray(clampedSize);
@@ -1860,6 +2318,18 @@ export default function Home() {
       return;
     }
     handleBogoAttemptLimitChange(candidate);
+  }
+
+  function handleBogoRunsUntilSolvedChange(checked: boolean) {
+    if (!checked) {
+      setBogoRunsUntilSolved(false);
+      return;
+    }
+
+    const confirmed = window.confirm(
+      "Let Bogo Sort run until it solves?\n\nThis removes the shuffle cap. It may run indefinitely and keep using browser resources until it gets lucky. You can still pause or reset it.",
+    );
+    setBogoRunsUntilSolved(confirmed);
   }
 
   const primaryLabel =
@@ -1946,52 +2416,75 @@ export default function Home() {
                   <select
                     value={algorithm}
                     onChange={(event) => handleAlgorithmChange(event.target.value as AlgorithmId)}
-                    disabled={isLocked}
+                    disabled={isRunning}
                     aria-label="Sorting algorithm"
                   >
                     <option value="bogo">Bogo sort</option>
+                    <option value="selection">Selection sort</option>
+                    <option value="insertion">Insertion sort</option>
                     <option value="bubble">Bubble sort</option>
                     <option value="cocktail">Cocktail sort</option>
-                    <option value="insertion">Insertion sort</option>
-                    <option value="selection">Selection sort</option>
                     <option value="heap">Heap sort</option>
                     <option value="quick">Quick sort</option>
                     <option value="merge">Merge sort</option>
-                    <option value="range-guard-mean">Range-Guard Adaptive sort</option>
+                    <option value="range-guard-mean">Adaptive Mean sort</option>
                   </select>
                 </label>
 
                 {isBogo && (
-                  <label className="control-field control-field--range bogo-attempt-limit">
-                    <span className="control-label">
-                      Max shuffles
+                  <>
+                    <label className="control-field control-field--range bogo-attempt-limit">
+                      <span className="control-label">
+                      Max shuffles (up to 999,999,999)
+                        <input
+                          className="control-number control-number--bogo"
+                          type="number"
+                          min={BOGO_MIN_ATTEMPTS}
+                          max={bogoAttemptMaximum}
+                          step="1"
+                          value={bogoAttemptInput}
+                          onChange={(event) => setBogoAttemptInput(event.target.value)}
+                          onBlur={normalizeBogoAttemptInput}
+                          onKeyDown={(event) => {
+                            if (event.key === "Enter") event.currentTarget.blur();
+                          }}
+                          disabled={isLocked || bogoRunsUntilSolved}
+                          aria-label="Maximum Bogo Sort shuffles exact value"
+                        />
+                      </span>
                       <input
-                        className="control-number control-number--bogo"
-                        type="number"
+                        type="range"
                         min={BOGO_MIN_ATTEMPTS}
                         max={bogoAttemptMaximum}
-                        step="1"
-                        value={bogoAttemptInput}
-                        onChange={(event) => setBogoAttemptInput(event.target.value)}
-                        onBlur={normalizeBogoAttemptInput}
-                        onKeyDown={(event) => {
-                          if (event.key === "Enter") event.currentTarget.blur();
-                        }}
-                        disabled={isLocked}
-                        aria-label="Maximum Bogo Sort shuffles exact value"
+                        step={bogoSliderStep}
+                        value={bogoAttemptLimit}
+                        onChange={(event) => handleBogoAttemptLimitChange(Number(event.target.value))}
+                        disabled={isLocked || bogoRunsUntilSolved}
+                        aria-label="Maximum Bogo Sort shuffles"
                       />
-                    </span>
-                    <input
-                      type="range"
-                      min={BOGO_MIN_ATTEMPTS}
-                      max={bogoAttemptMaximum}
-                      step={bogoSliderStep}
-                      value={bogoAttemptLimit}
-                      onChange={(event) => handleBogoAttemptLimitChange(Number(event.target.value))}
-                      disabled={isLocked}
-                      aria-label="Maximum Bogo Sort shuffles"
-                    />
-                  </label>
+                    </label>
+                    <label
+                      className={
+                        "bogo-unlimited-warning " +
+                        (bogoRunsUntilSolved ? "bogo-unlimited-warning--armed " : "") +
+                        (isLocked ? "bogo-unlimited-warning--disabled" : "")
+                      }
+                    >
+                      <input
+                        type="checkbox"
+                        checked={bogoRunsUntilSolved}
+                        onChange={(event) => handleBogoRunsUntilSolvedChange(event.target.checked)}
+                        disabled={isLocked}
+                        aria-describedby="bogo-unlimited-warning-note"
+                      />
+                      <span>
+                        <strong>Let it run until solved</strong>
+                        <small id="bogo-unlimited-warning-note">
+                          Warning: removes the cap and may use browser resources indefinitely.
+                        </small>
+                      </span>
+                    </label>
+                  </>
                 )}
               </div>
 
@@ -2063,7 +2556,7 @@ export default function Home() {
                   className="button button--secondary"
                   type="button"
                   onClick={() => createNewArray()}
-                  disabled={isLocked}
+                  disabled={isRunning}
                 >
                   New array
                 </button>
@@ -2141,14 +2634,13 @@ export default function Home() {
                   (isLargeArray ? "bars--dense " : "") +
                   (algorithm === "merge" ? "bars--merge " : "") +
                   (usesRangeGroups ? "bars--mean bars--mean-" + meanSlideStage + " " : "") +
+                  (shouldInterpolateMoves ? "bars--flip bars--flip-" + motionSlideStage + " " : "") +
                   (shouldInterpolateDenseBars ? "bars--smooth" : "")
                 }
                 style={barTransitionStyle}
                 aria-hidden="true"
               >
-                {visibleValues.map((value, index) => {
-                  const isGap = index === currentStep.gapIndex;
-                  const shownValue = isGap && currentStep.key !== null ? currentStep.key : value;
+                {renderedBarItems.map((item, index) => {
                   const group = usesRangeGroups
                     ? currentStep.groups?.find(
                         (candidate) => index >= candidate.start && index < candidate.end,
@@ -2158,25 +2650,41 @@ export default function Home() {
                     ? (index === group.start ? "bar-slot--group-start " : "") +
                       (index === group.end - 1 ? "bar-slot--group-end" : "")
                     : "";
-                  const height = (shownValue / largestValue) * 100;
-                  const meanSlideOffset = usesRangeGroups ? meanSlideOffsets[value] : undefined;
-                  const meanSlotStyle =
-                    meanSlideOffset === undefined
+                  const height = (item.value / largestValue) * 100;
+                  const slideOffset = usesRangeGroups
+                    ? meanSlideOffsets[item.value]
+                    : shouldInterpolateMoves
+                      ? motionSlideOffsets[item.token]
+                      : undefined;
+                  const slotStyle =
+                    slideOffset === undefined
                       ? undefined
-                      : ({ transform: "translateX(" + meanSlideOffset + "px)" } as CSSProperties);
+                      : ({ transform: "translateX(" + slideOffset + "px)" } as CSSProperties);
                   return (
                     <div
                       className={"bar-slot " + groupClass}
-                      key={usesRangeGroups ? "mean-" + String(value) : String(index) + "-" + String(originalValues.length)}
-                      ref={usesRangeGroups ? (element) => setMeanBarRef(value, element) : undefined}
-                      style={meanSlotStyle}
+                      key={
+                        usesRangeGroups
+                          ? "mean-" + String(item.value)
+                          : shouldInterpolateMoves
+                            ? "motion-" + item.token
+                            : String(index) + "-" + String(originalValues.length)
+                      }
+                      ref={
+                        usesRangeGroups
+                          ? (element) => setMeanBarRef(item.value, element)
+                          : shouldInterpolateMoves
+                            ? (element) => setMotionBarRef(item.token, element)
+                            : undefined
+                      }
+                      style={slotStyle}
                     >
                       <div
                         className={"bar " + getBarClass(index, currentStep, algorithm)}
                         style={{ height: String(height) + "%" }}
                       >
                         {arraySize <= 24 && (
-                          <span className="bar__value">{isGap ? "gap" : value}</span>
+                          <span className="bar__value">{item.isGap ? "gap" : item.value}</span>
                         )}
                       </div>
                     </div>
@@ -2263,7 +2771,10 @@ export default function Home() {
           <div className="stats" aria-label="Sort statistics">
             <div className="stat-card">
               <span>{stageLabel.toUpperCase()}</span>
-              <strong>{currentStep.pass}<em> / {totalStages}</em></strong>
+              <strong>
+                {currentStep.pass}
+                <em>{isBogo && bogoRunsUntilSolved ? " / ∞" : " / " + totalStages}</em>
+              </strong>
               <p>{algorithmDetails.stageDescription}</p>
             </div>
             <div className="stat-card">
@@ -2272,13 +2783,16 @@ export default function Home() {
               <p>{usesRangeGroups ? "means + ranges" : isBogo ? "values checked" : "values checked"}</p>
             </div>
             <div className="stat-card">
-              <span>{usesRangeGroups ? "VALUES MOVED" : isBogo ? "SHUFFLE WRITES" : "ARRAY WRITES"}</span>
+              <span>{usesRangeGroups ? "TRACKED MOVES" : isBogo ? "SHUFFLE WRITES" : "ARRAY WRITES"}</span>
               <strong>{currentStep.writes}</strong>
-              <p>{usesRangeGroups ? "local finish moves" : isBogo ? "random swaps" : "moves + writes"}</p>
+              <p>{usesRangeGroups ? "band handles + local writes" : isBogo ? "random swaps" : "moves + writes"}</p>
             </div>
             <div className="stat-card stat-card--progress">
-              <span>PROGRESS</span>
-              <strong>{progress}<em>%</em></strong>
+              <span>{isBogo && bogoRunsUntilSolved && runState !== "complete" ? "OPEN ENDED" : "PROGRESS"}</span>
+              <strong>
+                {isBogo && bogoRunsUntilSolved && runState !== "complete" ? "∞" : progress}
+                {!(isBogo && bogoRunsUntilSolved && runState !== "complete") && <em>%</em>}
+              </strong>
               <div className="progress-track" aria-hidden="true"><i style={{ width: String(progress) + "%" }} /></div>
             </div>
           </div>
@@ -2323,6 +2837,40 @@ export default function Home() {
             </ol>
           </div>
 
+          <div className="algorithm-insights" aria-label={algorithmLabel + " benefits and trade-offs"}>
+            <section
+              className="algorithm-insight algorithm-insight--benefits"
+              aria-labelledby={algorithm + "-benefits-title"}
+            >
+              <p className="eyebrow">WHY USE IT?</p>
+              <h3 id={algorithm + "-benefits-title"}>Benefits</h3>
+              <ul>
+                {algorithmDetails.benefits.map((insight) => (
+                  <li key={insight.title}>
+                    <strong>{insight.title}</strong>
+                    <p>{insight.copy}</p>
+                  </li>
+                ))}
+              </ul>
+            </section>
+
+            <section
+              className="algorithm-insight algorithm-insight--tradeoffs"
+              aria-labelledby={algorithm + "-tradeoffs-title"}
+            >
+              <p className="eyebrow">WHAT TO WATCH FOR</p>
+              <h3 id={algorithm + "-tradeoffs-title"}>Shortcomings</h3>
+              <ul>
+                {algorithmDetails.tradeoffs.map((insight) => (
+                  <li key={insight.title}>
+                    <strong>{insight.title}</strong>
+                    <p>{insight.copy}</p>
+                  </li>
+                ))}
+              </ul>
+            </section>
+          </div>
+
           <div className="practice-lab" aria-labelledby="practice-title">
             <div className="practice-lab__header">
               <div>
@@ -2345,7 +2893,7 @@ export default function Home() {
                 ? "Choose the lower median to create two near-even outlier-guard halves. A wrong choice clears itself so you can try again."
                 : isPartitionPractice
                   ? "Pick up a partition and drag it into its new position, or select one and then select its destination. Each arrangement is checked immediately."
-                  : "Select or drag either of the two values to swap them. The result—not which value you started with—is checked immediately."}
+                  : "Select or drag either of the two values to swap them. The starting value does not matter: a swap stays when it puts the row closer to this step's target; otherwise it slides back."}
             </p>
             <div
               className="practice-board"
@@ -2397,7 +2945,7 @@ export default function Home() {
                         onPointerUp={() => finishPracticeDrag()}
                         onPointerCancel={() => finishPracticeDrag(true)}
                         onClick={() => handlePracticeBlockClick(index)}
-                        disabled={practiceUndoPending}
+                        disabled={practiceUndoPending || practiceSolved}
                         aria-pressed={practiceSelectedIndex === index}
                         aria-grabbed={isDragging}
                         style={
@@ -2440,7 +2988,7 @@ export default function Home() {
                           onPointerUp={() => finishPracticeDrag()}
                           onPointerCancel={() => finishPracticeDrag(true)}
                           onClick={() => handlePracticeBlockClick(index)}
-                          disabled={practiceUndoPending}
+                          disabled={practiceUndoPending || practiceSolved}
                           aria-pressed={practiceSelectedIndex === index}
                           aria-grabbed={isDragging}
                           style={
@@ -2491,10 +3039,10 @@ export default function Home() {
               <p className="eyebrow">EFFICIENCY LAB</p>
               <h2 id="comparison-title">Compare the work behind the motion.</h2>
               <p>
-                Every deterministic algorithm receives the same shuffled sequence of 1 through n.
-                Switch between exact operation estimates for arrays up to 256 and a theoretical
-                projection that makes the growth shape visible through 65,536 values. Bogo Sort stays
-                out of both views because its expected work grows factorially.
+                Every deterministic algorithm receives the same permutation of 1 through n for the
+                selected arrangement. Switch between counted work through 256 values and an
+                illustrative growth view through 65,536 values. Bogo Sort stays out of both views
+                because its expected work grows factorially.
               </p>
             </div>
             <div className="benchmark-controls">
@@ -2505,8 +3053,8 @@ export default function Home() {
                   onChange={(event) => setBenchmarkView(event.target.value as BenchmarkView)}
                   aria-label="Efficiency chart view"
                 >
-                  <option value="theory">Theory through 65,536</option>
-                  <option value="measured">Exact work through 256</option>
+                  <option value="theory">Illustrative growth through 65,536</option>
+                  <option value="measured">Counted work through 256</option>
                 </select>
               </label>
               <label className="benchmark-select">
@@ -2529,16 +3077,16 @@ export default function Home() {
             role="img"
             aria-label={
               benchmarkView === "theory"
-                ? "Theoretical work growth, ordered from least to most efficient, for " + benchmarkPattern + " arrays from 16 through 65,536 values."
-                : "Estimated work, ordered from least to most efficient, for " + benchmarkPattern + " arrays from 16 through 256 values."
+                ? "Illustrative work growth, ordered from highest to lowest modeled work, for " + benchmarkPattern + " arrays from 16 through 65,536 values."
+                : "Counted work, ordered from highest to lowest counted work, for " + benchmarkPattern + " arrays from 16 through 256 values."
             }
           >
             <p className="benchmark-chart__note">
               {benchmarkView === "theory"
-                ? "Projected work uses each implementation's dominant growth model and the selected arrangement. Meter length uses a log scale, so O(n log n) curves remain visible next to quadratic ones; the printed number is a relative model unit, not a timed result."
-                : "Each column compares algorithms at that exact array size. Meter length uses a log scale so the faster algorithms remain visible; the printed number is the exact work estimate."}
+                ? "This view illustrates each algorithm's growth shape for the selected arrangement. Meter length uses a log scale so O(n log n) curves remain visible next to quadratic ones; the rounded number is a relative model unit, not a timed result or an exact operation total."
+                : "Each column applies this visualizer's counted-work model at that exact size: value comparisons, primary writes, and Adaptive Mean's mean/range events. Meter length uses a log scale so faster algorithms remain visible; the rounded number is not browser runtime."}
             </p>
-            <p className="benchmark-chart__order">Rows run from least efficient at the top to most efficient at the bottom, based on the rightmost size.</p>
+            <p className="benchmark-chart__order">Rows run from highest counted work at the top to lowest at the bottom, based on the rightmost size.</p>
             <div className="benchmark-matrix" style={benchmarkMatrixStyle}>
               <div className="benchmark-matrix__header">
                 <span>Algorithm</span>
@@ -2572,7 +3120,7 @@ export default function Home() {
           </div>
 
           <div className="benchmark-current" aria-label={"Current benchmark at " + arraySize + " values"}>
-            <p className="benchmark-current__title">Exact totals at n={arraySize} · least to most efficient</p>
+            <p className="benchmark-current__title">Counted totals at n={arraySize} · highest to lowest work</p>
             {orderedCurrentBenchmarkAlgorithms.map((benchmarkAlgorithm) => {
               const work = selectedBenchmark[benchmarkAlgorithm.key];
               return (
@@ -2585,7 +3133,7 @@ export default function Home() {
                       style={{ width: String((work / selectedBenchmarkMaximum) * 100) + "%" }}
                     />
                   </i>
-                  <em>{formatCount(work)} work units</em>
+                  <em>{formatCount(work)} counted work units</em>
                 </div>
               );
             })}

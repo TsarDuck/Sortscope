@@ -60,12 +60,14 @@ export type SortMetrics = {
   rounds: number;
   finalValues: number[];
   meanComputationOperations?: number;
+  meanRankingArithmeticOperations?: number;
   refinementOperations?: number;
 };
 
 export type BogoSession = {
   values: number[];
-  attemptLimit: number;
+  /** `null` deliberately represents the opt-in, unbounded live session. */
+  attemptLimit: number | null;
   attempts: number;
   comparisons: number;
   writes: number;
@@ -81,9 +83,36 @@ type MeanChunk = {
   originalIndex: number;
 };
 
+type MeanBand = {
+  id: number;
+  source: number[];
+  start: number;
+  end: number;
+  sum: number;
+  originalIndex: number;
+};
+
+type MeanCascadeRound = {
+  groupCount: number;
+  splitBands: MeanBand[];
+  rankedBands: MeanBand[];
+  meanOperations: number;
+  rankComparisons: number;
+  descriptorMoves: number;
+};
+
+type MeanCascade = {
+  rounds: MeanCascadeRound[];
+  bands: MeanBand[];
+  meanOperations: number;
+  rankComparisons: number;
+  descriptorMoves: number;
+};
+
 export const BOGO_MAX_ATTEMPTS = 1_000_000;
 const COMPACT_FRAME_THRESHOLD = 24;
-const RANGE_GUARD_MIN_SIZE = 32;
+const MEAN_CASCADE_MIN_SIZE = 16;
+const MAX_MEAN_CASCADE_BANDS = 16;
 
 export function createInitialStep(
   values: number[],
@@ -98,7 +127,7 @@ export function createInitialStep(
     quick: "Choose a pivot, partition around it, then repeat on each side.",
     merge: "Split the row into runs, then merge ordered neighbors.",
     bogo: "Shuffle the whole row until chance happens to order it.",
-    "range-guard-mean": "The row will use one broad mean rank, then exactly resolve only the crossing ranges.",
+    "range-guard-mean": "The row will cascade progressively narrower mean bands, then exactly resolve only the crossing ranges.",
   };
 
   return {
@@ -149,15 +178,205 @@ export function formatMean(mean: number) {
   return Number.isInteger(mean) ? String(mean) : mean.toFixed(1);
 }
 
+function getMeanBandLength(band: MeanBand) {
+  return band.end - band.start;
+}
+
+function getMeanCascadeGroupCounts(length: number) {
+  if (length < MEAN_CASCADE_MIN_SIZE) return [];
+  // Two bands still give a meaningful mean-led first move on small rows, but
+  // a second 4-band pass there costs more than this visualizer's Heap Sort.
+  if (length < 32) return [2];
+
+  const bandLimit = Math.min(MAX_MEAN_CASCADE_BANDS, Math.floor(Math.sqrt(length)));
+  const groupCounts: number[] = [];
+  let groupCount = 2;
+
+  while (groupCount <= bandLimit) {
+    groupCounts.push(groupCount);
+    groupCount *= 2;
+  }
+
+  return groupCounts;
+}
+
+function createInitialMeanBand(source: number[]) {
+  let sum = 0;
+
+  for (const value of source) {
+    sum += value;
+  }
+
+  return {
+    band: {
+      id: 1,
+      source,
+      start: 0,
+      end: source.length,
+      sum,
+      originalIndex: 0,
+    } satisfies MeanBand,
+    meanOperations: source.length,
+  };
+}
+
+function splitMeanBands(parentBands: MeanBand[]) {
+  const bands: MeanBand[] = [];
+  let meanOperations = 0;
+
+  parentBands.forEach((parent) => {
+    const midpoint = parent.start + Math.ceil(getMeanBandLength(parent) / 2);
+    let leftSum = 0;
+
+    // The parent sum is cached, so we only scan one child and derive the
+    // other's sum. This keeps the mean cascade about broad block handles,
+    // rather than repeatedly copying or rescanning the whole row.
+    for (let index = parent.start; index < midpoint; index += 1) {
+      leftSum += parent.source[index];
+      meanOperations += 1;
+    }
+
+    const leftIndex = bands.length;
+    bands.push({
+      id: parent.id * 2,
+      source: parent.source,
+      start: parent.start,
+      end: midpoint,
+      sum: leftSum,
+      originalIndex: leftIndex,
+    });
+    const rightIndex = bands.length;
+    bands.push({
+      id: parent.id * 2 + 1,
+      source: parent.source,
+      start: midpoint,
+      end: parent.end,
+      sum: parent.sum - leftSum,
+      originalIndex: rightIndex,
+    });
+  });
+
+  return { bands, meanOperations };
+}
+
+function compareMeanBands(left: MeanBand, right: MeanBand) {
+  const meanDifference =
+    left.sum * getMeanBandLength(right) - right.sum * getMeanBandLength(left);
+
+  if (meanDifference !== 0) return meanDifference;
+  return left.originalIndex - right.originalIndex;
+}
+
+function rankMeanBands(bands: MeanBand[]) {
+  let comparisons = 0;
+  let alreadyOrdered = true;
+  let strictlyReversed = bands.length > 1;
+
+  for (let index = 1; index < bands.length; index += 1) {
+    const order = compareMeanBands(bands[index - 1], bands[index]);
+    comparisons += 1;
+    if (order > 0) alreadyOrdered = false;
+    if (order <= 0) strictlyReversed = false;
+  }
+
+  if (alreadyOrdered) {
+    return { bands: [...bands], comparisons, descriptorMoves: 0 };
+  }
+
+  if (strictlyReversed) {
+    return { bands: [...bands].reverse(), comparisons, descriptorMoves: bands.length };
+  }
+
+  const ranked = [...bands];
+  ranked.sort((left, right) => {
+    comparisons += 1;
+    return compareMeanBands(left, right);
+  });
+
+  return { bands: ranked, comparisons, descriptorMoves: bands.length };
+}
+
+function buildMeanCascade(source: number[]): MeanCascade {
+  const groupCounts = getMeanCascadeGroupCounts(source.length);
+  if (groupCounts.length === 0) {
+    return {
+      rounds: [],
+      bands: [],
+      meanOperations: 0,
+      rankComparisons: 0,
+      descriptorMoves: 0,
+    };
+  }
+
+  const initial = createInitialMeanBand(source);
+  let bands = [initial.band];
+  let meanOperations = initial.meanOperations;
+  let rankComparisons = 0;
+  let descriptorMoves = 0;
+  const rounds: MeanCascadeRound[] = [];
+
+  groupCounts.forEach((groupCount) => {
+    const split = splitMeanBands(bands);
+    const ranking = rankMeanBands(split.bands);
+    const round = {
+      groupCount,
+      splitBands: split.bands,
+      rankedBands: ranking.bands,
+      meanOperations: split.meanOperations + split.bands.length,
+      rankComparisons: ranking.comparisons,
+      descriptorMoves: ranking.descriptorMoves,
+    } satisfies MeanCascadeRound;
+
+    rounds.push(round);
+    bands = ranking.bands;
+    meanOperations += round.meanOperations;
+    rankComparisons += ranking.comparisons;
+    descriptorMoves += ranking.descriptorMoves;
+  });
+
+  return { rounds, bands, meanOperations, rankComparisons, descriptorMoves };
+}
+
+function describeMeanBandGroups(bands: MeanBand[]): MeanGroup[] {
+  let start = 0;
+
+  return bands.map((band, rank) => {
+    const end = start + getMeanBandLength(band);
+    const group = {
+      id: band.id,
+      start,
+      end,
+      mean: band.sum / getMeanBandLength(band),
+      rank,
+    };
+    start = end;
+    return group;
+  });
+}
+
+function materializeMeanBands(bands: MeanBand[]) {
+  return bands.map((band, index) =>
+    createMeanChunk(
+      band.source.slice(band.start, band.end),
+      band.id,
+      index,
+      band.sum,
+    ),
+  );
+}
+
 function createMeanChunk(
   values: number[],
   id: number,
   originalIndex: number,
+  knownSum?: number,
 ): MeanChunk {
-  let sum = 0;
+  let sum = knownSum ?? 0;
 
-  for (const value of values) {
-    sum += value;
+  if (knownSum === undefined) {
+    for (const value of values) {
+      sum += value;
+    }
   }
 
   return {
@@ -166,12 +385,6 @@ function createMeanChunk(
     sum,
     originalIndex,
   };
-}
-
-function buildMeanChunks(values: number[], groupCount: number) {
-  return partitionBalanced(values, groupCount).map((group, index) =>
-    createMeanChunk(group, index, index),
-  );
 }
 
 function describeMeanGroups(chunks: MeanChunk[]): MeanGroup[] {
@@ -189,41 +402,6 @@ function describeMeanGroups(chunks: MeanChunk[]): MeanGroup[] {
     start = end;
     return group;
   });
-}
-
-function compareMeans(left: MeanChunk, right: MeanChunk) {
-  const meanDifference =
-    left.sum * right.values.length - right.sum * left.values.length;
-
-  if (meanDifference !== 0) return meanDifference;
-  return left.originalIndex - right.originalIndex;
-}
-
-function rankMeanChunks(chunks: MeanChunk[]) {
-  let comparisons = 0;
-  let alreadyOrdered = true;
-  let strictlyReversed = chunks.length > 1;
-
-  for (let index = 1; index < chunks.length; index += 1) {
-    const order = compareMeans(chunks[index - 1], chunks[index]);
-    comparisons += 1;
-    if (order > 0) alreadyOrdered = false;
-    // Equal means must preserve the incoming order, so only a strictly
-    // decreasing run can be reversed as a stable fast path.
-    if (order <= 0) strictlyReversed = false;
-  }
-
-  if (alreadyOrdered) return { chunks: [...chunks], comparisons };
-  if (strictlyReversed) return { chunks: [...chunks].reverse(), comparisons };
-
-  const ranked = [...chunks];
-
-  ranked.sort((left, right) => {
-    comparisons += 1;
-    return compareMeans(left, right);
-  });
-
-  return { chunks: ranked, comparisons };
 }
 
 type RangeComponent = {
@@ -596,10 +774,9 @@ export function buildInsertionSteps(
 export function buildRangeGuardMeanSteps(source: number[]): SortStep[] {
   const steps = [createInitialStep(source, "range-guard-mean")];
   const values = [...source];
-  let working = [...source];
   let pass = 0;
-  let trackedComparisons = 0;
-  let valuesReordered = 0;
+  let trackedChecks = 0;
+  let trackedMoves = 0;
 
   if (values.length <= 1) {
     steps.push({
@@ -619,16 +796,19 @@ export function buildRangeGuardMeanSteps(source: number[]): SortStep[] {
     return steps;
   }
 
-  let finish: RangeFinishResult;
+  const cascade = buildMeanCascade(values);
+  let working = [...values];
 
-  if (values.length >= RANGE_GUARD_MIN_SIZE) {
-    pass = 1;
-    const broadChunks = buildMeanChunks(working, 2);
-    const broadGroups = describeMeanGroups(broadChunks);
-    trackedComparisons += broadChunks.length;
+  cascade.rounds.forEach((round, roundIndex) => {
+    pass = roundIndex + 1;
+    const splitGroups = describeMeanBandGroups(round.splitBands);
+    const splitValues = round.splitBands.flatMap((band) =>
+      band.source.slice(band.start, band.end),
+    );
+    trackedChecks += round.splitBands.length;
 
     steps.push({
-      values: [...working],
+      values: splitValues,
       pass,
       phase: "split",
       key: null,
@@ -637,14 +817,19 @@ export function buildRangeGuardMeanSteps(source: number[]): SortStep[] {
       inserting: null,
       gapIndex: null,
       sortedCount: 0,
-      comparisons: trackedComparisons,
-      writes: valuesReordered,
-      message: "Round 1: split the row into two broad mean groups.",
-      groups: broadGroups,
+      comparisons: trackedChecks,
+      writes: trackedMoves,
+      message:
+        "Mean cascade round " +
+        (roundIndex + 1) +
+        ": split into " +
+        round.groupCount +
+        (round.groupCount === 2 ? " broad bands." : " narrower bands."),
+      groups: splitGroups,
     });
 
     steps.push({
-      values: [...working],
+      values: splitValues,
       pass,
       phase: "average",
       key: null,
@@ -653,18 +838,19 @@ export function buildRangeGuardMeanSteps(source: number[]): SortStep[] {
       inserting: null,
       gapIndex: null,
       sortedCount: 0,
-      comparisons: trackedComparisons,
-      writes: valuesReordered,
+      comparisons: trackedChecks,
+      writes: trackedMoves,
       message:
-        "Group means: " + broadGroups.map((group) => "μ " + formatMean(group.mean)).join(", ") + ".",
-      groups: broadGroups,
+        "Band means: " + splitGroups.map((group) => "μ " + formatMean(group.mean)).join(", ") + ".",
+      groups: splitGroups,
     });
 
-    const ranking = rankMeanChunks(broadChunks);
-    trackedComparisons += ranking.comparisons;
-    const rankedChunks = ranking.chunks;
-    valuesReordered += values.length;
-    working = rankedChunks.flatMap((chunk) => chunk.values);
+    trackedChecks += round.rankComparisons;
+    trackedMoves += round.descriptorMoves;
+    const rankedGroups = describeMeanBandGroups(round.rankedBands);
+    working = round.rankedBands.flatMap((band) =>
+      band.source.slice(band.start, band.end),
+    );
 
     steps.push({
       values: [...working],
@@ -676,57 +862,31 @@ export function buildRangeGuardMeanSteps(source: number[]): SortStep[] {
       inserting: null,
       gapIndex: null,
       sortedCount: 0,
-      comparisons: trackedComparisons,
-      writes: valuesReordered,
-      message: "Rank the two broad groups by mean before inspecting their value ranges.",
-      groups: describeMeanGroups(rankedChunks),
+      comparisons: trackedChecks,
+      writes: trackedMoves,
+      message:
+        "Rank the " +
+        round.groupCount +
+        " mean-band handles, then keep their values together for the next round.",
+      groups: rankedGroups,
     });
+  });
 
-    if (isNonDecreasing(working)) {
-      steps.push({
-        values: [...working],
-        pass,
-        phase: "complete",
-        key: null,
-        comparing: null,
-        shifting: null,
-        inserting: null,
-        gapIndex: null,
-        sortedCount: working.length,
-        comparisons: trackedComparisons,
-        writes: valuesReordered,
-        message: "The broad mean rank already placed every value in order.",
-      });
-      return steps;
-    }
-
-    finish = finishRangeComponents(rankedChunks);
-  } else {
-    if (isNonDecreasing(working)) {
-      steps.push({
-        values: [...working],
-        pass: 0,
-        phase: "complete",
-        key: null,
-        comparing: null,
-        shifting: null,
-        inserting: null,
-        gapIndex: null,
-        sortedCount: working.length,
-        comparisons: 0,
-        writes: 0,
-        message: "The small row is already ordered, so no scouting pass is needed.",
-      });
-      return steps;
-    }
-
-    pass = 1;
-    finish = finishRangeComponents([createMeanChunk(working, 0, 0)]);
+  const finalBands =
+    cascade.rounds.length > 0
+      ? materializeMeanBands(cascade.bands)
+      : [createMeanChunk([...working], 0, 0)];
+  if (cascade.rounds.length > 0) {
+    // The cascade moves lightweight block handles. This is the one point where
+    // its final logical order is materialized for the exact range repair.
+    trackedMoves += values.length;
+    working = finalBands.flatMap((chunk) => chunk.values);
   }
+  const finish = finishRangeComponents(finalBands);
 
   pass += 1;
   const finishGroups = describeMeanGroups(finish.inputChunks);
-  trackedComparisons += finish.comparisons;
+  trackedChecks += finish.comparisons;
 
   steps.push({
     values: [...working],
@@ -738,12 +898,12 @@ export function buildRangeGuardMeanSteps(source: number[]): SortStep[] {
     inserting: null,
     gapIndex: null,
     sortedCount: 0,
-    comparisons: trackedComparisons,
-    writes: valuesReordered,
+    comparisons: trackedChecks,
+    writes: trackedMoves,
     message:
-      values.length < RANGE_GUARD_MIN_SIZE
-        ? "Small row: skip mean scouting and finish its natural runs directly."
-        : "Range guard finds " +
+      cascade.rounds.length === 0
+        ? "Small row: use a direct adaptive finish instead of paying for mean-band setup."
+        : "Adaptive mean guard finds " +
           finish.componentCount +
           " certified " +
           (finish.componentCount === 1 ? "value region" : "independent value regions") +
@@ -751,8 +911,8 @@ export function buildRangeGuardMeanSteps(source: number[]): SortStep[] {
     groups: finishGroups,
   });
 
-  valuesReordered += finish.writes;
-  if (finish.componentCount > 1) valuesReordered += values.length;
+  trackedMoves += finish.writes;
+  if (finish.componentCount > 1) trackedMoves += values.length;
   const finalGroups = describeMeanGroups(finish.chunks);
 
   finish.frames.forEach((frame, frameIndex) => {
@@ -766,8 +926,8 @@ export function buildRangeGuardMeanSteps(source: number[]): SortStep[] {
       inserting: null,
       gapIndex: null,
       sortedCount: 0,
-      comparisons: trackedComparisons,
-      writes: valuesReordered,
+      comparisons: trackedChecks,
+      writes: trackedMoves,
       message:
         "Adaptive local finish " +
         (frameIndex + 1) +
@@ -789,10 +949,10 @@ export function buildRangeGuardMeanSteps(source: number[]): SortStep[] {
     inserting: null,
     gapIndex: null,
     sortedCount: finish.values.length,
-    comparisons: trackedComparisons,
-    writes: valuesReordered,
+    comparisons: trackedChecks,
+    writes: trackedMoves,
     message:
-      "Certified range boundaries let the independently finished regions join into one sorted row.",
+      "The mean-ranked bands now join through certified range boundaries into one sorted row.",
     groups: finalGroups,
   });
 
@@ -1115,14 +1275,21 @@ function shuffleInPlace(values: number[], random: () => number) {
 
 export function createBogoSession(
   source: number[],
-  attemptLimit = BOGO_MAX_ATTEMPTS,
+  attemptLimit: number | null = BOGO_MAX_ATTEMPTS,
 ): BogoSession {
   const values = [...source];
   const initialCheck = countSortedCheck(values);
+  const normalizedAttemptLimit =
+    attemptLimit === null
+      ? null
+      : Math.max(
+          1,
+          Math.floor(Number.isFinite(attemptLimit) ? attemptLimit : BOGO_MAX_ATTEMPTS),
+        );
 
   return {
     values,
-    attemptLimit: Math.max(1, Math.floor(attemptLimit)),
+    attemptLimit: normalizedAttemptLimit,
     attempts: 0,
     comparisons: initialCheck.comparisons,
     writes: 0,
@@ -1148,7 +1315,7 @@ export function advanceBogoSession(
     return;
   }
 
-  if (session.attempts >= session.attemptLimit) {
+  if (session.attemptLimit !== null && session.attempts >= session.attemptLimit) {
     session.done = true;
     session.limited = true;
   }
@@ -1169,13 +1336,15 @@ export function getBogoSessionStep(session: BogoSession): SortStep {
   }
 
   if (session.done && session.limited) {
+    const safetyLimit = session.attemptLimit ?? session.attempts;
+
     return makeStep(session.values, {
       pass: session.attempts,
       phase: "limited",
       comparisons: session.comparisons,
       writes: session.writes,
       message:
-        "Safety stop after " + session.attemptLimit + " shuffles. Bogo Sort can take indefinitely; try a new row or another algorithm.",
+        "Safety stop after " + safetyLimit + " shuffles. Bogo Sort can take indefinitely; try a new row or another algorithm.",
     });
   }
 
@@ -2140,13 +2309,6 @@ export function analyzeMergeSort(source: number[]): SortMetrics {
 
 export function analyzeRangeGuardMeanSort(source: number[]): SortMetrics {
   const sourceValues = [...source];
-  let working = [...sourceValues];
-  let rounds = 0;
-  let meansCalculated = 0;
-  let meanComputationOperations = 0;
-  let refinementOperations = 0;
-  let rankComparisons = 0;
-  let outputWrites = 0;
 
   if (sourceValues.length <= 1) {
     return {
@@ -2160,67 +2322,35 @@ export function analyzeRangeGuardMeanSort(source: number[]): SortMetrics {
     };
   }
 
-  if (sourceValues.length >= RANGE_GUARD_MIN_SIZE) {
-    rounds += 1;
-    const broadChunks = buildMeanChunks(working, 2);
-    meansCalculated += broadChunks.length;
-    meanComputationOperations += sourceValues.length + broadChunks.length;
-    const ranking = rankMeanChunks(broadChunks);
-    rankComparisons += ranking.comparisons;
-    outputWrites += sourceValues.length;
-    working = ranking.chunks.flatMap((chunk) => chunk.values);
+  const cascade = buildMeanCascade(sourceValues);
+  // Ranking two rational means uses two multiplications and one subtraction
+  // before their relative order is compared. Count that support arithmetic
+  // separately so the work model does not make the mean-led phase look free.
+  const meanRankingArithmeticOperations = cascade.rankComparisons * 3;
+  let outputWrites = cascade.descriptorMoves;
+  const finalBands =
+    cascade.rounds.length > 0
+      ? materializeMeanBands(cascade.bands)
+      : [createMeanChunk([...sourceValues], 0, 0)];
 
-    if (isNonDecreasing(working)) {
-      return {
-        comparisons: meansCalculated,
-        rankComparisons,
-        writes: outputWrites,
-        rounds,
-        finalValues: working,
-        meanComputationOperations,
-        refinementOperations,
-      };
-    }
+  if (cascade.rounds.length > 0) outputWrites += sourceValues.length;
 
-    const finish = finishRangeComponents(ranking.chunks);
-    refinementOperations += finish.comparisons;
-    outputWrites += finish.writes;
-    if (finish.componentCount > 1) outputWrites += sourceValues.length;
-
-    return {
-      comparisons: meansCalculated,
-      rankComparisons,
-      writes: outputWrites,
-      rounds: rounds + Math.max(1, finish.frames.length),
-      finalValues: finish.values,
-      meanComputationOperations,
-      refinementOperations,
-    };
-  }
-
-  if (isNonDecreasing(working)) {
-    return {
-      comparisons: 0,
-      rankComparisons: 0,
-      writes: 0,
-      rounds: 0,
-      finalValues: working,
-      meanComputationOperations: 0,
-      refinementOperations: 0,
-    };
-  }
-
-  const finish = finishRangeComponents([createMeanChunk(working, 0, 0)]);
-  refinementOperations += finish.comparisons;
+  const finish = finishRangeComponents(finalBands);
+  const refinementOperations = finish.comparisons;
   outputWrites += finish.writes;
+  if (finish.componentCount > 1) outputWrites += sourceValues.length;
 
   return {
+    // Mean-band count is a visual status indicator, not a value comparison.
+    // The measured-work model already includes mean arithmetic, exact mean
+    // ranking comparisons, and the range/local-finish comparisons below.
     comparisons: 0,
-    rankComparisons: 0,
+    rankComparisons: cascade.rankComparisons,
     writes: outputWrites,
-    rounds: Math.max(1, finish.frames.length),
+    rounds: cascade.rounds.length + Math.max(1, finish.frames.length),
     finalValues: finish.values,
-    meanComputationOperations: 0,
+    meanComputationOperations: cascade.meanOperations,
+    meanRankingArithmeticOperations,
     refinementOperations,
   };
 }

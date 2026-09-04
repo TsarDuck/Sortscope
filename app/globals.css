@@ -291,22 +291,87 @@ button:disabled {
 }
 
 .control-number {
-  width: 48px;
+  width: 66px;
   min-width: 0;
-  padding: 3px 5px;
+  min-height: 36px;
+  padding: 5px 8px;
   border: 1px solid rgba(160, 174, 234, 0.28);
   border-radius: 5px;
   color: var(--ink);
+  color-scheme: dark;
   font: inherit;
-  font-size: 0.68rem;
+  font-size: 0.78rem;
   font-weight: 800;
-  line-height: 1.1;
+  line-height: 1.2;
   text-align: right;
   background: rgba(8, 11, 28, 0.62);
 }
 
 .control-number--bogo {
-  width: 98px;
+  width: 136px;
+}
+
+.bogo-unlimited-warning {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  padding: 10px 11px;
+  border: 1px solid rgba(255, 112, 126, 0.58);
+  border-radius: 9px;
+  color: #ffd3d9;
+  background: linear-gradient(135deg, rgba(126, 40, 64, 0.42), rgba(87, 27, 52, 0.3));
+  box-shadow: inset 0 1px rgba(255, 203, 212, 0.07);
+  cursor: pointer;
+}
+
+.bogo-unlimited-warning input {
+  width: 16px;
+  height: 16px;
+  margin: 1px 0 0;
+  accent-color: #ff7180;
+  cursor: pointer;
+}
+
+.bogo-unlimited-warning span,
+.bogo-unlimited-warning strong,
+.bogo-unlimited-warning small {
+  display: block;
+}
+
+.bogo-unlimited-warning strong {
+  color: #ffe2e6;
+  font-size: 0.7rem;
+  line-height: 1.2;
+}
+
+.bogo-unlimited-warning small {
+  margin-top: 3px;
+  color: #f3aeba;
+  font-size: 0.61rem;
+  font-weight: 650;
+  line-height: 1.32;
+}
+
+.bogo-unlimited-warning--armed {
+  border-color: rgba(255, 133, 145, 0.9);
+  background: linear-gradient(135deg, rgba(166, 47, 76, 0.58), rgba(103, 29, 58, 0.47));
+  box-shadow: 0 0 18px rgba(243, 88, 113, 0.18), inset 0 1px rgba(255, 224, 229, 0.1);
+}
+
+.bogo-unlimited-warning--disabled,
+.bogo-unlimited-warning--disabled input {
+  cursor: not-allowed;
+  opacity: 0.56;
+}
+
+/* Give Chromium's built-in up/down controls a comfortably sized hit area. */
+.control-number::-webkit-inner-spin-button,
+.control-number::-webkit-outer-spin-button {
+  width: 20px;
+  min-height: 30px;
+  margin: 0;
+  cursor: pointer;
+  opacity: 1;
 }
 
 .control-number:focus {
@@ -638,6 +703,18 @@ input:focus-visible {
 }
 
 .bars--mean.bars--mean-animate .bar-slot {
+  will-change: transform;
+}
+
+.bars--flip .bar-slot {
+  transition: transform var(--bar-slide-duration, 520ms) cubic-bezier(.22, .9, .3, 1);
+}
+
+.bars--flip.bars--flip-prepare .bar-slot {
+  transition: none;
+}
+
+.bars--flip.bars--flip-animate .bar-slot {
   will-change: transform;
 }
 
@@ -1145,6 +1222,86 @@ input:focus-visible {
   margin: 0;
   color: #9da7ca;
   font-size: 0.75rem;
+}
+
+.algorithm-insights {
+  display: grid;
+  grid-column: 1 / -1;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.algorithm-insight {
+  padding: 22px 24px;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  background: rgba(25, 29, 57, 0.62);
+  box-shadow: inset 0 1px rgba(255, 255, 255, 0.035);
+}
+
+.algorithm-insight--benefits {
+  border-color: rgba(120, 222, 171, 0.28);
+  background:
+    radial-gradient(circle at top right, rgba(113, 225, 166, 0.1), transparent 45%),
+    rgba(25, 29, 57, 0.62);
+}
+
+.algorithm-insight--tradeoffs {
+  border-color: rgba(255, 190, 117, 0.26);
+  background:
+    radial-gradient(circle at top right, rgba(255, 181, 102, 0.1), transparent 45%),
+    rgba(25, 29, 57, 0.62);
+}
+
+.algorithm-insight .eyebrow {
+  margin-bottom: 7px;
+}
+
+.algorithm-insight--benefits .eyebrow,
+.algorithm-insight--benefits h3 {
+  color: #a9f1c1;
+}
+
+.algorithm-insight--tradeoffs .eyebrow,
+.algorithm-insight--tradeoffs h3 {
+  color: #ffd39a;
+}
+
+.algorithm-insight h3 {
+  margin: 0;
+  font-size: 1.15rem;
+  letter-spacing: -0.035em;
+}
+
+.algorithm-insight ul {
+  display: grid;
+  gap: 14px;
+  margin: 17px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.algorithm-insight li {
+  padding-top: 14px;
+  border-top: 1px solid rgba(205, 213, 255, 0.1);
+}
+
+.algorithm-insight li:first-child {
+  padding-top: 0;
+  border-top: 0;
+}
+
+.algorithm-insight strong {
+  display: block;
+  color: #e4e8ff;
+  font-size: 0.79rem;
+}
+
+.algorithm-insight p:not(.eyebrow) {
+  margin: 5px 0 0;
+  color: #aeb7d7;
+  font-size: 0.76rem;
+  line-height: 1.52;
 }
 
 .practice-lab {
@@ -2054,6 +2211,14 @@ input:focus-visible {
 
   .algorithm-card__header {
     font-size: 0.54rem;
+  }
+
+  .algorithm-insights {
+    grid-template-columns: 1fr;
+  }
+
+  .algorithm-insight {
+    padding: 20px 18px;
   }
 
   .practice-lab {
