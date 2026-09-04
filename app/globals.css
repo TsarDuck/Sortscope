@@ -479,6 +479,11 @@ input:focus-visible {
   box-shadow: 0 0 10px var(--coral);
 }
 
+.phase-chip--sweep span {
+  background: var(--coral);
+  box-shadow: 0 0 10px var(--coral);
+}
+
 .phase-chip--swap span,
 .phase-chip--shuffle span,
 .phase-chip--limited span {

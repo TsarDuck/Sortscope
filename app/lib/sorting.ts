@@ -16,6 +16,7 @@ export type StepPhase =
   | "average"
   | "reorder"
   | "swap"
+  | "sweep"
   | "merge"
   | "shuffle"
   | "limited"
@@ -44,6 +45,8 @@ export type SortStep = {
   message: string;
   groups?: MeanGroup[];
   settled?: number[];
+  rangeStart?: number;
+  rangeEnd?: number;
 };
 
 export type SortMetrics = {
@@ -61,7 +64,6 @@ type MeanChunk = {
   originalIndex: number;
 };
 
-export const BOGO_MAX_VALUES = 5;
 export const BOGO_MAX_ATTEMPTS = 720;
 
 export function createInitialStep(
@@ -434,6 +436,8 @@ type StepDetails = Pick<
       | "gapIndex"
       | "sortedCount"
       | "settled"
+      | "rangeStart"
+      | "rangeEnd"
     >
   >;
 
@@ -503,7 +507,9 @@ export function buildCocktailSteps(source: number[]): SortStep[] {
     steps.push(
       makeStep(values, {
         pass,
-        phase: "select",
+        phase: compactFrames ? "sweep" : "select",
+        comparing: compactFrames ? lower : null,
+        shifting: compactFrames ? lower + 1 : null,
         comparisons,
         writes,
         settled: getSettledIndices(settled),
@@ -570,7 +576,9 @@ export function buildCocktailSteps(source: number[]): SortStep[] {
     steps.push(
       makeStep(values, {
         pass,
-        phase: "select",
+        phase: compactFrames ? "sweep" : "select",
+        comparing: compactFrames ? upper : null,
+        shifting: compactFrames ? upper + 1 : null,
         comparisons,
         writes,
         settled: getSettledIndices(settled),
@@ -804,6 +812,8 @@ export function buildMergeSortSteps(source: number[]): SortStep[] {
               phase: "compare",
               comparing: left + leftIndex,
               shifting: middle + rightIndex,
+              rangeStart: left,
+              rangeEnd: right,
               comparisons,
               writes,
               message: "Compare the next value from each ordered run.",
@@ -826,6 +836,8 @@ export function buildMergeSortSteps(source: number[]): SortStep[] {
               pass,
               phase: "merge",
               inserting: destination - 1,
+              rangeStart: left,
+              rangeEnd: right,
               comparisons,
               writes,
               message: "Write the next smallest value into the merged run.",
@@ -852,6 +864,8 @@ export function buildMergeSortSteps(source: number[]): SortStep[] {
         makeStep(values, {
           pass,
           phase: "merge",
+          rangeStart: left,
+          rangeEnd: right,
           comparisons,
           writes,
           message: "Merge two ordered runs into one larger ordered run.",
@@ -942,7 +956,7 @@ export function buildBogoSteps(
       comparisons,
       writes,
       message:
-        "Safety stop after " + attemptLimit + " shuffles. Bogo Sort can take indefinitely; try a new five-value row.",
+        "Safety stop after " + attemptLimit + " shuffles. Bogo Sort can take indefinitely; try a new row or another algorithm.",
     }),
   );
 

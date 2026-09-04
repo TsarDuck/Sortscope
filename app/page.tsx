@@ -3,7 +3,6 @@
 import { useEffect, useMemo, useState } from "react";
 import {
   BOGO_MAX_ATTEMPTS,
-  BOGO_MAX_VALUES,
   analyzeCocktailSort,
   analyzeInsertionSort,
   analyzeMeanPartitionSort,
@@ -35,6 +34,7 @@ type StepPhase =
   | "average"
   | "reorder"
   | "swap"
+  | "sweep"
   | "merge"
   | "shuffle"
   | "limited"
@@ -65,6 +65,8 @@ type SortStep = {
   message: string;
   groups?: MeanGroup[];
   settled?: number[];
+  rangeStart?: number;
+  rangeEnd?: number;
 };
 
 const DEFAULT_ARRAY_SIZE = 24;
@@ -187,7 +189,7 @@ const ALGORITHM_DETAILS: Record<
     stageDescription: "random attempt",
     eyebrow: "CHAOS EXPERIMENT",
     learnTitle: "Let chance do the sorting.",
-    learnCopy: "Bogo sort checks whether the row is ordered. If not, it randomly shuffles every value and tries again. It is limited to five values and 720 attempts here so the visualizer stays responsive.",
+    learnCopy: "Bogo sort checks whether the row is ordered. If not, it randomly shuffles every value and tries again. It works at every array size here, but stops after 720 attempts so the visualizer stays responsive.",
     complexity: ["BEST O(n)", "EXPECTED O(n · n!)", "LIMIT 720 TRIES"],
     cardTitle: "BOGO SORT",
     cardTag: "randomized · capped demo",
@@ -447,13 +449,24 @@ function getBarClass(
     if (step.phase === "complete") return "bar--sorted";
     if (index === step.comparing || index === step.shifting) return "bar--compare";
     if (index === step.inserting) return "bar--insert";
-    if (step.phase === "merge") return "bar--merge";
+    if (
+      step.phase === "merge" &&
+      step.rangeStart !== undefined &&
+      step.rangeEnd !== undefined &&
+      index >= step.rangeStart &&
+      index < step.rangeEnd
+    ) {
+      return "bar--merge";
+    }
     return "bar--idle";
   }
 
   if (algorithm === "cocktail") {
     if (step.phase === "complete" || step.settled?.includes(index)) return "bar--sorted";
-    if (step.phase === "swap" && (index === step.comparing || index === step.shifting)) {
+    if (
+      (step.phase === "swap" || step.phase === "sweep") &&
+      (index === step.comparing || index === step.shifting)
+    ) {
       return "bar--swap";
     }
     if (index === step.comparing || index === step.shifting) return "bar--compare";
@@ -481,6 +494,7 @@ function getPhaseLabel(phase: StepPhase) {
     average: "Measure means",
     reorder: "Rank groups",
     swap: "Swap values",
+    sweep: "Sweep",
     merge: "Merge runs",
     shuffle: "Shuffle",
     limited: "Safety stop",
@@ -514,8 +528,8 @@ export default function Home() {
       : algorithm === "merge"
         ? Math.max(1, Math.ceil(Math.log2(Math.max(originalValues.length, 1))))
         : Math.max(originalValues.length - 1, 0);
-  const minimumArraySize = isBogo ? 3 : 8;
-  const maximumArraySize = isBogo ? BOGO_MAX_VALUES : 256;
+  const minimumArraySize = 8;
+  const maximumArraySize = 256;
   const benchmarkData = useMemo(
     () =>
       BENCHMARK_SIZES.map((size) => {
@@ -574,9 +588,10 @@ export default function Home() {
     : isMeanPartition
       ? 1
       : Math.max(1, Math.ceil(originalValues.length / 48));
+  const speedDelay = 720 - speed * 7.13;
   const delay = prefersReducedMotion
     ? 18
-    : Math.max(7, (710 - speed * 6.7) / playbackDensity);
+    : Math.max(7, speedDelay / playbackDensity);
   const progress =
     runState === "complete"
       ? 100
@@ -587,7 +602,7 @@ export default function Home() {
   const largestValue = Math.max(...originalValues, 1);
   const liveStatus =
     currentStep.phase === "limited"
-      ? "Bogo Sort stopped after the shuffle safety limit. Try a new small array."
+      ? "Bogo Sort stopped after the shuffle safety limit. Try a new array or another algorithm."
       : runState === "complete"
         ? isMeanPartition
           ? "Sorting complete. " + currentStep.comparisons + " group means and " + currentStep.writes + " moved values."
@@ -636,26 +651,6 @@ export default function Home() {
 
   function handleAlgorithmChange(nextAlgorithm: AlgorithmId) {
     setAlgorithm(nextAlgorithm);
-    if (nextAlgorithm === "bogo" && arraySize > BOGO_MAX_VALUES) {
-      const nextValues = makeRandomArray(BOGO_MAX_VALUES);
-      setArraySize(BOGO_MAX_VALUES);
-      setOriginalValues(nextValues);
-      setValues(nextValues);
-      setSteps([]);
-      setStepIndex(0);
-      setRunState("ready");
-      return;
-    }
-    if (nextAlgorithm !== "bogo" && arraySize < 8) {
-      const nextValues = makeRandomArray(8);
-      setArraySize(8);
-      setOriginalValues(nextValues);
-      setValues(nextValues);
-      setSteps([]);
-      setStepIndex(0);
-      setRunState("ready");
-      return;
-    }
     setValues([...originalValues]);
     setSteps([]);
     setStepIndex(0);
@@ -760,7 +755,7 @@ export default function Home() {
                   <option value="cocktail">Cocktail sort</option>
                   <option value="quick">Quick sort</option>
                   <option value="merge">Merge sort</option>
-                  <option value="bogo">Bogo sort (five values max)</option>
+                  <option value="bogo">Bogo sort (720-shuffle cap)</option>
                   <option value="mean-partition">Mean partition sort (experiment)</option>
                 </select>
               </label>
@@ -1000,8 +995,8 @@ export default function Home() {
               <p>
                 Every practical algorithm receives the same shuffled sequence of 1 through n.
                 These totals combine comparisons and writes, so they are operation estimates rather
-                than timers. Bogo Sort stays a live five-value experiment because its expected work
-                grows factorially.
+                than timers. Bogo Sort stays out of this chart because its expected work grows
+                factorially, even though the live visualizer allows it up to 256 values.
               </p>
             </div>
             <label className="benchmark-select">

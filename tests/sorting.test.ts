@@ -79,16 +79,50 @@ test("cocktail, quick, and merge sort finish in numeric order without mutating t
   }
 });
 
+test("dense cocktail and merge frames keep their visual focus scoped", () => {
+  const denseSource = Array.from({ length: 65 }, (_, index) => 65 - index);
+  const cocktailSweeps = buildCocktailSteps(denseSource).filter(
+    (step) => step.phase === "sweep",
+  );
+  const mergeFrames = buildMergeSortSteps([8, 3, 7, 1, 6, 2, 5, 4]).filter(
+    (step) => step.phase === "merge",
+  );
+
+  assert.ok(cocktailSweeps.length > 0);
+  for (const step of cocktailSweeps) {
+    assert.equal(step.shifting, (step.comparing ?? -1) + 1);
+  }
+
+  assert.ok(mergeFrames.length > 0);
+  for (const step of mergeFrames) {
+    assert.ok(step.rangeStart !== undefined);
+    assert.ok(step.rangeEnd !== undefined);
+    assert.ok((step.rangeStart ?? 0) < (step.rangeEnd ?? 0));
+  }
+  assert.ok(
+    mergeFrames.some(
+      (step) => (step.rangeEnd ?? 0) - (step.rangeStart ?? 0) < 8,
+    ),
+  );
+});
+
 test("bogo sort either succeeds by shuffle or reports its safety limit honestly", () => {
   const source = [2, 1];
   const success = buildBogoSteps(source, 4, () => 0);
   const limited = buildBogoSteps(source, 3, () => 0.999);
+  const largeLimited = buildBogoSteps(
+    Array.from({ length: 256 }, (_, index) => 256 - index),
+    3,
+    () => 0.999,
+  );
 
   assert.deepEqual(source, [2, 1]);
   assert.deepEqual(finalValues(success), [1, 2]);
   assert.equal(success.at(-1)?.phase, "complete");
   assert.equal(limited.at(-1)?.phase, "limited");
   assert.equal(isNonDecreasing(finalValues(limited)), false);
+  assert.equal(largeLimited.at(-1)?.phase, "limited");
+  assert.equal(finalValues(largeLimited).length, 256);
 });
 
 test("sorting metric analyzers preserve a clean 1 through 256 final line", () => {
