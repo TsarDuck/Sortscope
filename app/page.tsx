@@ -539,7 +539,7 @@ export default function Home() {
       : algorithm === "merge"
         ? Math.max(1, Math.ceil(Math.log2(Math.max(originalValues.length, 1))))
         : Math.max(originalValues.length - 1, 0);
-  const minimumArraySize = 8;
+  const minimumArraySize = 4;
   const maximumArraySize = 256;
   const benchmarkData = useMemo(
     () =>
