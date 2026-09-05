@@ -35,6 +35,8 @@ yarn-error.log*
 .vercel
 
 /dist/
+/src-tauri/target/
+*.tsbuildinfo
 /.wrangler/
 /outputs/
 /work/

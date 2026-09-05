@@ -1,5 +1,3 @@
-"use client";
-
 import {
   Fragment,
   type CSSProperties,
@@ -266,10 +264,10 @@ const BOGO_PRACTICE_CASINO_SOUNDS: Record<
   BogoPracticeCasinoSound,
   { source: string; silentDuration: number }
 > = {
-  entry: { source: "/audio/bogo-casino-gambling.wav", silentDuration: 1_800 },
-  shuffle: { source: "/audio/bogo-casino-shuffle.wav", silentDuration: 700 },
-  fail: { source: "/audio/bogo-casino-fail.wav", silentDuration: 1_500 },
-  success: { source: "/audio/bogo-casino-success.wav", silentDuration: 2_200 },
+  entry: { source: `${import.meta.env.BASE_URL}audio/bogo-casino-gambling.wav`, silentDuration: 1_800 },
+  shuffle: { source: `${import.meta.env.BASE_URL}audio/bogo-casino-shuffle.wav`, silentDuration: 700 },
+  fail: { source: `${import.meta.env.BASE_URL}audio/bogo-casino-fail.wav`, silentDuration: 1_500 },
+  success: { source: `${import.meta.env.BASE_URL}audio/bogo-casino-success.wav`, silentDuration: 2_200 },
 };
 // At the top end, the live runner works in short CPU batches. This is a
 // deliberately conservative pre-run model; the page replaces it with the
@@ -290,6 +288,20 @@ const BOGO_CONFETTI = Array.from({ length: 64 }, (_, index) => ({
   color: BOGO_CONFETTI_COLORS[index % BOGO_CONFETTI_COLORS.length],
   shape: index % 3,
 }));
+
+function getInitialIntroPhase(): IntroPhase {
+  if (typeof window === "undefined") return "visible";
+
+  try {
+    return window.sessionStorage.getItem(SORTSCOPE_INTRO_SESSION_KEY) === "seen"
+      ? "hidden"
+      : "visible";
+  } catch {
+    // Storage can be unavailable in private or embedded contexts. In that
+    // case the welcome screen still works for this page view.
+    return "visible";
+  }
+}
 
 function getTheoreticalWork(
   algorithm: BenchmarkAlgorithm,
@@ -2176,7 +2188,7 @@ function getPhaseLabel(phase: StepPhase) {
 }
 
 export default function Home() {
-  const [introPhase, setIntroPhase] = useState<IntroPhase>("visible");
+  const [introPhase, setIntroPhase] = useState<IntroPhase>(getInitialIntroPhase);
   const [algorithm, setAlgorithm] = useState<AlgorithmId>("bogo");
   const [isAlgorithmPickerOpen, setIsAlgorithmPickerOpen] = useState(false);
   const [algorithmCardTab, setAlgorithmCardTab] = useState<AlgorithmCardTab>("walkthrough");
@@ -2251,7 +2263,7 @@ export default function Home() {
   // Keep the modal transition state synchronous with pointer events. React
   // state intentionally paints the phase, while this ref prevents a second
   // click during the fade from leaking through to the page underneath.
-  const introPhaseRef = useRef<IntroPhase>("visible");
+  const introPhaseRef = useRef<IntroPhase>(introPhase);
   const introReturnFocusRef = useRef<HTMLElement | null>(null);
   const brandButtonRef = useRef<HTMLButtonElement | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
@@ -2544,7 +2556,6 @@ export default function Home() {
         : steps[stepIndex] ?? createInitialStep(values, algorithm),
     [algorithm, bogoLiveStep, isBogo, stepIndex, steps, values],
   );
-  const visibleValues = currentStep.values;
   const renderedBarItems = getRenderedBarItems(currentStep);
   const completionSweepDuration = getCompletionSweepDuration(renderedBarItems.length);
   const completionSweepStepDuration = completionSweepDuration / Math.max(renderedBarItems.length, 1);
@@ -2572,20 +2583,6 @@ export default function Home() {
     previousVisualStep !== null &&
     haveSameBarTokens(previousRenderedBarItems, renderedBarItems) &&
     previousRenderedBarItems.some((item, index) => item.token !== renderedBarItems[index]?.token);
-
-  // Keep the welcome moment scoped to a browser session. useLayoutEffect
-  // prevents a returning visitor from seeing the overlay flash during reload.
-  useLayoutEffect(() => {
-    try {
-      if (window.sessionStorage.getItem(SORTSCOPE_INTRO_SESSION_KEY) === "seen") {
-        introPhaseRef.current = "hidden";
-        setIntroPhase("hidden");
-      }
-    } catch {
-      // Storage can be unavailable in private or embedded contexts. In that
-      // case the welcome screen still works for this page view.
-    }
-  }, []);
 
   // Keep the page beneath the fixed welcome screen stationary. This guarantees
   // that re-entering through the logo and then dismissing the overlay returns
@@ -2644,7 +2641,7 @@ export default function Home() {
     }
 
     if (soundEnabled) playBogoVictorySound();
-    setBogoCelebrationPhase("visible");
+    const showTimer = window.setTimeout(() => setBogoCelebrationPhase("visible"), 0);
     const celebrationFadeDuration = prefersReducedMotion ? 0 : BOGO_CELEBRATION_FADE_DURATION;
     const fadeTimer = window.setTimeout(
       () => setBogoCelebrationPhase("fading"),
@@ -2656,6 +2653,7 @@ export default function Home() {
     );
 
     return () => {
+      window.clearTimeout(showTimer);
       window.clearTimeout(fadeTimer);
       window.clearTimeout(unmountTimer);
     };
@@ -2704,6 +2702,9 @@ export default function Home() {
     if (!shouldInterpolateMoves) {
       motionBarPositionsRef.current = captureMotionBarPositions();
       motionBarTokensRef.current = nextTokens;
+      // This layout effect must synchronously clear the FLIP paint when its
+      // interpolation policy changes; deferring it produces a stale frame.
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- Layout synchronization requires the reset before paint.
       setMotionSlideOffsets((current) => (Object.keys(current).length === 0 ? current : {}));
       setMotionSlideStage((stage) => (stage === "idle" ? stage : "idle"));
       return;
@@ -2814,7 +2815,10 @@ export default function Home() {
   useEffect(() => {
     // Match the former selector: switching algorithms is available while
     // paused (which resets the trace), but never while a run is advancing.
-    if (isRunning) setIsAlgorithmPickerOpen(false);
+    if (isRunning) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- Close a now-invalid popover when the runner takes control.
+      setIsAlgorithmPickerOpen(false);
+    }
   }, [isRunning]);
 
   const isLargeArray = originalValues.length > DEFAULT_ARRAY_SIZE;
@@ -3877,7 +3881,7 @@ export default function Home() {
         rollValues,
         BOGO_PRACTICE_ROLL_INTERVAL,
       );
-    }, undefined, casinoActionRun);
+    }, casinoActionRun);
   }
 
   function resetPractice(nextAlgorithm = algorithm) {
@@ -3950,12 +3954,7 @@ export default function Home() {
     setPracticeDropMode((current) => (current === target?.mode ? current : target?.mode ?? null));
   }
 
-  function evaluatePracticeMove(
-    nextValues: number[],
-    fromIndex: number,
-    toIndex: number,
-    mode: PracticeDropMode,
-  ): PracticeMoveResult {
+  function evaluatePracticeMove(nextValues: number[]): PracticeMoveResult {
     // The insertion walkthrough prepares the one correct gap by shifting its
     // larger prefix values automatically. Generic swaps and row inserts are
     // never part of that lesson; only the held yellow key may fill the gap.
@@ -4042,7 +4041,7 @@ export default function Home() {
     const nextValues = applyPracticeMove(practiceValues, fromIndex, toIndex, mode);
     if (arraysMatch(nextValues, previousValues)) return;
     setPracticeValues(nextValues);
-    const result = evaluatePracticeMove(nextValues, fromIndex, toIndex, mode);
+    const result = evaluatePracticeMove(nextValues);
     if (result === "wrong") {
       schedulePracticeUndo(previousValues);
     } else if (result === "complete") {
@@ -4984,6 +4983,10 @@ export default function Home() {
   return (
     <main className="sortlab-app">
       {introPhase !== "hidden" && (
+        // The welcome dialog deliberately makes its complete surface one
+        // keyboard-operable dismiss target rather than placing a separate
+        // button over the explanatory content.
+        // eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions -- Full-surface dialog dismissal is an intentional interaction.
         <div
           ref={introOverlayRef}
           className={
@@ -6338,7 +6341,7 @@ export default function Home() {
                 aria-label={"Illustrative work growth, ordered from highest to lowest modeled work, for " + benchmarkPattern + " arrays from 256 through 1,048,576 values."}
               >
                 <p className="benchmark-chart__note">
-                  This view illustrates each algorithm's growth shape for the selected arrangement.
+                  This view illustrates each algorithm&apos;s growth shape for the selected arrangement.
                   Meter length uses a log scale so O(n log n) curves remain visible next to quadratic
                   ones; the rounded number is a relative model unit, not a timed result or an exact
                   operation total.
