@@ -99,18 +99,13 @@ test("bubble, cocktail, selection, heap, quick, PDQ, merge, and Powersort finish
   }
 });
 
-test("selection sort exposes one visual scan for each open position without inflating work", () => {
+test("selection sort keeps its compact compare-and-place trace without inflating work", () => {
   const source = [6, 2, 5, 1, 4, 3];
   const steps = buildSelectionSteps(source);
-  const scans = steps.filter((step) => step.phase === "scan");
   const metrics = analyzeSelectionSort(source);
 
-  assert.equal(scans.length, source.length - 1);
-  for (const [index, step] of scans.entries()) {
-    assert.equal(step.rangeStart, index);
-    assert.equal(step.rangeEnd, source.length);
-    assert.equal(step.inserting, index);
-  }
+  assert.equal(steps.filter((step) => step.phase === "select").length, source.length - 1);
+  assert.equal(steps.length, source.length * 2);
   assert.equal(steps.at(-1)?.comparisons, metrics.comparisons);
   assert.equal(steps.at(-1)?.writes, metrics.writes);
   assert.ok(buildSelectionSteps(Array.from({ length: 256 }, (_, index) => 256 - index)).length < 800);

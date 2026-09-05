@@ -13,7 +13,6 @@ export type AlgorithmId =
 export type StepPhase =
   | "ready"
   | "select"
-  | "scan"
   | "compare"
   | "shift"
   | "insert"
@@ -352,26 +351,6 @@ export function buildSelectionSteps(source: number[]): SortStep[] {
         writes,
         settled: getSettledIndices(settled),
         message: "Pass " + pass + ": search for the smallest remaining value.",
-      }),
-    );
-
-    // A selection pass compares the entire unsorted tail before it can make
-    // its single placement. Represent that search as one visual-only scan
-    // frame rather than a dense stream of almost identical snapshots. The
-    // real comparisons are still counted below, so this metadata never
-    // changes the algorithm's work totals.
-    steps.push(
-      makeStep(values, {
-        pass,
-        phase: "scan",
-        key: values[start],
-        inserting: start,
-        rangeStart: start,
-        rangeEnd: values.length,
-        comparisons,
-        writes,
-        settled: getSettledIndices(settled),
-        message: "Scan every remaining value to find the next smallest one.",
       }),
     );
 

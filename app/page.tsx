@@ -78,7 +78,6 @@ type RunState = "ready" | "running" | "paused" | "complete";
 type StepPhase =
   | "ready"
   | "select"
-  | "scan"
   | "compare"
   | "shift"
   | "insert"
@@ -2088,7 +2087,6 @@ function getBarClass(
 
   if (algorithm === "selection") {
     if (step.phase === "complete" || step.settled?.includes(index)) return "bar--sorted";
-    if (step.phase === "scan" && index === step.inserting) return "bar--key";
     if (step.phase === "swap" && (index === step.comparing || index === step.shifting)) {
       return "bar--swap";
     }
@@ -2159,7 +2157,6 @@ function getPhaseLabel(phase: StepPhase) {
   const labels: Record<StepPhase, string> = {
     ready: "Ready",
     select: "Select key",
-    scan: "Scan for minimum",
     compare: "Compare",
     shift: "Shift right",
     insert: "Insert key",
@@ -2549,18 +2546,6 @@ export default function Home() {
   );
   const visibleValues = currentStep.values;
   const renderedBarItems = getRenderedBarItems(currentStep);
-  const selectionScanRange =
-    algorithm === "selection" &&
-    currentStep.phase === "scan" &&
-    currentStep.rangeStart !== undefined &&
-    currentStep.rangeEnd !== undefined
-      ? {
-          start: Math.max(0, currentStep.rangeStart),
-          end: Math.min(visibleValues.length, currentStep.rangeEnd),
-        }
-      : null;
-  const isSelectionScan =
-    selectionScanRange !== null && selectionScanRange.end > selectionScanRange.start;
   const completionSweepDuration = getCompletionSweepDuration(renderedBarItems.length);
   const completionSweepStepDuration = completionSweepDuration / Math.max(renderedBarItems.length, 1);
   const previousVisualStep = !isBogo && stepIndex > 0 ? steps[stepIndex - 1] : null;
@@ -2894,18 +2879,7 @@ export default function Home() {
       : isSafeVisualMove && !isAdjustingSpeedControl
         ? motionSlideDuration + 100
       : Math.max(minimumFrameDelay, speedDelay / playbackDensity);
-  // A scan has to remain readable at the fast end of the control. This does
-  // not change comparison accounting—it only gives the visual sweep long
-  // enough to traverse the unsorted tail before the placement frame.
-  const delay = isSelectionScan && !prefersReducedMotion
-    ? Math.max(baseDelay, isLargeArray ? 24 : 70)
-    : baseDelay;
-  const selectionScanBarDuration = isSelectionScan
-    ? Math.max(
-        1,
-        delay / Math.max(selectionScanRange!.end - selectionScanRange!.start, 1),
-      )
-    : 0;
+  const delay = baseDelay;
   const shouldInterpolateDenseBars =
     isLargeArray &&
     !isBogo &&
@@ -5581,23 +5555,6 @@ export default function Home() {
                           "--completion-scan-duration": String(completionSweepStepDuration) + "ms",
                         } as CSSProperties)
                       : { height: String(height) + "%" };
-                  const selectionScanIndex =
-                    isSelectionScan &&
-                    index >= selectionScanRange!.start &&
-                    index < selectionScanRange!.end
-                      ? index - selectionScanRange!.start
-                      : null;
-                  const selectionScanBarStyle =
-                    selectionScanIndex === null
-                      ? undefined
-                      : ({
-                          "--selection-bar-scan-delay": String(
-                            Math.round(selectionScanIndex * selectionScanBarDuration),
-                          ) + "ms",
-                          "--selection-bar-scan-duration": String(
-                            Math.max(1, Math.round(selectionScanBarDuration * 1.15)),
-                          ) + "ms",
-                        } as CSSProperties);
                   return (
                     <div
                       className="bar-slot"
@@ -5623,13 +5580,6 @@ export default function Home() {
                         }
                         style={completionScanStyle}
                       >
-                        {selectionScanBarStyle && (
-                          <span
-                            key={"selection-scan-" + currentStep.pass + "-" + index}
-                            className="bar__selection-scan"
-                            style={selectionScanBarStyle}
-                          />
-                        )}
                         {arraySize <= 24 && (
                           <span className="bar__value">{item.isGap ? "gap" : item.value}</span>
                         )}
@@ -5690,7 +5640,6 @@ export default function Home() {
                   <>
                     <span><i className="legend__swatch legend__swatch--idle" />unsorted</span>
                     <span><i className="legend__swatch legend__swatch--key" />next position</span>
-                    <span><i className="legend__swatch legend__swatch--pivot" />scanning value</span>
                     <span><i className="legend__swatch legend__swatch--sorted" />selected minimum</span>
                   </>
                 ) : algorithm === "heap" ? (
