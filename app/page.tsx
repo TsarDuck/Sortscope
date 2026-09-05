@@ -66,6 +66,7 @@ type StepPhase =
 
 type BenchmarkPattern = "random" | "reverse" | "nearly-sorted";
 type BenchmarkView = "theory" | "measured";
+type BenchmarkTab = "table" | "lines";
 
 type BlockPracticeStep = {
   prompt: string;
@@ -84,6 +85,7 @@ type BlockPracticeStep = {
 type PracticeStep = BlockPracticeStep;
 
 type PracticeMoveResult = "solved" | "progress" | "wrong";
+type PracticeDropMode = "swap" | "insert";
 
 type SortStep = {
   values: number[];
@@ -127,11 +129,12 @@ const BOGO_MAX_ARRAY_SIZE = 24;
 // the order, but not so much that a 256-value finish becomes its own scene.
 const COMPLETION_SWEEP_MIN_DURATION = 425;
 const COMPLETION_SWEEP_MILLISECONDS_PER_BAR = 5;
+const COMPLETION_SWEEP_REFERENCE_NOTE_COUNT = 22;
 const COMPLETION_SWEEP_AUDIO_VISUAL_LEAD = 24;
 const COMPLETION_SWEEP_RELEASE_TAIL = 70;
 const BOGO_COMPLETION_SWEEP_DELAY = 720;
 const BENCHMARK_SIZES = [16, 32, 64, 128, 256];
-const THEORY_BENCHMARK_SIZES = [16, 64, 256, 1_024, 4_096, 16_384, 65_536];
+const THEORY_BENCHMARK_SIZES = [256, 1_024, 4_096, 16_384, 65_536, 262_144, 1_048_576];
 const BENCHMARK_ALGORITHMS = [
   { key: "bubble", label: "Bubble sort", className: "bubble" },
   { key: "insertion", label: "Insertion sort", className: "insertion" },
@@ -145,6 +148,36 @@ const BENCHMARK_ALGORITHMS = [
 ] as const;
 type BenchmarkAlgorithm = (typeof BENCHMARK_ALGORITHMS)[number]["key"];
 type BenchmarkWork = Record<BenchmarkAlgorithm, number>;
+const BENCHMARK_COLORS: Record<BenchmarkAlgorithm, string> = {
+  bubble: "#e58bc3",
+  insertion: "#9789ff",
+  cocktail: "#f09372",
+  selection: "#e6a45d",
+  heap: "#78a9f0",
+  quick: "#72d79a",
+  pdq: "#72c9e3",
+  merge: "#edc05a",
+  powersort: "#bd91f5",
+};
+const DEFAULT_GROWTH_ALGORITHM_VISIBILITY: Record<BenchmarkAlgorithm, boolean> = {
+  bubble: true,
+  insertion: true,
+  cocktail: true,
+  selection: true,
+  heap: true,
+  quick: true,
+  pdq: true,
+  merge: true,
+  powersort: true,
+};
+const GROWTH_GRAPH_WIDTH = 920;
+const GROWTH_GRAPH_HEIGHT = 356;
+const GROWTH_GRAPH_PLOT_LEFT = 86;
+const GROWTH_GRAPH_PLOT_RIGHT = 28;
+const GROWTH_GRAPH_PLOT_TOP = 24;
+const GROWTH_GRAPH_PLOT_BOTTOM = 52;
+const GROWTH_GRAPH_PLOT_WIDTH = GROWTH_GRAPH_WIDTH - GROWTH_GRAPH_PLOT_LEFT - GROWTH_GRAPH_PLOT_RIGHT;
+const GROWTH_GRAPH_PLOT_HEIGHT = GROWTH_GRAPH_HEIGHT - GROWTH_GRAPH_PLOT_TOP - GROWTH_GRAPH_PLOT_BOTTOM;
 const BOGO_MIN_ATTEMPTS = 1;
 const BOGO_STANDARD_MAX_ATTEMPTS = 999_999_999;
 // At the top end, the live runner works in short CPU batches. This is a
@@ -216,6 +249,18 @@ function getCompletionSweepDuration(valueCount: number) {
   return Math.max(
     COMPLETION_SWEEP_MIN_DURATION,
     Math.max(valueCount, 1) * COMPLETION_SWEEP_MILLISECONDS_PER_BAR,
+  );
+}
+
+function getCompletionSweepNoteIndexes(valueCount: number) {
+  const count = Math.max(valueCount, 1);
+  const audibleCount = Math.min(count, COMPLETION_SWEEP_REFERENCE_NOTE_COUNT);
+  if (audibleCount === 1) return new Set([0]);
+
+  return new Set(
+    Array.from({ length: audibleCount }, (_, index) =>
+      Math.round((index * (count - 1)) / (audibleCount - 1)),
+    ),
   );
 }
 
@@ -1120,6 +1165,12 @@ function formatCount(value: number) {
   return Math.round(value).toLocaleString("en-US");
 }
 
+function formatGrowthSize(value: number) {
+  if (value >= 1_000_000) return (value / 1_000_000).toFixed(2).replace(/\.00$/, "") + "m";
+  if (value >= 1_000) return Math.round(value / 1_000) + "k";
+  return String(value);
+}
+
 function getWorkEstimate(metrics: {
   comparisons: number;
   rankComparisons: number;
@@ -1436,6 +1487,10 @@ export default function Home() {
   const [benchmarkPattern, setBenchmarkPattern] =
     useState<BenchmarkPattern>("random");
   const [benchmarkView, setBenchmarkView] = useState<BenchmarkView>("theory");
+  const [benchmarkTab, setBenchmarkTab] = useState<BenchmarkTab>("table");
+  const [visibleGrowthAlgorithms, setVisibleGrowthAlgorithms] = useState(
+    () => ({ ...DEFAULT_GROWTH_ALGORITHM_VISIBILITY }),
+  );
   const [originalValues, setOriginalValues] = useState(INITIAL_VALUES);
   const [values, setValues] = useState(INITIAL_VALUES);
   const [steps, setSteps] = useState<SortStep[]>([]);
@@ -1460,6 +1515,7 @@ export default function Home() {
   const [practiceDraggingId, setPracticeDraggingId] = useState<string | null>(null);
   const [practiceDragOffset, setPracticeDragOffset] = useState({ x: 0, y: 0 });
   const [practiceDropIndex, setPracticeDropIndex] = useState<number | null>(null);
+  const [practiceDropMode, setPracticeDropMode] = useState<PracticeDropMode | null>(null);
   const [practiceSolved, setPracticeSolved] = useState(false);
   const [practiceFeedback, setPracticeFeedback] = useState<string | null>(null);
   const [practiceUndoPending, setPracticeUndoPending] = useState(false);
@@ -1484,6 +1540,8 @@ export default function Home() {
     pointerId: number;
     startX: number;
     startY: number;
+    anchorX: number;
+    anchorY: number;
     moved: boolean;
   } | null>(null);
   const suppressPracticeClickRef = useRef(false);
@@ -1602,30 +1660,6 @@ export default function Home() {
       }),
     [benchmarkPattern],
   );
-  const selectedBenchmark = useMemo(() => {
-    const benchmarkValues = makeBenchmarkArray(arraySize, benchmarkPattern);
-    const bubble = analyzeBubbleSort(benchmarkValues);
-    const insertion = analyzeInsertionSort(benchmarkValues);
-    const cocktail = analyzeCocktailSort(benchmarkValues);
-    const selection = analyzeSelectionSort(benchmarkValues);
-    const heap = analyzeHeapSort(benchmarkValues);
-    const quick = analyzeQuickSort(benchmarkValues);
-    const pdq = analyzePdqSort(benchmarkValues);
-    const merge = analyzeMergeSort(benchmarkValues);
-    const powersort = analyzePowerSort(benchmarkValues);
-
-    return {
-      bubble: getWorkEstimate(bubble),
-      insertion: getWorkEstimate(insertion),
-      cocktail: getWorkEstimate(cocktail),
-      selection: getWorkEstimate(selection),
-      heap: getWorkEstimate(heap),
-      quick: getWorkEstimate(quick),
-      pdq: getWorkEstimate(pdq),
-      merge: getWorkEstimate(merge),
-      powersort: getWorkEstimate(powersort),
-    } satisfies BenchmarkWork;
-  }, [arraySize, benchmarkPattern]);
   const theoreticalBenchmarkData = useMemo(
     () =>
       THEORY_BENCHMARK_SIZES.map((size) => ({
@@ -1648,21 +1682,48 @@ export default function Home() {
       return difference || BENCHMARK_ALGORITHMS.indexOf(left) - BENCHMARK_ALGORITHMS.indexOf(right);
     });
   }, [displayedBenchmarkData]);
-  const orderedCurrentBenchmarkAlgorithms = useMemo(
-    () =>
-      [...BENCHMARK_ALGORITHMS].sort((left, right) => {
-        const difference = selectedBenchmark[right.key] - selectedBenchmark[left.key];
-        return difference || BENCHMARK_ALGORITHMS.indexOf(left) - BENCHMARK_ALGORITHMS.indexOf(right);
-      }),
-    [selectedBenchmark],
-  );
   const benchmarkMatrixStyle = {
     "--benchmark-columns": displayedBenchmarkData.length,
     minWidth: String(180 + displayedBenchmarkData.length * 118) + "px",
   } as CSSProperties;
-  const selectedBenchmarkMaximum = Math.max(
-    1,
-    ...Object.values(selectedBenchmark),
+  const growthGraphDomain = useMemo(() => {
+    const modeledValues = theoreticalBenchmarkData.flatMap((entry) => Object.values(entry.work));
+    const minimumExponent = Math.floor(Math.log10(Math.max(1, Math.min(...modeledValues))));
+    const maximumExponent = Math.ceil(Math.log10(Math.max(...modeledValues)));
+    const exponentSpan = Math.max(1, maximumExponent - minimumExponent);
+
+    return {
+      minimumExponent,
+      exponentSpan,
+      ticks: Array.from({ length: 5 }, (_, index) => {
+        const ratio = index / 4;
+        const exponent = maximumExponent - exponentSpan * ratio;
+        return {
+          label: formatCount(10 ** exponent),
+          y: GROWTH_GRAPH_PLOT_TOP + GROWTH_GRAPH_PLOT_HEIGHT * ratio,
+        };
+      }),
+    };
+  }, [theoreticalBenchmarkData]);
+  const visibleGrowthSeries = useMemo(
+    () =>
+      BENCHMARK_ALGORITHMS.filter((benchmarkAlgorithm) => visibleGrowthAlgorithms[benchmarkAlgorithm.key]).map(
+        (benchmarkAlgorithm) => ({
+          ...benchmarkAlgorithm,
+          color: BENCHMARK_COLORS[benchmarkAlgorithm.key],
+          points: theoreticalBenchmarkData.map((entry, index) => {
+            const work = entry.work[benchmarkAlgorithm.key];
+            const workExponent = Math.log10(Math.max(work, 1));
+            const x = GROWTH_GRAPH_PLOT_LEFT +
+              (GROWTH_GRAPH_PLOT_WIDTH * index) / Math.max(theoreticalBenchmarkData.length - 1, 1);
+            const y = GROWTH_GRAPH_PLOT_TOP +
+              (1 - (workExponent - growthGraphDomain.minimumExponent) / growthGraphDomain.exponentSpan) *
+                GROWTH_GRAPH_PLOT_HEIGHT;
+            return { size: entry.size, work, x, y };
+          }),
+        }),
+      ),
+    [growthGraphDomain, theoreticalBenchmarkData, visibleGrowthAlgorithms],
   );
 
   const currentStep = useMemo(
@@ -2136,20 +2197,23 @@ export default function Home() {
     if (valuesToScan.length === 0) return;
 
     const spacing = duration / 1_000 / valuesToScan.length;
+    const audibleIndexes = getCompletionSweepNoteIndexes(valuesToScan.length);
+    const noteSpacing = duration / 1_000 / Math.max(audibleIndexes.size, 1);
     const startTime = context.currentTime + COMPLETION_SWEEP_AUDIO_VISUAL_LEAD / 1_000;
     const liveImpactPeak = 0.2 * (volume / 100) ** 2.5;
 
-    // A completion hit uses the same reinforced voice and loudness as a live
-    // sorting move. Each bar gets its own note at the center of its orange
-    // window, so the scan remains a one-to-one visual verification.
+    // The 22-value scan has the desired musical density. Larger rows keep that
+    // same number of evenly spaced notes while their visual scan still visits
+    // every bar, avoiding an increasingly noisy wall of overlapping voices.
     valuesToScan.forEach((value, index) => {
+      if (!audibleIndexes.has(index)) return;
       const frequency = getSortingToneFrequency(value);
-      const requestedDuration = Math.min(0.052, Math.max(0.012, spacing * 0.9));
+      const requestedDuration = Math.min(0.052, Math.max(0.012, noteSpacing * 0.9));
       const actualVoiceDuration = Math.min(
         0.12,
         Math.max(requestedDuration, 4.5 / Math.max(frequency, 1)),
       );
-      const overlap = Math.max(1, actualVoiceDuration / spacing);
+      const overlap = Math.max(1, actualVoiceDuration / noteSpacing);
       const peakGain = liveImpactPeak / Math.sqrt(overlap);
 
       playMusicalVoice(
@@ -2463,6 +2527,7 @@ export default function Home() {
     setPracticeDraggingId(null);
     setPracticeDragOffset({ x: 0, y: 0 });
     setPracticeDropIndex(null);
+    setPracticeDropMode(null);
     practicePointerRef.current = null;
     setPracticeSolved(false);
     setPracticeFeedback(null);
@@ -2583,12 +2648,26 @@ export default function Home() {
     movePracticeItem(practiceSelectedIndex, index);
   }
 
-  function getPracticeDropIndex(clientX: number, clientY: number) {
+  function getPracticeDropTarget(clientX: number, clientY: number): { index: number; mode: PracticeDropMode } | null {
     const board = practiceBoardRef.current;
     if (!board) return null;
 
+    const sourceIndex = practicePointerRef.current?.fromIndex;
+    const blocks = Array.from(board.querySelectorAll<HTMLElement>("[data-practice-index]")).filter(
+      (block) => Number(block.dataset.practiceIndex) !== sourceIndex,
+    );
+    if (!isQuickPractice) {
+      const directBlock = blocks.find((block) => {
+        const rect = block.getBoundingClientRect();
+        return clientX >= rect.left && clientX <= rect.right && clientY >= rect.top && clientY <= rect.bottom;
+      });
+      if (directBlock) {
+        return { index: Number(directBlock.dataset.practiceIndex), mode: "swap" };
+      }
+    }
+
     const candidates = isQuickPractice
-      ? Array.from(board.querySelectorAll<HTMLElement>("[data-practice-index]"))
+      ? blocks
       : Array.from(board.querySelectorAll<HTMLElement>("[data-practice-drop-index]"));
     let nearestIndex: number | null = null;
     let nearestDistance = Infinity;
@@ -2608,7 +2687,8 @@ export default function Home() {
       }
     });
 
-    return nearestIndex;
+    if (nearestIndex === null) return null;
+    return { index: nearestIndex, mode: isQuickPractice ? "swap" : "insert" };
   }
 
   function finishPracticeDrag(cancelled = false) {
@@ -2616,6 +2696,7 @@ export default function Home() {
     if (!drag) return;
 
     const destination = practiceDropIndex;
+    const moveMode = isQuickPractice ? "swap" : practiceDropMode ?? "insert";
     const insertionIndex =
       destination === null
         ? null
@@ -2626,7 +2707,7 @@ export default function Home() {
       !cancelled &&
       drag.moved &&
       destination !== null &&
-      (isQuickPractice
+      (moveMode === "swap"
         ? destination !== drag.fromIndex
         : insertionIndex !== null && insertionIndex !== drag.fromIndex);
     if (shouldMove) {
@@ -2636,7 +2717,7 @@ export default function Home() {
         drag.fromIndex,
         destination,
         false,
-        isQuickPractice ? "swap" : "insert",
+        moveMode,
       );
     }
 
@@ -2645,6 +2726,7 @@ export default function Home() {
     setPracticeDraggingId(null);
     setPracticeDragOffset({ x: 0, y: 0 });
     setPracticeDropIndex(null);
+    setPracticeDropMode(null);
   }
 
   function handlePracticePointerDown(
@@ -2654,33 +2736,39 @@ export default function Home() {
   ) {
     if (practiceFinished || practiceUndoPending || event.button !== 0) return;
     event.currentTarget.setPointerCapture(event.pointerId);
+    const bounds = event.currentTarget.getBoundingClientRect();
     practicePointerRef.current = {
       id,
       fromIndex: index,
       pointerId: event.pointerId,
       startX: event.clientX,
       startY: event.clientY,
+      anchorX: bounds.left + bounds.width / 2 - event.clientX,
+      anchorY: bounds.top + bounds.height / 2 - event.clientY,
       moved: false,
     };
     setPracticeDragIndex(index);
     setPracticeDraggingId(id);
     setPracticeDragOffset({ x: 0, y: 0 });
     setPracticeDropIndex(index);
+    setPracticeDropMode(isQuickPractice ? "swap" : "insert");
   }
 
   function handlePracticePointerMove(event: ReactPointerEvent<HTMLButtonElement>) {
     const drag = practicePointerRef.current;
     if (!drag || drag.pointerId !== event.pointerId) return;
 
-    const x = event.clientX - drag.startX;
-    const y = event.clientY - drag.startY;
-    if (Math.abs(x) + Math.abs(y) > 5) drag.moved = true;
+    const deltaX = event.clientX - drag.startX;
+    const deltaY = event.clientY - drag.startY;
+    if (Math.abs(deltaX) + Math.abs(deltaY) > 5) drag.moved = true;
     if (!drag.moved) return;
 
     event.preventDefault();
-    setPracticeDragOffset({ x, y });
-    const destination = getPracticeDropIndex(event.clientX, event.clientY);
+    setPracticeDragOffset({ x: deltaX + drag.anchorX, y: deltaY + drag.anchorY });
+    const target = getPracticeDropTarget(event.clientX, event.clientY);
+    const destination = target?.index ?? null;
     setPracticeDropIndex((current) => (current === destination ? current : destination));
+    setPracticeDropMode((current) => (current === target?.mode ? current : target?.mode ?? null));
   }
 
   function advancePracticeStep() {
@@ -2694,6 +2782,7 @@ export default function Home() {
       setPracticeDraggingId(null);
       setPracticeDragOffset({ x: 0, y: 0 });
       setPracticeDropIndex(null);
+      setPracticeDropMode(null);
       practicePointerRef.current = null;
       setPracticeSolved(false);
       return;
@@ -2706,6 +2795,7 @@ export default function Home() {
     setPracticeDraggingId(null);
     setPracticeDragOffset({ x: 0, y: 0 });
     setPracticeDropIndex(null);
+    setPracticeDropMode(null);
     practicePointerRef.current = null;
     setPracticeSolved(false);
     setPracticeFeedback(null);
@@ -3187,7 +3277,6 @@ export default function Home() {
                 <span className="control-label">
                   <span className="control-label__name">
                     Speed
-                    <small>Percent</small>
                   </span>
                   {prefersReducedMotion ? (
                     <strong>instant</strong>
@@ -3542,7 +3631,7 @@ export default function Home() {
             <p className="practice-lab__help">
               {isQuickPractice
                 ? "The gold block is the parked pivot. Make the one safe swap for this partition; a different move slides back immediately, so the next pivot can never become stuck. You can start the swap from either block."
-                : "Click two blocks to swap them, or drag a block into any glowing gap between blocks. The final arrangement—not which value you started with—decides whether the move stays."}
+                : "Click two blocks or drop one directly onto another to swap them. Drop into any glowing gap to shift the row instead. The final arrangement—not which value you started with—decides whether the move stays."}
             </p>
             <div
               className={"practice-board " + (practiceDraggingId ? "practice-board--dragging" : "")}
@@ -3572,7 +3661,7 @@ export default function Home() {
                             <span
                               className={
                                 "practice-drop-slot " +
-                                (practiceDropIndex === index && practiceDraggingId
+                                (practiceDropMode === "insert" && practiceDropIndex === index && practiceDraggingId
                                   ? "practice-drop-slot--target"
                                   : "")
                               }
@@ -3589,7 +3678,7 @@ export default function Home() {
                             (isQuickPractice && !isInQuickRange ? "practice-block--quick-waiting " : "") +
                             (practiceSelectedIndex === index ? "practice-block--selected " : "") +
                             (isDragging ? "practice-block--dragging " : "") +
-                            (isQuickPractice && practiceDropIndex === index && practiceDragIndex !== index
+                            ((isQuickPractice || practiceDropMode === "swap") && practiceDropIndex === index && practiceDragIndex !== index
                               ? "practice-block--drop-target"
                               : "")
                           }
@@ -3630,7 +3719,7 @@ export default function Home() {
                 <span
                   className={
                     "practice-drop-slot " +
-                    (practiceDropIndex === practiceValues.length && practiceDraggingId
+                    (practiceDropMode === "insert" && practiceDropIndex === practiceValues.length && practiceDraggingId
                       ? "practice-drop-slot--target"
                       : "")
                   }
@@ -3665,23 +3754,25 @@ export default function Home() {
               <h2 id="comparison-title">Compare the work behind the motion.</h2>
               <p>
                 Every deterministic algorithm receives the same permutation of 1 through n for the
-                selected arrangement. Switch between counted work through 256 values and an
-                illustrative growth view through 65,536 values. Bogo Sort stays out of both views
-                because its expected work grows factorially.
+                selected arrangement. Inspect counted work through 256 values, or trace illustrative
+                growth from n=256 to n=1,048,576. Bogo Sort stays out because its expected work grows
+                factorially.
               </p>
             </div>
             <div className="benchmark-controls">
-              <label className="benchmark-select">
-                <span>Chart view</span>
-                <select
-                  value={benchmarkView}
-                  onChange={(event) => setBenchmarkView(event.target.value as BenchmarkView)}
-                  aria-label="Efficiency chart view"
-                >
-                  <option value="theory">Illustrative growth through 65,536</option>
-                  <option value="measured">Counted work through 256</option>
-                </select>
-              </label>
+              {benchmarkTab === "table" && (
+                <label className="benchmark-select">
+                  <span>Table data</span>
+                  <select
+                    value={benchmarkView}
+                    onChange={(event) => setBenchmarkView(event.target.value as BenchmarkView)}
+                    aria-label="Efficiency table data"
+                  >
+                    <option value="theory">Illustrative growth to n=1,048,576</option>
+                    <option value="measured">Counted work through n=256</option>
+                  </select>
+                </label>
+              )}
               <label className="benchmark-select">
                 <span>Test arrangement</span>
                 <select
@@ -3697,72 +3788,194 @@ export default function Home() {
             </div>
           </div>
 
-          <div
-            className="benchmark-chart"
-            role="img"
-            aria-label={
-              benchmarkView === "theory"
-                ? "Illustrative work growth, ordered from highest to lowest modeled work, for " + benchmarkPattern + " arrays from 16 through 65,536 values."
-                : "Counted work, ordered from highest to lowest counted work, for " + benchmarkPattern + " arrays from 16 through 256 values."
-            }
-          >
-            <p className="benchmark-chart__note">
-              {benchmarkView === "theory"
-                ? "This view illustrates each algorithm's growth shape for the selected arrangement. Meter length uses a log scale so O(n log n) curves remain visible next to quadratic ones; the rounded number is a relative model unit, not a timed result or an exact operation total."
-                : "Each column applies this visualizer's counted-work model at that exact size: value comparisons and primary writes. Meter length uses a log scale so faster algorithms remain visible; the rounded number is not browser runtime."}
-            </p>
-            <p className="benchmark-chart__order">Rows run from highest counted work at the top to lowest at the bottom, based on the rightmost size.</p>
-            <div className="benchmark-matrix" style={benchmarkMatrixStyle}>
-              <div className="benchmark-matrix__header">
-                <span>Algorithm</span>
-                {displayedBenchmarkData.map((entry) => <span key={entry.size}>n={formatCount(entry.size)}</span>)}
-              </div>
-              {orderedBenchmarkAlgorithms.map((benchmarkAlgorithm) => (
-                <div className="benchmark-matrix__row" key={benchmarkAlgorithm.key}>
-                  <span className="benchmark-matrix__label">
-                    <i className={"benchmark-legend__swatch benchmark-legend__swatch--" + benchmarkAlgorithm.className} />
-                    {benchmarkAlgorithm.label}
-                  </span>
-                  {displayedBenchmarkData.map((entry) => {
-                    const work = entry.work[benchmarkAlgorithm.key];
-                    const columnMaximum = Math.max(1, ...Object.values(entry.work));
-                    const ratio = Math.log1p(work) / Math.log1p(columnMaximum);
-                    return (
-                      <span className="benchmark-matrix__cell" key={entry.size}>
-                        <strong>{formatCount(work)}</strong>
-                        <i>
-                          <b
-                            className={"benchmark-meter--" + benchmarkAlgorithm.className}
-                            style={{ width: String(ratio * 100) + "%" }}
-                          />
-                        </i>
+          <div className="benchmark-tabs" role="tablist" aria-label="Efficiency Lab view">
+            <button
+              className={"benchmark-tab " + (benchmarkTab === "table" ? "benchmark-tab--active" : "")}
+              id="efficiency-table-tab"
+              type="button"
+              role="tab"
+              aria-selected={benchmarkTab === "table"}
+              aria-controls="efficiency-table-panel"
+              onClick={() => setBenchmarkTab("table")}
+            >
+              Work table
+            </button>
+            <button
+              className={"benchmark-tab " + (benchmarkTab === "lines" ? "benchmark-tab--active" : "")}
+              id="efficiency-lines-tab"
+              type="button"
+              role="tab"
+              aria-selected={benchmarkTab === "lines"}
+              aria-controls="efficiency-lines-panel"
+              onClick={() => setBenchmarkTab("lines")}
+            >
+              Growth lines
+            </button>
+          </div>
+
+          {benchmarkTab === "table" ? (
+            <div id="efficiency-table-panel" role="tabpanel" aria-labelledby="efficiency-table-tab">
+              <div
+                className="benchmark-chart"
+                role="img"
+                aria-label={
+                  benchmarkView === "theory"
+                    ? "Illustrative work growth, ordered from highest to lowest modeled work, for " + benchmarkPattern + " arrays from 256 through 1,048,576 values."
+                    : "Counted work, ordered from highest to lowest counted work, for " + benchmarkPattern + " arrays from 16 through 256 values."
+                }
+              >
+                <p className="benchmark-chart__note">
+                  {benchmarkView === "theory"
+                    ? "This view illustrates each algorithm's growth shape for the selected arrangement. Meter length uses a log scale so O(n log n) curves remain visible next to quadratic ones; the rounded number is a relative model unit, not a timed result or an exact operation total."
+                    : "Each column applies this visualizer's counted-work model at that exact size: value comparisons and primary writes. Meter length uses a log scale so faster algorithms remain visible; the rounded number is not browser runtime."}
+                </p>
+                <p className="benchmark-chart__order">
+                  {benchmarkView === "theory"
+                    ? "Rows run from most modeled work at the top to least at the bottom, based on the largest n."
+                    : "Rows run from highest counted work at the top to lowest at the bottom, based on the rightmost size."}
+                </p>
+                <div className="benchmark-matrix" style={benchmarkMatrixStyle}>
+                  <div className="benchmark-matrix__header">
+                    <span>Algorithm</span>
+                    {displayedBenchmarkData.map((entry) => <span key={entry.size}>n={formatCount(entry.size)}</span>)}
+                  </div>
+                  {orderedBenchmarkAlgorithms.map((benchmarkAlgorithm) => (
+                    <div className="benchmark-matrix__row" key={benchmarkAlgorithm.key}>
+                      <span className="benchmark-matrix__label">
+                        <i className={"benchmark-legend__swatch benchmark-legend__swatch--" + benchmarkAlgorithm.className} />
+                        {benchmarkAlgorithm.label}
                       </span>
+                      {displayedBenchmarkData.map((entry) => {
+                        const work = entry.work[benchmarkAlgorithm.key];
+                        const columnMaximum = Math.max(1, ...Object.values(entry.work));
+                        const ratio = Math.log1p(work) / Math.log1p(columnMaximum);
+                        return (
+                          <span className="benchmark-matrix__cell" key={entry.size}>
+                            <strong>{formatCount(work)}</strong>
+                            <i>
+                              <b
+                                className={"benchmark-meter--" + benchmarkAlgorithm.className}
+                                style={{ width: String(ratio * 100) + "%" }}
+                              />
+                            </i>
+                          </span>
+                        );
+                      })}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          ) : (
+            <div id="efficiency-lines-panel" className="growth-panel" role="tabpanel" aria-labelledby="efficiency-lines-tab">
+              <div className="growth-panel__header">
+                <div>
+                  <p className="growth-panel__eyebrow">ILLUSTRATIVE MODEL · N=256–1,048,576</p>
+                  <p className="growth-panel__copy">
+                    Workload is on the vertical axis and array size is on the horizontal axis. Both use a log scale so the faster curves stay readable beside quadratic ones.
+                  </p>
+                </div>
+                <div className="growth-toggle-list" role="group" aria-label="Algorithms shown in the growth chart">
+                  {BENCHMARK_ALGORITHMS.map((benchmarkAlgorithm) => {
+                    const isVisible = visibleGrowthAlgorithms[benchmarkAlgorithm.key];
+                    return (
+                      <button
+                        className={"growth-toggle " + (isVisible ? "growth-toggle--active" : "")}
+                        key={benchmarkAlgorithm.key}
+                        type="button"
+                        aria-pressed={isVisible}
+                        onClick={() => setVisibleGrowthAlgorithms((current) => ({
+                          ...current,
+                          [benchmarkAlgorithm.key]: !current[benchmarkAlgorithm.key],
+                        }))}
+                        style={{ "--growth-line-color": BENCHMARK_COLORS[benchmarkAlgorithm.key] } as CSSProperties}
+                      >
+                        <i className={"benchmark-legend__swatch benchmark-legend__swatch--" + benchmarkAlgorithm.className} />
+                        {benchmarkAlgorithm.label}
+                      </button>
                     );
                   })}
                 </div>
-              ))}
-            </div>
-          </div>
+              </div>
 
-          <div className="benchmark-current" aria-label={"Current benchmark at " + arraySize + " values"}>
-            <p className="benchmark-current__title">Counted totals at n={arraySize} · highest to lowest work</p>
-            {orderedCurrentBenchmarkAlgorithms.map((benchmarkAlgorithm) => {
-              const work = selectedBenchmark[benchmarkAlgorithm.key];
-              return (
-                <div key={benchmarkAlgorithm.key}>
-                  <span>AT n={arraySize}</span>
-                  <strong>{benchmarkAlgorithm.label}</strong>
-                  <i>
-                    <b
-                      className={"benchmark-current__" + benchmarkAlgorithm.className}
-                      style={{ width: String((work / selectedBenchmarkMaximum) * 100) + "%" }}
-                    />
-                  </i>
-                  <em>{formatCount(work)} counted work units</em>
+              <div className="growth-chart__scroller">
+                <div
+                  className="growth-chart"
+                  role="img"
+                  aria-label={
+                    visibleGrowthSeries.length
+                      ? "Illustrative workload line chart with logarithmic workload and array-size axes. Showing " + visibleGrowthSeries.map((series) => series.label).join(", ") + "."
+                      : "Illustrative workload line chart. No algorithms are currently selected."
+                  }
+                  style={{ width: String(GROWTH_GRAPH_WIDTH) + "px", height: String(GROWTH_GRAPH_HEIGHT) + "px" }}
+                >
+                  <span className="growth-chart__axis-title growth-chart__axis-title--y">WORKLOAD · LOG SCALE</span>
+                  {growthGraphDomain.ticks.map((tick) => (
+                    <Fragment key={tick.label}>
+                      <i className="growth-chart__gridline" style={{ top: String(tick.y) + "px" }} />
+                      <span className="growth-chart__y-label" style={{ top: String(tick.y) + "px" }}>{tick.label}</span>
+                    </Fragment>
+                  ))}
+                  {visibleGrowthSeries.map((series) => (
+                    <div
+                      className="growth-chart__series"
+                      key={series.key}
+                      aria-hidden="true"
+                      style={{ "--growth-line-color": series.color } as CSSProperties}
+                    >
+                      {series.points.slice(0, -1).map((point, index) => {
+                        const nextPoint = series.points[index + 1];
+                        const deltaX = nextPoint.x - point.x;
+                        const deltaY = nextPoint.y - point.y;
+                        const length = Math.hypot(deltaX, deltaY);
+                        const angle = Math.atan2(deltaY, deltaX) * (180 / Math.PI);
+                        return (
+                          <i
+                            className="growth-chart__segment"
+                            key={point.size}
+                            style={{
+                              left: String(point.x) + "px",
+                              top: String(point.y) + "px",
+                              width: String(length) + "px",
+                              transform: "translateY(-50%) rotate(" + String(angle) + "deg)",
+                            }}
+                          />
+                        );
+                      })}
+                      {series.points.map((point) => (
+                        <i
+                          className="growth-chart__point"
+                          key={point.size}
+                          title={series.label + ": n=" + formatCount(point.size) + ", " + formatCount(point.work) + " modeled work"}
+                          style={{ left: String(point.x) + "px", top: String(point.y) + "px" }}
+                        />
+                      ))}
+                    </div>
+                  ))}
+                  {theoreticalBenchmarkData.map((entry, index) => {
+                    const x = GROWTH_GRAPH_PLOT_LEFT +
+                      (GROWTH_GRAPH_PLOT_WIDTH * index) / Math.max(theoreticalBenchmarkData.length - 1, 1);
+                    return (
+                      <Fragment key={entry.size}>
+                        <i className="growth-chart__x-gridline" style={{ left: String(x) + "px" }} />
+                        <span
+                          className="growth-chart__x-label"
+                          title={"n=" + formatCount(entry.size)}
+                          style={{ left: String(x) + "px" }}
+                        >
+                          {formatGrowthSize(entry.size)}
+                        </span>
+                      </Fragment>
+                    );
+                  })}
+                  <span className="growth-chart__axis-title growth-chart__axis-title--x">ARRAY SIZE, N · LOG SCALE</span>
+                  {visibleGrowthSeries.length === 0 && (
+                    <p className="growth-chart__empty">Select an algorithm above to draw its workload line.</p>
+                  )}
                 </div>
-              );
-            })}
-          </div>
+              </div>
+            </div>
+          )}
         </section>
 
         <p className="sr-only" aria-live="polite" aria-atomic="true">{liveStatus}</p>

@@ -238,13 +238,13 @@ button:disabled {
   background: rgba(255, 255, 255, 0.018);
 }
 
-/* Bogo uses a full-width live status strip above its tall control stack. */
+/* Bogo's tall control stack leaves a live-status lane on the left. */
 .control-deck--bogo {
   display: grid;
-  grid-template-columns: minmax(220px, 0.72fr) minmax(0, 2.28fr);
-  grid-template-rows: auto minmax(0, 1fr);
+  grid-template-columns: minmax(250px, 0.82fr) minmax(0, 2.18fr);
+  grid-template-rows: minmax(0, 1fr) auto;
   grid-template-areas:
-    "timer timer"
+    "timer controls"
     "intro controls";
   align-items: stretch;
   gap: 18px 28px;
@@ -286,9 +286,10 @@ button:disabled {
 .bogo-run-timer {
   grid-area: timer;
   display: grid;
-  grid-template-columns: max-content minmax(max-content, 1fr) minmax(190px, 1.15fr);
-  align-items: center;
-  gap: 4px 20px;
+  grid-template-columns: max-content minmax(0, 1fr);
+  grid-template-rows: auto auto;
+  align-content: start;
+  gap: 7px 14px;
   width: 100%;
   min-width: 0;
   padding: 14px 15px;
@@ -314,7 +315,7 @@ button:disabled {
 .bogo-run-timer strong {
   grid-column: 2;
   grid-row: 1;
-  min-width: 0;
+  min-width: max-content;
   color: #fff2cb;
   font-family: var(--font-display), serif;
   font-size: clamp(1.28rem, 2.4vw, 1.86rem);
@@ -325,15 +326,15 @@ button:disabled {
 }
 
 .bogo-run-timer small {
-  grid-column: 3;
-  grid-row: 1;
+  grid-column: 1 / -1;
+  grid-row: 2;
   min-width: 0;
   max-width: none;
   color: #f3d9a3;
   font-size: 0.62rem;
   font-weight: 700;
   line-height: 1.28;
-  text-align: right;
+  text-align: left;
 }
 
 .bogo-run-timer--on-track {
@@ -1810,6 +1811,248 @@ input:focus-visible {
   letter-spacing: 0.035em;
 }
 
+.benchmark-tabs {
+  display: inline-flex;
+  gap: 4px;
+  margin-top: 26px;
+  padding: 4px;
+  border: 1px solid rgba(185, 198, 255, 0.18);
+  border-radius: 11px;
+  background: rgba(7, 10, 27, 0.45);
+}
+
+.benchmark-tab {
+  min-height: 34px;
+  padding: 7px 12px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  color: #9ca7ca;
+  background: transparent;
+  font: inherit;
+  font-size: 0.66rem;
+  font-weight: 850;
+  letter-spacing: 0.045em;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition: border-color 160ms ease, color 160ms ease, background 160ms ease, box-shadow 160ms ease;
+}
+
+.benchmark-tab:hover {
+  color: #e2e8ff;
+}
+
+.benchmark-tab:focus-visible,
+.growth-toggle:focus-visible {
+  outline: 2px solid #9debf8;
+  outline-offset: 2px;
+}
+
+.benchmark-tab--active {
+  border-color: rgba(141, 217, 240, 0.48);
+  color: #e5fbff;
+  background: rgba(87, 180, 209, 0.16);
+  box-shadow: inset 0 1px rgba(223, 255, 255, 0.12), 0 0 13px rgba(86, 204, 236, 0.12);
+}
+
+.growth-panel {
+  margin-top: 26px;
+}
+
+.growth-panel__header {
+  display: grid;
+  grid-template-columns: minmax(180px, 0.86fr) minmax(0, 1.54fr);
+  gap: 18px 24px;
+  align-items: start;
+}
+
+.growth-panel__eyebrow {
+  margin: 0;
+  color: #9be8f5;
+  font-size: 0.59rem;
+  font-weight: 900;
+  letter-spacing: 0.12em;
+  line-height: 1.4;
+}
+
+.growth-panel__copy {
+  max-width: 410px;
+  margin: 8px 0 0;
+  color: #9ba6c8;
+  font-size: 0.72rem;
+  line-height: 1.52;
+}
+
+.growth-toggle-list {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 7px;
+}
+
+.growth-toggle {
+  display: inline-flex;
+  align-items: center;
+  min-height: 34px;
+  gap: 6px;
+  padding: 6px 9px;
+  border: 1px solid rgba(176, 189, 239, 0.22);
+  border-radius: 8px;
+  color: #aeb7d5;
+  background: rgba(9, 12, 29, 0.46);
+  font: inherit;
+  font-size: 0.63rem;
+  font-weight: 800;
+  cursor: pointer;
+  transition: border-color 160ms ease, color 160ms ease, background 160ms ease, box-shadow 160ms ease, opacity 160ms ease;
+}
+
+.growth-toggle:hover {
+  color: #e5eaff;
+  border-color: rgba(198, 211, 255, 0.46);
+}
+
+.growth-toggle--active {
+  border-color: var(--growth-line-color);
+  color: #f4f6ff;
+  background: color-mix(in srgb, var(--growth-line-color) 16%, rgba(9, 12, 29, 0.74));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--growth-line-color) 25%, transparent), 0 0 12px color-mix(in srgb, var(--growth-line-color) 18%, transparent);
+}
+
+.growth-toggle:not(.growth-toggle--active) {
+  opacity: 0.68;
+}
+
+.growth-chart__scroller {
+  margin-top: 20px;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  padding-bottom: 5px;
+}
+
+.growth-chart {
+  position: relative;
+  overflow: hidden;
+  border: 1px solid rgba(193, 206, 255, 0.22);
+  border-radius: 14px;
+  background:
+    radial-gradient(circle at 74% 18%, rgba(72, 198, 228, 0.08), transparent 37%),
+    linear-gradient(180deg, rgba(14, 19, 43, 0.88), rgba(7, 10, 27, 0.72));
+}
+
+.growth-chart__gridline,
+.growth-chart__x-gridline {
+  position: absolute;
+  z-index: 0;
+  display: block;
+  background: rgba(185, 198, 244, 0.12);
+}
+
+.growth-chart__gridline {
+  right: 28px;
+  left: 86px;
+  height: 1px;
+}
+
+.growth-chart__x-gridline {
+  top: 24px;
+  bottom: 52px;
+  width: 1px;
+}
+
+.growth-chart__series {
+  position: absolute;
+  z-index: 2;
+  inset: 0;
+  pointer-events: none;
+}
+
+.growth-chart__segment {
+  position: absolute;
+  z-index: 1;
+  display: block;
+  height: 3px;
+  border-radius: 999px;
+  background: var(--growth-line-color);
+  box-shadow: 0 0 10px color-mix(in srgb, var(--growth-line-color) 54%, transparent);
+  transform-origin: left center;
+}
+
+.growth-chart__point {
+  position: absolute;
+  z-index: 2;
+  display: block;
+  width: 9px;
+  height: 9px;
+  border: 2px solid #12182f;
+  border-radius: 50%;
+  background: var(--growth-line-color);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--growth-line-color) 75%, #ffffff), 0 0 10px color-mix(in srgb, var(--growth-line-color) 55%, transparent);
+  transform: translate(-50%, -50%);
+}
+
+.growth-chart__y-label,
+.growth-chart__x-label,
+.growth-chart__axis-title {
+  position: absolute;
+  z-index: 3;
+  color: #8e99bc;
+  font-size: 0.58rem;
+  font-weight: 800;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.growth-chart__y-label {
+  left: 12px;
+  width: 60px;
+  text-align: right;
+  transform: translateY(-50%);
+}
+
+.growth-chart__x-label {
+  top: 316px;
+  color: #aab4d3;
+  text-align: center;
+  transform: translateX(-50%);
+}
+
+.growth-chart__axis-title {
+  color: #6f7a9f;
+  font-size: 0.53rem;
+  letter-spacing: 0.1em;
+}
+
+.growth-chart__axis-title--y {
+  top: 125px;
+  left: 10px;
+  transform: rotate(-90deg) translate(-50%, 0);
+  transform-origin: left top;
+}
+
+.growth-chart__axis-title--x {
+  bottom: 12px;
+  left: 489px;
+  transform: translateX(-50%);
+}
+
+.growth-chart__empty {
+  position: absolute;
+  z-index: 4;
+  top: 50%;
+  left: 50%;
+  width: 310px;
+  margin: 0;
+  padding: 12px 15px;
+  border: 1px solid rgba(176, 189, 239, 0.24);
+  border-radius: 10px;
+  color: #bdc7e6;
+  background: rgba(10, 14, 32, 0.86);
+  font-size: 0.74rem;
+  font-weight: 700;
+  text-align: center;
+  transform: translate(-50%, -50%);
+}
+
 .benchmark-matrix {
   min-width: 760px;
   overflow: hidden;
@@ -2360,6 +2603,14 @@ input:focus-visible {
   .benchmark-controls {
     justify-content: start;
   }
+
+  .growth-panel__header {
+    grid-template-columns: 1fr;
+  }
+
+  .growth-toggle-list {
+    justify-content: flex-start;
+  }
 }
 
 @media (max-width: 700px) {
@@ -2394,26 +2645,23 @@ input:focus-visible {
 
   .control-deck--bogo .bogo-run-timer {
     width: 100%;
-    grid-template-columns: minmax(0, 1fr);
-    gap: 6px;
-  }
-
-  .bogo-run-timer > span,
-  .bogo-run-timer strong,
-  .bogo-run-timer small {
-    grid-column: 1;
+    grid-template-columns: max-content minmax(0, 1fr);
+    gap: 7px 12px;
   }
 
   .bogo-run-timer > span {
+    grid-column: 1;
     grid-row: 1;
   }
 
   .bogo-run-timer strong {
-    grid-row: 2;
+    grid-column: 2;
+    grid-row: 1;
   }
 
   .bogo-run-timer small {
-    grid-row: 3;
+    grid-column: 1 / -1;
+    grid-row: 2;
   }
 
   .controls {
@@ -2608,5 +2856,28 @@ input:focus-visible {
 
   .benchmark-current {
     grid-template-columns: 1fr;
+  }
+
+  .benchmark-tabs {
+    width: 100%;
+  }
+
+  .benchmark-tab {
+    flex: 1;
+  }
+
+  .growth-toggle-list {
+    gap: 6px;
+  }
+
+  .growth-toggle {
+    min-height: 36px;
+    padding-right: 8px;
+    padding-left: 8px;
+  }
+
+  .growth-chart__scroller {
+    margin-right: -2px;
+    margin-left: -2px;
   }
 }
