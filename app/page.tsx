@@ -3420,6 +3420,13 @@ export default function Home() {
     id: string,
   ) {
     if (practiceFinished || practiceUndoPending || event.button !== 0) return;
+
+    // A block that just changed places is still allowed to finish its brief
+    // FLIP placement animation. If the learner grabs it during that window,
+    // the Web Animations transform would otherwise take precedence over the
+    // drag's inline transform. Cancel it before measuring the pickup point so
+    // every value—including Bubble's newly placed 1—can be picked up at once.
+    event.currentTarget.getAnimations().forEach((animation) => animation.cancel());
     event.currentTarget.setPointerCapture(event.pointerId);
     const bounds = event.currentTarget.getBoundingClientRect();
     practicePointerRef.current = {

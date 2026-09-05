@@ -82,6 +82,14 @@ test("one shared drop resolver distinguishes direct swaps from between-block ins
     index: 1,
     mode: "swap",
   });
+
+  // Bubble's first lesson move is commonly made by picking up 1 (slot 2)
+  // and dropping it directly on 4 (slot 1). The source direction must not
+  // change that direct-drop result.
+  assert.deepEqual(resolvePracticeDropTarget(44, 44, 1, blocks, gaps, blocks[1]), {
+    index: 0,
+    mode: "swap",
+  });
 });
 
 test("the floating source never becomes its own direct drop target", () => {
