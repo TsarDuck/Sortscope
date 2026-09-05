@@ -626,7 +626,7 @@ const ALGORITHM_DETAILS: Record<AlgorithmId, AlgorithmDetails> = {
     stageLabel: "sweep",
     stageDescription: "forward or backward pass",
     eyebrow: "THE BIG IDEA",
-    learnTitle: "Bubble both ways.",
+    learnTitle: "Shake it like a Polaroid picture.",
     learnCopy: [
       "Cocktail sort is bubble sort in two directions. On a forward sweep it compares neighbors from left to right and swaps a pair when the left value is larger. Large values therefore drift toward the right edge.",
       "It then turns around. The backward sweep compares neighbors from right to left, letting small values drift toward the left edge. After a forward and backward pair, both outer edges are more settled, so later sweeps only need to inspect the middle.",
