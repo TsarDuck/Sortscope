@@ -312,6 +312,21 @@ test("rows above the default detail size use compact visual sequences", () => {
   assert.ok(buildMergeSortSteps(compact).length < buildMergeSortSteps(detailed).length);
 });
 
+test("quick sort marks in-place values for rendering without changing its work totals", () => {
+  const source = [3, 1, 2, 4, 5];
+  const steps = buildQuickSortSteps(source);
+  const metrics = analyzeQuickSort(source);
+  const firstStep = steps[0];
+  const finalStep = steps.at(-1);
+
+  // 4 and 5 begin in their final slots, even though neither needs to be the
+  // first pivot. This is a renderer-only hint, not a sorting operation.
+  assert.deepEqual(firstStep.visualSettled, [3, 4]);
+  assert.deepEqual(finalStep?.visualSettled, [0, 1, 2, 3, 4]);
+  assert.equal(finalStep?.comparisons, metrics.comparisons);
+  assert.equal(finalStep?.writes, metrics.writes);
+});
+
 test("sorting metric analyzers preserve a clean 1 through 256 final line", () => {
   const source = Array.from({ length: 256 }, (_, index) => 256 - index);
   const expected = Array.from({ length: 256 }, (_, index) => index + 1);

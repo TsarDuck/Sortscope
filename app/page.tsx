@@ -119,6 +119,7 @@ type SortStep = {
   groups?: MeanGroup[];
   outliers?: number[];
   settled?: number[];
+  visualSettled?: number[];
   rangeStart?: number;
   rangeEnd?: number;
 };
@@ -140,7 +141,10 @@ const AUDIBLE_PHASES: StepPhase[] = [
 const DEFAULT_ARRAY_SIZE = 24;
 const DEFAULT_SPEED = 62;
 const BOGO_MAX_ARRAY_SIZE = 24;
-const COMPLETION_SWEEP_DURATION = 1_050;
+const COMPLETION_SWEEP_MIN_DURATION = 1_050;
+const COMPLETION_SWEEP_MILLISECONDS_PER_BAR = 18;
+const COMPLETION_SWEEP_AUDIO_VISUAL_LEAD = 24;
+const COMPLETION_SWEEP_RELEASE_TAIL = 70;
 const BOGO_COMPLETION_SWEEP_DELAY = 720;
 const BENCHMARK_SIZES = [16, 32, 64, 128, 256];
 const THEORY_BENCHMARK_SIZES = [16, 64, 256, 1_024, 4_096, 16_384, 65_536];
@@ -221,6 +225,13 @@ function getBogoExpectedShuffles(size: number) {
   }
 
   return possibilities;
+}
+
+function getCompletionSweepDuration(valueCount: number) {
+  return Math.max(
+    COMPLETION_SWEEP_MIN_DURATION,
+    Math.max(valueCount, 1) * COMPLETION_SWEEP_MILLISECONDS_PER_BAR,
+  );
 }
 
 function getBogoSlowMotionDelay(speed: number) {
@@ -1130,7 +1141,7 @@ function getBarClass(
     if (step.phase === "complete") return "bar--sorted";
     // A settled pivot is in its final index. Keep that proof visible at every
     // array size while the active pivot and swaps show the current partition.
-    if (step.settled?.includes(index)) {
+    if (step.settled?.includes(index) || step.visualSettled?.includes(index)) {
       return "bar--sorted";
     }
     if (step.phase === "select" && index === step.inserting) return "bar--key";
@@ -1299,6 +1310,8 @@ export default function Home() {
   const completionSweepStartedRef = useRef(false);
   const completionSweepStartTimerRef = useRef<number | null>(null);
   const completionSweepEndTimerRef = useRef<number | null>(null);
+  const completionSweepRunRef = useRef(0);
+  const completionSweepSourcesRef = useRef(new Set<OscillatorNode>());
   const meanBarElementsRef = useRef(new Map<number, HTMLDivElement>());
   const meanBarPositionsRef = useRef(new Map<number, number>());
   const motionBarElementsRef = useRef(new Map<string, HTMLDivElement>());
@@ -1462,6 +1475,8 @@ export default function Home() {
   );
   const visibleValues = currentStep.values;
   const renderedBarItems = getRenderedBarItems(currentStep);
+  const completionSweepDuration = getCompletionSweepDuration(renderedBarItems.length);
+  const completionSweepStepDuration = completionSweepDuration / Math.max(renderedBarItems.length, 1);
   const previousVisualStep = !isBogo && stepIndex > 0 ? steps[stepIndex - 1] : null;
   const previousRenderedBarItems = previousVisualStep
     ? getRenderedBarItems(previousVisualStep)
@@ -1509,17 +1524,7 @@ export default function Home() {
 
     const beginSweep = () => {
       completionSweepStartTimerRef.current = null;
-      setCompletionSweepActive(true);
-
-      if (soundVolumeRef.current > 0) {
-        const context = ensureAudioContext();
-        void context.resume().then(() => playCompletionSweepSound(currentStep.values)).catch(() => undefined);
-      }
-
-      completionSweepEndTimerRef.current = window.setTimeout(() => {
-        completionSweepEndTimerRef.current = null;
-        setCompletionSweepActive(false);
-      }, COMPLETION_SWEEP_DURATION);
+      startCompletionSweep(currentStep.values, completionSweepDuration);
     };
 
     if (isBogo) {
@@ -1531,7 +1536,7 @@ export default function Home() {
     }
 
     beginSweep();
-  }, [currentStep.phase, isBogo, runState]);
+  }, [completionSweepDuration, currentStep.phase, currentStep.values, isBogo, prefersReducedMotion, runState]);
 
   useLayoutEffect(() => {
     const captureMeanBarPositions = () => {
@@ -1748,7 +1753,18 @@ export default function Home() {
           ...(denseBarTransitionStyle ?? {}),
           "--bar-slide-duration": String(motionSlideDuration) + "ms",
         } as CSSProperties)
-    : denseBarTransitionStyle;
+      : denseBarTransitionStyle;
+  const completionSweepTimingStyle = {
+    "--completion-sweep-duration": String(completionSweepDuration) + "ms",
+    "--completion-sweep-lead": String(COMPLETION_SWEEP_AUDIO_VISUAL_LEAD) + "ms",
+  } as CSSProperties;
+  const activeBarTransitionStyle =
+    completionSweepActive && !prefersReducedMotion
+      ? ({
+          ...(barTransitionStyle ?? {}),
+          ...completionSweepTimingStyle,
+        } as CSSProperties)
+      : barTransitionStyle;
   const progress =
     runState === "complete"
       ? 100
@@ -1792,8 +1808,44 @@ export default function Home() {
       window.clearTimeout(completionSweepEndTimerRef.current);
       completionSweepEndTimerRef.current = null;
     }
+    completionSweepRunRef.current += 1;
+    stopCompletionSweepSound();
     completionSweepStartedRef.current = false;
     setCompletionSweepActive(false);
+  }
+
+  function stopCompletionSweepSound() {
+    completionSweepSourcesRef.current.forEach((source) => {
+      source.onended = null;
+      try {
+        source.stop();
+      } catch {
+        // A source that already ended does not need any further cleanup.
+      }
+    });
+    completionSweepSourcesRef.current.clear();
+  }
+
+  function startCompletionSweep(sweepValues: number[], duration: number) {
+    stopCompletionSweepSound();
+    const sweepRun = completionSweepRunRef.current + 1;
+    completionSweepRunRef.current = sweepRun;
+    setCompletionSweepActive(true);
+
+    if (!prefersReducedMotion && soundVolumeRef.current > 0) {
+      const context = ensureAudioContext();
+      void context.resume().then(() => {
+        if (completionSweepRunRef.current !== sweepRun) return;
+        playCompletionSweepSound(sweepValues, duration);
+      }).catch(() => undefined);
+    }
+
+    completionSweepEndTimerRef.current = window.setTimeout(() => {
+      completionSweepEndTimerRef.current = null;
+      if (completionSweepRunRef.current !== sweepRun) return;
+      stopCompletionSweepSound();
+      setCompletionSweepActive(false);
+    }, duration + COMPLETION_SWEEP_AUDIO_VISUAL_LEAD + COMPLETION_SWEEP_RELEASE_TAIL);
   }
 
   function ensureAudioContext() {
@@ -1814,6 +1866,7 @@ export default function Home() {
     frequency: number,
     targetDuration: number,
     peakGain: number,
+    trackedSources?: Set<OscillatorNode>,
   ) {
     // Keep even the shortest voice long enough to read as a note, with an
     // octave reinforcement that stays clear on laptop speakers.
@@ -1856,6 +1909,14 @@ export default function Home() {
     rumbleFilter.connect(toneFilter);
     toneFilter.connect(envelope);
     envelope.connect(context.destination);
+
+    if (trackedSources) {
+      trackedSources.add(fundamental);
+      trackedSources.add(octave);
+      fundamental.addEventListener("ended", () => trackedSources.delete(fundamental), { once: true });
+      octave.addEventListener("ended", () => trackedSources.delete(octave), { once: true });
+    }
+
     fundamental.start(startTime);
     octave.start(startTime);
     fundamental.stop(startTime + duration + 0.015);
@@ -1902,7 +1963,7 @@ export default function Home() {
     playMusicalVoice(context, now, frequency, targetDuration, peakGain);
   }
 
-  function playCompletionSweepSound(sweepValues: number[]) {
+  function playCompletionSweepSound(sweepValues: number[], duration: number) {
     const context = audioContextRef.current;
     const volume = soundVolumeRef.current;
     if (!context || context.state !== "running" || volume <= 0) return;
@@ -1910,41 +1971,31 @@ export default function Home() {
     const valuesToScan = sweepValues.length ? sweepValues : originalValues;
     if (valuesToScan.length === 0) return;
 
-    const now = context.currentTime + 0.015;
-    const duration = COMPLETION_SWEEP_DURATION / 1_000;
-    const scanFrequencies = valuesToScan.reduce<number[]>((frequencies, value) => {
+    const spacing = duration / 1_000 / valuesToScan.length;
+    const startTime = context.currentTime + COMPLETION_SWEEP_AUDIO_VISUAL_LEAD / 1_000;
+    const liveImpactPeak = 0.2 * (volume / 100) ** 2.5;
+
+    // A completion hit uses the same reinforced voice and loudness as a live
+    // sorting move. Each bar gets its own note at the center of its orange
+    // window, so the scan remains a one-to-one visual verification.
+    valuesToScan.forEach((value, index) => {
       const frequency = getSortingToneFrequency(value);
-      if (frequencies.at(-1) !== frequency) frequencies.push(frequency);
-      return frequencies;
-    }, []);
-    const spacing = duration / Math.max(scanFrequencies.length - 1, 1);
-    const noteDuration = Math.min(0.115, Math.max(0.028, spacing * 1.35));
-    const peakGain = 0.13 * (volume / 100) ** 2.5;
-    const lastIndex = Math.max(scanFrequencies.length - 1, 1);
+      const requestedDuration = Math.min(0.052, Math.max(0.012, spacing * 0.9));
+      const actualVoiceDuration = Math.min(
+        0.12,
+        Math.max(requestedDuration, 4.5 / Math.max(frequency, 1)),
+      );
+      const overlap = Math.max(1, actualVoiceDuration / spacing);
+      const peakGain = liveImpactPeak / Math.sqrt(overlap);
 
-    // Scan each pitch that actually appeared in the sort, in order. Repeated
-    // bars mapped to the same pitch are one audible note, so even 256 bars
-    // produce a clear rapid cascade rather than an indistinguishable blur.
-    scanFrequencies.forEach((frequency, index) => {
-      const startTime = now + (index / lastIndex) * (duration - noteDuration);
-      const oscillator = context.createOscillator();
-      const filter = context.createBiquadFilter();
-      const gain = context.createGain();
-
-      oscillator.type = "triangle";
-      oscillator.frequency.setValueAtTime(frequency, startTime);
-      filter.type = "lowpass";
-      filter.frequency.setValueAtTime(2_650, startTime);
-      filter.Q.setValueAtTime(0.5, startTime);
-      gain.gain.setValueAtTime(0.0001, startTime);
-      gain.gain.exponentialRampToValueAtTime(peakGain, startTime + Math.min(0.004, noteDuration * 0.2));
-      gain.gain.exponentialRampToValueAtTime(0.0001, startTime + noteDuration);
-
-      oscillator.connect(filter);
-      filter.connect(gain);
-      gain.connect(context.destination);
-      oscillator.start(startTime);
-      oscillator.stop(startTime + noteDuration + 0.01);
+      playMusicalVoice(
+        context,
+        startTime + (index + 0.5) * spacing,
+        frequency,
+        requestedDuration,
+        peakGain,
+        completionSweepSourcesRef.current,
+      );
     });
   }
 
@@ -2018,6 +2069,8 @@ export default function Home() {
       if (completionSweepEndTimerRef.current !== null) {
         window.clearTimeout(completionSweepEndTimerRef.current);
       }
+      completionSweepRunRef.current += 1;
+      stopCompletionSweepSound();
       void audioContextRef.current?.close();
     };
   }, []);
@@ -2618,6 +2671,17 @@ export default function Home() {
   }
 
   function handleSpeedInputChange(input: string) {
+    // Native number steppers emit their change immediately, without waiting
+    // for the field to blur. Apply every valid value here so their arrows
+    // control a running animation just as directly as the range slider.
+    const candidate = Number(input);
+    if (input.trim() !== "" && Number.isFinite(candidate)) {
+      handleSpeedChange(candidate);
+      return;
+    }
+
+    // Keep incomplete text (such as a temporarily empty field) editable;
+    // normalizeSpeedInput will restore or clamp it when editing finishes.
     setSpeedInput(input);
   }
 
@@ -2957,6 +3021,7 @@ export default function Home() {
                     "completion-sweep " +
                     (prefersReducedMotion ? "completion-sweep--reduced" : "")
                   }
+                  style={completionSweepTimingStyle}
                   aria-hidden="true"
                 >
                   <span className="completion-sweep__line" />
@@ -2999,9 +3064,10 @@ export default function Home() {
                   (algorithm === "merge" ? "bars--merge " : "") +
                   (usesRangeGroups ? "bars--mean bars--mean-" + meanSlideStage + " " : "") +
                   (shouldInterpolateMoves ? "bars--flip bars--flip-" + motionSlideStage + " " : "") +
+                  (completionSweepActive && !prefersReducedMotion ? "bars--completion-sweeping " : "") +
                   (shouldInterpolateDenseBars ? "bars--smooth" : "")
                 }
-                style={barTransitionStyle}
+                style={activeBarTransitionStyle}
                 aria-hidden="true"
               >
                 {renderedBarItems.map((item, index) => {
@@ -3024,6 +3090,16 @@ export default function Home() {
                     slideOffset === undefined
                       ? undefined
                       : ({ transform: "translateX(" + slideOffset + "px)" } as CSSProperties);
+                  const completionScanStyle =
+                    completionSweepActive && !prefersReducedMotion
+                      ? ({
+                          height: String(height) + "%",
+                          "--completion-scan-delay": String(
+                            COMPLETION_SWEEP_AUDIO_VISUAL_LEAD + index * completionSweepStepDuration,
+                          ) + "ms",
+                          "--completion-scan-duration": String(completionSweepStepDuration) + "ms",
+                        } as CSSProperties)
+                      : { height: String(height) + "%" };
                   return (
                     <div
                       className={"bar-slot " + groupClass}
@@ -3044,8 +3120,14 @@ export default function Home() {
                       style={slotStyle}
                     >
                       <div
-                        className={"bar " + getBarClass(index, currentStep, algorithm)}
-                        style={{ height: String(height) + "%" }}
+                        className={
+                          "bar " +
+                          getBarClass(index, currentStep, algorithm) +
+                          (completionSweepActive && !prefersReducedMotion
+                            ? " bar--completion-scan"
+                            : "")
+                        }
+                        style={completionScanStyle}
                       >
                         {arraySize <= 24 && (
                           <span className="bar__value">{item.isGap ? "gap" : item.value}</span>

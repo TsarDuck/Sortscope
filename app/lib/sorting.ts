@@ -53,6 +53,12 @@ export type SortStep = {
   groups?: MeanGroup[];
   outliers?: number[];
   settled?: number[];
+  /**
+   * Quick Sort-only visual aid. These indices currently match the final
+   * sorted row, but are deliberately not part of the algorithm's accounting
+   * or its proof that a pivot has been permanently placed.
+   */
+  visualSettled?: number[];
   rangeStart?: number;
   rangeEnd?: number;
 };
@@ -1296,6 +1302,16 @@ function getSettledIndices(settled: Set<number>) {
   return Array.from(settled).sort((left, right) => left - right);
 }
 
+function getQuickVisualSettledIndices(values: number[], sortedValues: number[]) {
+  const visualSettled: number[] = [];
+
+  for (let index = 0; index < values.length; index += 1) {
+    if (values[index] === sortedValues[index]) visualSettled.push(index);
+  }
+
+  return visualSettled;
+}
+
 function countSortedCheck(values: number[]) {
   let comparisons = 0;
 
@@ -2098,7 +2114,15 @@ export function buildQuickSortSteps(source: number[]): SortStep[] {
     }),
   );
 
-  return steps;
+  // This pass is visual-only: it lets the renderer light every value that is
+  // presently sitting in its final sorted position, including values Quick
+  // Sort has not selected as pivots. It intentionally does not touch the
+  // comparison, write, partition, or benchmark counters above.
+  const sortedValues = [...values];
+  return steps.map((step) => ({
+    ...step,
+    visualSettled: getQuickVisualSettledIndices(step.values, sortedValues),
+  }));
 }
 
 export function buildMergeSortSteps(source: number[]): SortStep[] {

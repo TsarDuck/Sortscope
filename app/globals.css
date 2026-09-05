@@ -741,17 +741,7 @@ input:focus-visible {
   opacity: 0;
   background: linear-gradient(180deg, #ffe4ab, #ffab4d 42%, #ec6f35);
   box-shadow: 0 0 7px rgba(255, 176, 82, 0.96), 0 0 22px rgba(255, 126, 58, 0.72);
-  animation: completion-sweep 1.05s cubic-bezier(.25, .76, .34, 1) both;
-}
-
-.completion-sweep__line::after {
-  position: absolute;
-  top: 0;
-  right: 100%;
-  bottom: 0;
-  width: 72px;
-  content: "";
-  background: linear-gradient(90deg, transparent, rgba(255, 141, 58, 0.3));
+  animation: completion-sweep var(--completion-sweep-duration, 1050ms) linear var(--completion-sweep-lead, 0ms) both;
 }
 
 .completion-sweep--reduced .completion-sweep__line {
@@ -768,11 +758,11 @@ input:focus-visible {
     opacity: 0;
   }
 
-  7% {
+  2% {
     opacity: 1;
   }
 
-  84% {
+  98% {
     left: calc(100% - 3px);
     opacity: 1;
   }
@@ -921,6 +911,44 @@ input:focus-visible {
 .bar--sorted {
   background: linear-gradient(180deg, #9ae9ad, #5fcf91);
   box-shadow: 0 0 16px rgba(114, 223, 152, 0.17);
+}
+
+.bars--completion-sweeping .bar--completion-scan {
+  animation: completion-bar-scan var(--completion-scan-duration, 18ms) linear var(--completion-scan-delay, 0ms) forwards;
+}
+
+.bars--dense.bars--completion-sweeping .bar--completion-scan {
+  animation-name: completion-bar-scan-dense;
+  box-shadow: none;
+  transition: none;
+}
+
+@keyframes completion-bar-scan {
+  0%,
+  84% {
+    background: linear-gradient(180deg, #ffe4ab, #ff9d43);
+    box-shadow: 0 0 22px rgba(255, 166, 71, 0.66);
+    transform: translateY(-2px);
+  }
+
+  100% {
+    background: linear-gradient(180deg, #9ae9ad, #5fcf91);
+    box-shadow: 0 0 16px rgba(114, 223, 152, 0.17);
+    transform: translateY(0);
+  }
+}
+
+@keyframes completion-bar-scan-dense {
+  0%,
+  84% {
+    background: linear-gradient(180deg, #ffe4ab, #ff9d43);
+    box-shadow: none;
+  }
+
+  100% {
+    background: linear-gradient(180deg, #9ae9ad, #5fcf91);
+    box-shadow: none;
+  }
 }
 
 .bar--key {
