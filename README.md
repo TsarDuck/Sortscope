@@ -34,9 +34,6 @@ license. Anyone may use, study, modify, and share it for personal, educational,
 and other noncommercial purposes. Commercial use requires the copyright
 holder's permission. See [NOTICE](NOTICE) for the required copyright notice.
 
-This is intentionally **not** an OSI-approved open-source license: open-source
-licenses must allow commercial use.
-
 ## Developing locally
 
 Install Node.js 22 or newer, then install the frontend dependencies:
