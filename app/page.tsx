@@ -3,6 +3,7 @@
 import {
   Fragment,
   type CSSProperties,
+  type KeyboardEvent as ReactKeyboardEvent,
   type PointerEvent as ReactPointerEvent,
   useEffect,
   useLayoutEffect,
@@ -55,6 +56,22 @@ type AlgorithmId =
   | "merge"
   | "powersort"
   | "bogo";
+
+// Keep the learning path in one place so the hero's previous/next controls
+// and its direct-picker menu always agree on the same progression.
+const ALGORITHM_ORDER: readonly AlgorithmId[] = [
+  "bogo",
+  "selection",
+  "insertion",
+  "bubble",
+  "cocktail",
+  "heap",
+  "quick",
+  "pdq",
+  "merge",
+  "powersort",
+];
+
 type RunState = "ready" | "running" | "paused" | "complete";
 type StepPhase =
   | "ready"
@@ -1752,6 +1769,7 @@ function getPhaseLabel(phase: StepPhase) {
 
 export default function Home() {
   const [algorithm, setAlgorithm] = useState<AlgorithmId>("insertion");
+  const [isAlgorithmPickerOpen, setIsAlgorithmPickerOpen] = useState(false);
   const [arraySize, setArraySize] = useState(DEFAULT_ARRAY_SIZE);
   const [arraySizeInput, setArraySizeInput] = useState(String(DEFAULT_ARRAY_SIZE));
   const [speed, setSpeed] = useState(DEFAULT_SPEED);
@@ -1846,6 +1864,9 @@ export default function Home() {
   const practiceAdvanceTimerRef = useRef<number | null>(null);
   const practiceCelebrationFadeTimerRef = useRef<number | null>(null);
   const practiceCelebrationUnmountTimerRef = useRef<number | null>(null);
+  const algorithmPickerRef = useRef<HTMLDivElement | null>(null);
+  const algorithmPickerTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const algorithmPickerItemRefs = useRef(new Map<AlgorithmId, HTMLButtonElement>());
   const bogoPracticeAudioRef = useRef<HTMLAudioElement | null>(null);
   const bogoPracticePreloadAudioRef = useRef<HTMLAudioElement[]>([]);
   const bogoPracticeAudioTimerRef = useRef<number | null>(null);
@@ -1924,6 +1945,16 @@ export default function Home() {
         : bogoTimerRangeStatus;
   const soundEnabled = soundVolume > 0;
   const algorithmDetails = ALGORITHM_DETAILS[algorithm];
+  const algorithmOrderIndex = Math.max(0, ALGORITHM_ORDER.indexOf(algorithm));
+  const previousAlgorithm =
+    ALGORITHM_ORDER[
+      (algorithmOrderIndex - 1 + ALGORITHM_ORDER.length) % ALGORITHM_ORDER.length
+    ] ?? algorithm;
+  const nextAlgorithm =
+    ALGORITHM_ORDER[(algorithmOrderIndex + 1) % ALGORITHM_ORDER.length] ?? algorithm;
+  const algorithmPickerOptions = ALGORITHM_ORDER.filter(
+    (candidate) => candidate !== algorithm,
+  );
   const practiceSteps = useMemo(
     () => normalizePracticeSteps(algorithmDetails.practice),
     [algorithmDetails.practice],
@@ -2199,6 +2230,35 @@ export default function Home() {
 
   const isRunning = runState === "running";
   const isLocked = isRunning || runState === "paused";
+
+  useEffect(() => {
+    if (!isAlgorithmPickerOpen) return;
+
+    const closeWhenFocusLeaves = (event: FocusEvent) => {
+      if (!algorithmPickerRef.current?.contains(event.target as Node)) {
+        setIsAlgorithmPickerOpen(false);
+      }
+    };
+    const closeWhenPointerLeaves = (event: PointerEvent) => {
+      if (!algorithmPickerRef.current?.contains(event.target as Node)) {
+        setIsAlgorithmPickerOpen(false);
+      }
+    };
+
+    document.addEventListener("focusin", closeWhenFocusLeaves);
+    document.addEventListener("pointerdown", closeWhenPointerLeaves, true);
+    return () => {
+      document.removeEventListener("focusin", closeWhenFocusLeaves);
+      document.removeEventListener("pointerdown", closeWhenPointerLeaves, true);
+    };
+  }, [isAlgorithmPickerOpen]);
+
+  useEffect(() => {
+    // Match the former selector: switching algorithms is available while
+    // paused (which resets the trace), but never while a run is advancing.
+    if (isRunning) setIsAlgorithmPickerOpen(false);
+  }, [isRunning]);
+
   const isLargeArray = originalValues.length > DEFAULT_ARRAY_SIZE;
   const playbackDensity = isBogo ? 48 : 1;
   // Use the internal 1–200 playback range for deterministic sorts, while the
@@ -3559,7 +3619,123 @@ export default function Home() {
     setPracticeValues([...nextStep.start]);
   }
 
+  function focusAlgorithmPickerOption(nextOption: AlgorithmId) {
+    window.requestAnimationFrame(() => {
+      algorithmPickerItemRefs.current.get(nextOption)?.focus();
+    });
+  }
+
+  function closeAlgorithmPicker(restoreTriggerFocus = false) {
+    setIsAlgorithmPickerOpen(false);
+    if (restoreTriggerFocus) {
+      window.requestAnimationFrame(() => algorithmPickerTriggerRef.current?.focus());
+    }
+  }
+
+  function openAlgorithmPicker(focusPosition: "first" | "last" = "first") {
+    if (isRunning) return;
+    setIsAlgorithmPickerOpen(true);
+    const nextOption =
+      focusPosition === "first"
+        ? algorithmPickerOptions[0]
+        : algorithmPickerOptions[algorithmPickerOptions.length - 1];
+    if (nextOption) focusAlgorithmPickerOption(nextOption);
+  }
+
+  function handleAlgorithmPickerTriggerClick() {
+    if (isAlgorithmPickerOpen) {
+      closeAlgorithmPicker();
+      return;
+    }
+    openAlgorithmPicker();
+  }
+
+  function handleAlgorithmPickerTriggerKeyDown(
+    event: ReactKeyboardEvent<HTMLButtonElement>,
+  ) {
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      openAlgorithmPicker("first");
+      return;
+    }
+    if (event.key === "ArrowUp") {
+      event.preventDefault();
+      openAlgorithmPicker("last");
+      return;
+    }
+    if (event.key === "Escape" && isAlgorithmPickerOpen) {
+      event.preventDefault();
+      closeAlgorithmPicker();
+    }
+  }
+
+  function handleAlgorithmPickerMenuKeyDown(
+    event: ReactKeyboardEvent<HTMLButtonElement>,
+    optionIndex: number,
+  ) {
+    const optionCount = algorithmPickerOptions.length;
+    if (optionCount === 0) return;
+
+    const focusOptionAt = (nextIndex: number) => {
+      const normalizedIndex = (nextIndex + optionCount) % optionCount;
+      const nextOption = algorithmPickerOptions[normalizedIndex];
+      if (nextOption) focusAlgorithmPickerOption(nextOption);
+    };
+
+    switch (event.key) {
+      case "ArrowDown":
+      case "ArrowRight":
+        event.preventDefault();
+        focusOptionAt(optionIndex + 1);
+        break;
+      case "ArrowUp":
+      case "ArrowLeft":
+        event.preventDefault();
+        focusOptionAt(optionIndex - 1);
+        break;
+      case "Home":
+        event.preventDefault();
+        focusOptionAt(0);
+        break;
+      case "End":
+        event.preventDefault();
+        focusOptionAt(optionCount - 1);
+        break;
+      case "Escape":
+        event.preventDefault();
+        closeAlgorithmPicker(true);
+        break;
+      case "Tab":
+        setIsAlgorithmPickerOpen(false);
+        break;
+      default:
+        break;
+    }
+  }
+
+  function setAlgorithmPickerItemRef(
+    option: AlgorithmId,
+    element: HTMLButtonElement | null,
+  ) {
+    if (element) {
+      algorithmPickerItemRefs.current.set(option, element);
+      return;
+    }
+    algorithmPickerItemRefs.current.delete(option);
+  }
+
+  function selectAlgorithmFromPicker(nextAlgorithm: AlgorithmId) {
+    if (isRunning) return;
+    handleAlgorithmChange(nextAlgorithm);
+  }
+
+  function handleAlgorithmCycle(direction: -1 | 1) {
+    if (isRunning) return;
+    selectAlgorithmFromPicker(direction === -1 ? previousAlgorithm : nextAlgorithm);
+  }
+
   function handleAlgorithmChange(nextAlgorithm: AlgorithmId) {
+    setIsAlgorithmPickerOpen(false);
     resetCompletionSweep();
     resetBogoElapsedTimer();
     setBogoCelebrationPhase("hidden");
@@ -3913,17 +4089,72 @@ export default function Home() {
 
         <section className="hero" aria-labelledby="page-title">
           <div>
-            <h1 id="page-title" className="hero__algorithm-title">
-              {algorithmLabel}
-            </h1>
-            <p className="hero-copy">{algorithmDetails.heroCopy}</p>
-          </div>
-          <div className="hero-aside">
-            <span className="hero-aside__number">{algorithmDetails.number}</span>
-            <div>
-              <p>NOW EXPLORING</p>
-              <strong>{algorithmLabel}</strong>
+            <div className="hero__algorithm-picker" ref={algorithmPickerRef}>
+              <button
+                className="hero__algorithm-cycle hero__algorithm-cycle--previous"
+                type="button"
+                onClick={() => handleAlgorithmCycle(-1)}
+                disabled={isRunning}
+                aria-label={"Previous algorithm: " + ALGORITHM_DETAILS[previousAlgorithm].label}
+              >
+                <span aria-hidden="true" />
+              </button>
+              <div className="hero__algorithm-picker-title">
+                <p className="hero__algorithm-picker-label">CURRENT ALGORITHM</p>
+                <h1 id="page-title" className="hero__algorithm-title">
+                  <button
+                    ref={algorithmPickerTriggerRef}
+                    className="hero__algorithm-trigger"
+                    type="button"
+                    onClick={handleAlgorithmPickerTriggerClick}
+                    onKeyDown={handleAlgorithmPickerTriggerKeyDown}
+                    disabled={isRunning}
+                    aria-haspopup="menu"
+                    aria-expanded={isAlgorithmPickerOpen}
+                    aria-controls="algorithm-picker-menu"
+                    aria-label={"Choose sorting algorithm. Current algorithm: " + algorithmLabel}
+                  >
+                    {algorithmLabel}
+                  </button>
+                </h1>
+              </div>
+              <button
+                className="hero__algorithm-cycle hero__algorithm-cycle--next"
+                type="button"
+                onClick={() => handleAlgorithmCycle(1)}
+                disabled={isRunning}
+                aria-label={"Next algorithm: " + ALGORITHM_DETAILS[nextAlgorithm].label}
+              >
+                <span aria-hidden="true" />
+              </button>
+
+              {isAlgorithmPickerOpen && (
+                <div
+                  id="algorithm-picker-menu"
+                  className="hero__algorithm-menu"
+                  role="menu"
+                  aria-label="Other sorting algorithms"
+                >
+                  {algorithmPickerOptions.map((option, optionIndex) => (
+                    <button
+                      ref={(element) => setAlgorithmPickerItemRef(option, element)}
+                      className="hero__algorithm-option"
+                      key={option}
+                      type="button"
+                      role="menuitem"
+                      onClick={() => selectAlgorithmFromPicker(option)}
+                      onKeyDown={(event) =>
+                        handleAlgorithmPickerMenuKeyDown(event, optionIndex)
+                      }
+                    >
+                      <span>{ALGORITHM_DETAILS[option].number}</span>
+                      <strong>{ALGORITHM_DETAILS[option].label}</strong>
+                    </button>
+                  ))}
+                </div>
+              )}
             </div>
+            <p className="hero-copy">{algorithmDetails.heroCopy}</p>
           </div>
         </section>
 
@@ -3951,46 +4182,24 @@ export default function Home() {
             )}
 
             <div className={"controls " + (isBogo ? "controls--bogo" : "")} aria-label="Visualizer controls">
-              <div className="algorithm-controls">
-                <label className="control-field control-field--algorithm">
-                  <span className="control-label">Algorithm</span>
-                  <select
-                    value={algorithm}
-                    onChange={(event) => handleAlgorithmChange(event.target.value as AlgorithmId)}
-                    disabled={isRunning}
-                    aria-label="Sorting algorithm"
-                  >
-                    <option value="bogo">Bogo sort</option>
-                    <option value="selection">Selection sort</option>
-                    <option value="insertion">Insertion sort</option>
-                    <option value="bubble">Bubble sort</option>
-                    <option value="cocktail">Cocktail sort</option>
-                    <option value="heap">Heap sort</option>
-                    <option value="quick">Quick sort</option>
-                    <option value="pdq">PDQ sort</option>
-                    <option value="merge">Merge sort</option>
-                    <option value="powersort">Powersort</option>
-                  </select>
-                </label>
+              <label className="control-field control-field--arrangement">
+                <span className="control-label">Starting arrangement</span>
+                <select
+                  value={arrayArrangement}
+                  onChange={(event) =>
+                    handleArrayArrangementChange(event.target.value as ArrayArrangement)
+                  }
+                  disabled={isRunning}
+                  aria-label="Starting array arrangement"
+                >
+                  <option value="random">Random shuffle</option>
+                  <option value="nearly-sorted">Nearly sorted</option>
+                  <option value="reverse">Reverse order</option>
+                </select>
+              </label>
 
-                <label className="control-field control-field--arrangement">
-                  <span className="control-label">Starting arrangement</span>
-                  <select
-                    value={arrayArrangement}
-                    onChange={(event) =>
-                      handleArrayArrangementChange(event.target.value as ArrayArrangement)
-                    }
-                    disabled={isRunning}
-                    aria-label="Starting array arrangement"
-                  >
-                    <option value="random">Random shuffle</option>
-                    <option value="nearly-sorted">Nearly sorted</option>
-                    <option value="reverse">Reverse order</option>
-                  </select>
-                </label>
-
-                {isBogo && (
-                  <>
+              {isBogo && (
+                <>
                     <label className="control-field control-field--range bogo-attempt-limit">
                       <span className="control-label">
                       Max shuffles (up to 999,999,999)
@@ -4067,7 +4276,6 @@ export default function Home() {
                     </aside>
                   </>
                 )}
-              </div>
 
               <label
                 className={
@@ -4389,7 +4597,9 @@ export default function Home() {
         <section className="learn-grid" aria-labelledby="learn-title">
           <div className="learn-copy">
             <p className="eyebrow">{algorithmDetails.eyebrow}</p>
-            <h2 id="learn-title">{algorithmDetails.learnTitle}</h2>
+            <h2 id="learn-title">
+              <span className="learn-copy__algorithm-name">{algorithmLabel}</span>, {algorithmDetails.learnTitle}
+            </h2>
             <div className="learn-copy__explanation">
               {algorithmDetails.learnCopy.map((paragraph) => (
                 <p key={paragraph}>{paragraph}</p>

@@ -142,10 +142,6 @@ button:disabled {
 }
 
 .hero {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: end;
-  gap: 48px;
   padding: 88px 0 56px;
 }
 
@@ -172,7 +168,167 @@ button:disabled {
 }
 
 .hero__algorithm-title {
+  min-width: 0;
   color: #b7afff;
+}
+
+.hero__algorithm-picker {
+  --hero-picker-control-size: clamp(44px, 4.6vw, 60px);
+  --hero-picker-gap: clamp(7px, 1.45vw, 17px);
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: var(--hero-picker-gap);
+  width: fit-content;
+  max-width: 100%;
+}
+
+.hero__algorithm-picker-title {
+  min-width: 0;
+}
+
+.hero__algorithm-picker-label {
+  margin: 0 0 9px;
+  color: #9e95ef;
+  font-size: 0.66rem;
+  font-weight: 850;
+  letter-spacing: 0.15em;
+}
+
+.hero__algorithm-trigger {
+  display: block;
+  max-width: 100%;
+  margin: 0;
+  padding: 0.03em 0.06em;
+  border: 0;
+  border-radius: 0.08em;
+  color: inherit;
+  background: transparent;
+  box-shadow: none;
+  cursor: pointer;
+  font: inherit;
+  letter-spacing: inherit;
+  line-height: inherit;
+  text-align: left;
+  transition: color 150ms ease, text-shadow 150ms ease, transform 150ms ease;
+}
+
+.hero__algorithm-trigger:hover:not(:disabled) {
+  color: #d0c8ff;
+  text-shadow: 0 0 23px rgba(183, 175, 255, 0.3);
+  transform: translateY(-1px);
+}
+
+.hero__algorithm-cycle {
+  display: grid;
+  flex: 0 0 var(--hero-picker-control-size);
+  width: var(--hero-picker-control-size);
+  height: var(--hero-picker-control-size);
+  padding: 0;
+  place-items: center;
+  border: 1px solid rgba(183, 175, 255, 0.42);
+  border-radius: 50%;
+  color: #b7afff;
+  background: rgba(126, 111, 224, 0.1);
+  box-shadow: inset 0 1px rgba(235, 232, 255, 0.08), 0 0 0 1px rgba(26, 21, 62, 0.22);
+  cursor: pointer;
+  transition: border-color 150ms ease, background 150ms ease, box-shadow 150ms ease, transform 150ms ease;
+}
+
+.hero__algorithm-cycle span {
+  width: 0;
+  height: 0;
+  border-top: clamp(7px, 0.85vw, 10px) solid transparent;
+  border-bottom: clamp(7px, 0.85vw, 10px) solid transparent;
+}
+
+.hero__algorithm-cycle--previous span {
+  margin-right: 3px;
+  border-right: clamp(10px, 1.15vw, 14px) solid currentColor;
+}
+
+.hero__algorithm-cycle--next span {
+  margin-left: 3px;
+  border-left: clamp(10px, 1.15vw, 14px) solid currentColor;
+}
+
+.hero__algorithm-cycle:hover:not(:disabled) {
+  border-color: rgba(217, 211, 255, 0.94);
+  background: rgba(145, 128, 255, 0.25);
+  box-shadow: 0 0 20px rgba(142, 125, 255, 0.25), inset 0 1px rgba(245, 244, 255, 0.13);
+}
+
+.hero__algorithm-cycle--previous:hover:not(:disabled) {
+  transform: translateX(-2px);
+}
+
+.hero__algorithm-cycle--next:hover:not(:disabled) {
+  transform: translateX(2px);
+}
+
+.hero__algorithm-cycle:disabled,
+.hero__algorithm-trigger:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.hero__algorithm-cycle:focus-visible,
+.hero__algorithm-trigger:focus-visible,
+.hero__algorithm-option:focus-visible {
+  outline: 2px solid var(--cyan);
+  outline-offset: 4px;
+}
+
+.hero__algorithm-menu {
+  position: absolute;
+  z-index: 30;
+  top: calc(100% + 15px);
+  left: 0;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 7px;
+  width: min(470px, calc(100vw - 48px));
+  padding: 10px;
+  border: 1px solid rgba(183, 175, 255, 0.46);
+  border-radius: 15px;
+  background: linear-gradient(145deg, rgba(35, 33, 72, 0.98), rgba(15, 17, 42, 0.99));
+  box-shadow: 0 19px 46px rgba(2, 4, 20, 0.5), inset 0 1px rgba(238, 235, 255, 0.08);
+}
+
+.hero__algorithm-option {
+  display: grid;
+  grid-template-columns: 27px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  min-height: 44px;
+  padding: 8px 10px;
+  border: 1px solid rgba(188, 181, 255, 0.16);
+  border-radius: 9px;
+  color: #e7e5ff;
+  background: rgba(121, 107, 213, 0.06);
+  cursor: pointer;
+  text-align: left;
+  transition: border-color 130ms ease, background 130ms ease, color 130ms ease;
+}
+
+.hero__algorithm-option span {
+  color: #9289de;
+  font-size: 0.67rem;
+  font-weight: 850;
+  letter-spacing: 0.06em;
+}
+
+.hero__algorithm-option strong {
+  overflow: hidden;
+  font-size: 0.76rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hero__algorithm-option:hover {
+  border-color: rgba(181, 170, 255, 0.76);
+  color: #fff;
+  background: rgba(144, 126, 255, 0.2);
 }
 
 .hero-copy {
@@ -181,42 +337,6 @@ button:disabled {
   color: var(--muted-strong);
   font-size: 1.04rem;
   line-height: 1.65;
-}
-
-.hero-aside {
-  display: flex;
-  align-items: center;
-  gap: 13px;
-  padding: 15px 20px 16px;
-  border: 1px solid var(--border);
-  border-radius: 16px;
-  background: rgba(20, 23, 48, 0.58);
-  box-shadow: inset 0 1px rgba(255, 255, 255, 0.035);
-}
-
-.hero-aside__number {
-  color: #6b6f9a;
-  font-size: 1.55rem;
-  font-weight: 800;
-  letter-spacing: -0.07em;
-}
-
-.hero-aside p,
-.hero-aside strong {
-  display: block;
-  margin: 0;
-}
-
-.hero-aside p {
-  color: var(--muted);
-  font-size: 0.62rem;
-  font-weight: 800;
-  letter-spacing: 0.12em;
-}
-
-.hero-aside strong {
-  margin-top: 4px;
-  font-size: 0.9rem;
 }
 
 .visualizer {
@@ -379,16 +499,6 @@ button:disabled {
 .control-field {
   display: grid;
   gap: 8px;
-}
-
-.algorithm-controls {
-  display: grid;
-  gap: 12px;
-  min-width: 142px;
-}
-
-.control-field--algorithm {
-  min-width: 142px;
 }
 
 .control-field--arrangement {
@@ -1318,6 +1428,10 @@ input:focus-visible {
   max-width: 590px;
   font-size: clamp(2.35rem, 4.2vw, 3.85rem);
   line-height: 0.95;
+}
+
+.learn-copy__algorithm-name {
+  color: #b7afff;
 }
 
 .learn-copy__explanation {
@@ -3090,9 +3204,28 @@ input:focus-visible {
     font-size: clamp(2.95rem, 15vw, 4.5rem);
   }
 
-  .hero-aside {
-    display: inline-flex;
-    margin-top: 28px;
+  .hero__algorithm-picker {
+    --hero-picker-control-size: 42px;
+    --hero-picker-gap: 7px;
+    width: 100%;
+  }
+
+  .hero__algorithm-picker-title {
+    flex: 1 1 auto;
+  }
+
+  .hero__algorithm-picker-label {
+    margin-bottom: 7px;
+    font-size: 0.6rem;
+  }
+
+  .hero__algorithm-menu {
+    grid-template-columns: 1fr;
+    width: min(360px, calc(100vw - 48px));
+  }
+
+  .hero__algorithm-option {
+    min-height: 42px;
   }
 
   .control-deck,
@@ -3124,15 +3257,6 @@ input:focus-visible {
 
   .controls {
     gap: 15px 12px;
-  }
-
-  .control-field--algorithm {
-    min-width: 100%;
-  }
-
-  .algorithm-controls {
-    width: 100%;
-    min-width: 0;
   }
 
   .control-field--range {
