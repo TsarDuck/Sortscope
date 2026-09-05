@@ -8,6 +8,118 @@ export const PIANO_TONE_MAX_ARRAY_SIZE = 25;
 export const PIANO_TONE_LOW_FREQUENCY = 261.6255653005986; // C4
 export const PIANO_TONE_SEMITONE_SPAN = 24; // C4 through C6
 
+/**
+ * The casino clips are small, uncompressed PCM WAV files. Parsing that tiny
+ * format ourselves lets the app send their samples through the same Web Audio
+ * output that already drives Sortscope's synthesized notes. In particular it
+ * avoids WebKitGTK's separate HTML media/GStreamer pipeline in Linux AppImage
+ * builds, where local media elements can fail even though AudioContext output
+ * is healthy.
+ */
+export type DecodedPcmWav = {
+  channelData: Float32Array<ArrayBuffer>[];
+  numberOfChannels: number;
+  sampleRate: number;
+  frameCount: number;
+  durationMilliseconds: number;
+};
+
+function readFourCc(view: DataView, offset: number) {
+  return String.fromCharCode(
+    view.getUint8(offset),
+    view.getUint8(offset + 1),
+    view.getUint8(offset + 2),
+    view.getUint8(offset + 3),
+  );
+}
+
+/**
+ * Decode a standard little-endian, 16-bit PCM WAV into Web Audio-ready float
+ * channels. We deliberately reject other codecs instead of producing a
+ * partially decoded cue: the bundled clips are validated PCM assets, and a
+ * clear failure can safely fall back to the lesson's timed visual state.
+ */
+export function decodePcmWav(bytes: ArrayBuffer): DecodedPcmWav {
+  const view = new DataView(bytes);
+  if (view.byteLength < 12 || readFourCc(view, 0) !== "RIFF" || readFourCc(view, 8) !== "WAVE") {
+    throw new Error("Expected a RIFF/WAVE audio file.");
+  }
+
+  let format: number | null = null;
+  let numberOfChannels: number | null = null;
+  let sampleRate: number | null = null;
+  let bitsPerSample: number | null = null;
+  let blockAlign: number | null = null;
+  let dataOffset: number | null = null;
+  let dataLength: number | null = null;
+
+  let offset = 12;
+  while (offset + 8 <= view.byteLength) {
+    const chunkName = readFourCc(view, offset);
+    const chunkLength = view.getUint32(offset + 4, true);
+    const chunkOffset = offset + 8;
+    const chunkEnd = chunkOffset + chunkLength;
+
+    if (chunkEnd > view.byteLength) {
+      throw new Error("WAV chunk extends beyond the available audio data.");
+    }
+
+    if (chunkName === "fmt ") {
+      if (chunkLength < 16) throw new Error("WAV format chunk is incomplete.");
+      format = view.getUint16(chunkOffset, true);
+      numberOfChannels = view.getUint16(chunkOffset + 2, true);
+      sampleRate = view.getUint32(chunkOffset + 4, true);
+      blockAlign = view.getUint16(chunkOffset + 12, true);
+      bitsPerSample = view.getUint16(chunkOffset + 14, true);
+    } else if (chunkName === "data") {
+      dataOffset = chunkOffset;
+      dataLength = chunkLength;
+      break;
+    }
+
+    // RIFF chunks are padded to an even boundary.
+    offset = chunkEnd + (chunkLength % 2);
+  }
+
+  if (
+    format !== 1 ||
+    !numberOfChannels ||
+    !sampleRate ||
+    bitsPerSample !== 16 ||
+    !blockAlign ||
+    dataOffset === null ||
+    dataLength === null
+  ) {
+    throw new Error("Casino audio must be 16-bit PCM WAV.");
+  }
+
+  const expectedBlockAlign = numberOfChannels * 2;
+  if (blockAlign !== expectedBlockAlign || dataLength % blockAlign !== 0) {
+    throw new Error("WAV sample frames are not aligned correctly.");
+  }
+
+  const frameCount = dataLength / blockAlign;
+  const channelData: Float32Array<ArrayBuffer>[] = Array.from(
+    { length: numberOfChannels },
+    () => new Float32Array(frameCount),
+  );
+
+  for (let frame = 0; frame < frameCount; frame += 1) {
+    const frameOffset = dataOffset + frame * blockAlign;
+    for (let channel = 0; channel < numberOfChannels; channel += 1) {
+      channelData[channel]![frame] = view.getInt16(frameOffset + channel * 2, true) / 32_768;
+    }
+  }
+
+  return {
+    channelData,
+    numberOfChannels,
+    sampleRate,
+    frameCount,
+    durationMilliseconds: (frameCount / sampleRate) * 1_000,
+  };
+}
+
 export function getContinuousToneFrequency(value: number, largestValue: number) {
   const normalizedValue = Math.min(
     1,

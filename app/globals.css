@@ -2950,8 +2950,11 @@ input:focus-visible {
 }
 
 .benchmark-select {
+  position: relative;
   display: grid;
-  gap: 8px;
+  min-width: 0;
+  width: 100%;
+  gap: 7px;
 }
 
 .benchmark-controls {
@@ -2963,11 +2966,79 @@ input:focus-visible {
 }
 
 .benchmark-select > span {
-  color: var(--muted);
-  font-size: 0.63rem;
-  font-weight: 800;
-  letter-spacing: 0.11em;
+  color: #a8b2d5;
+  font-size: 0.6rem;
+  font-weight: 850;
+  letter-spacing: 0.13em;
+  line-height: 1;
   text-transform: uppercase;
+}
+
+/* Keep the Efficiency Lab selector visually aligned with the Control Room's
+   dark fields while removing the platform-native white select treatment.
+   The explicit option colors also make WebKitGTK's opened menu readable. */
+.benchmark-select select {
+  min-height: 42px;
+  padding: 0 40px 0 12px;
+  border: 1px solid rgba(168, 182, 244, 0.36);
+  border-radius: 9px;
+  color: #edf1ff;
+  background:
+    linear-gradient(135deg, rgba(143, 126, 255, 0.16), rgba(89, 205, 237, 0.07)),
+    #121731;
+  box-shadow: inset 0 1px rgba(239, 242, 255, 0.06), 0 8px 22px rgba(5, 7, 23, 0.16);
+  color-scheme: dark;
+  appearance: none;
+  -webkit-appearance: none;
+  -moz-appearance: none;
+  font: inherit;
+  font-size: 0.8rem;
+  font-weight: 800;
+  cursor: pointer;
+  transition: border-color 160ms ease, background 160ms ease, box-shadow 160ms ease;
+}
+
+.benchmark-select::after {
+  position: absolute;
+  right: 15px;
+  bottom: 17px;
+  width: 7px;
+  height: 7px;
+  border-right: 2px solid #bdb7ff;
+  border-bottom: 2px solid #bdb7ff;
+  content: "";
+  pointer-events: none;
+  transform: rotate(45deg);
+  transition: border-color 160ms ease, transform 160ms ease;
+}
+
+.benchmark-select:hover select {
+  border-color: rgba(184, 198, 255, 0.68);
+  background:
+    linear-gradient(135deg, rgba(157, 140, 255, 0.22), rgba(103, 218, 246, 0.1)),
+    #151b39;
+  box-shadow: inset 0 1px rgba(246, 247, 255, 0.08), 0 10px 25px rgba(5, 7, 23, 0.22);
+}
+
+.benchmark-select:focus-within::after {
+  border-color: var(--cyan);
+  transform: translateY(1px) rotate(45deg);
+}
+
+.benchmark-select select:focus-visible {
+  border-color: rgba(111, 220, 245, 0.88);
+  box-shadow: inset 0 1px rgba(246, 250, 255, 0.11), 0 0 0 3px rgba(88, 217, 245, 0.18);
+}
+
+.benchmark-select select option,
+.benchmark-select select optgroup {
+  color: #edf1ff;
+  background-color: #121731;
+}
+
+.benchmark-select select option:checked {
+  color: #ffffff;
+  background-color: #2a3568;
 }
 
 .benchmark-chart {

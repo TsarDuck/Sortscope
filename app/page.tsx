@@ -3,6 +3,7 @@ import {
   type CSSProperties,
   type KeyboardEvent as ReactKeyboardEvent,
   type PointerEvent as ReactPointerEvent,
+  useCallback,
   useEffect,
   useLayoutEffect,
   useMemo,
@@ -38,7 +39,9 @@ import {
 } from "./lib/practice";
 import {
   createSmallArrayPianoToneMap,
+  decodePcmWav,
   getContinuousToneFrequency,
+  type DecodedPcmWav,
 } from "./lib/audio";
 import {
   makeArrayForArrangement,
@@ -275,6 +278,10 @@ const BOGO_PRACTICE_CASINO_SOUNDS: Record<
 const BOGO_FAST_ESTIMATED_SHUFFLES_PER_SECOND = 2_500_000;
 const BOGO_RATE_SAMPLE_INTERVAL = 250;
 const BOGO_EXPECTED_RATE_FREEZE_AFTER = 2_500;
+// Fast Bogo batches can execute several times between display refreshes. Keep
+// the simulation hot, but only snapshot its mutable session at a readable
+// cadence; each snapshot otherwise re-renders the entire teaching surface.
+const BOGO_VISUAL_UPDATE_INTERVAL = 50;
 // A small buffer makes a direct block drop forgiving without swallowing the
 // dedicated gap that sits between adjacent blocks.
 const PRACTICE_DIRECT_DROP_HIT_SLOP = 8;
@@ -2268,6 +2275,10 @@ export default function Home() {
   const brandButtonRef = useRef<HTMLButtonElement | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const speedRef = useRef(speed);
+  // Native range controls own their drag behavior. Keep only the pointer ID
+  // here so every end path can release our visual-adjustment state without
+  // taking pointer capture away from WebKit's slider implementation.
+  const speedRangePointerIdRef = useRef<number | null>(null);
   const soundVolumeRef = useRef(soundVolume);
   const lastToneTimeRef = useRef(0);
   const lastBogoTextureTimeRef = useRef(0);
@@ -2314,8 +2325,11 @@ export default function Home() {
   const algorithmPickerRef = useRef<HTMLDivElement | null>(null);
   const algorithmPickerTriggerRef = useRef<HTMLButtonElement | null>(null);
   const algorithmPickerItemRefs = useRef(new Map<AlgorithmId, HTMLButtonElement>());
-  const bogoPracticeAudioRef = useRef<HTMLAudioElement | null>(null);
-  const bogoPracticePreloadAudioRef = useRef<HTMLAudioElement[]>([]);
+  const bogoPracticeAudioSourceRef = useRef<AudioBufferSourceNode | null>(null);
+  const bogoPracticeAudioGainRef = useRef<GainNode | null>(null);
+  const bogoPracticeAudioClipLoadsRef = useRef(
+    new Map<BogoPracticeCasinoSound, Promise<DecodedPcmWav>>(),
+  );
   const bogoPracticeAudioTimerRef = useRef<number | null>(null);
   const bogoPracticeAudioRunRef = useRef(0);
   // A casino action can contain several cues (shuffle, then fail/success).
@@ -3250,42 +3264,34 @@ export default function Home() {
     };
   }, []);
 
-  // Keep every casino clip fetched and ready before a person presses a button.
-  // `load()` fetches/prepares media only; playback still begins solely from a
-  // later user click, but a late network response cannot steal time from the
-  // clip's actual playback window.
+  // Keep the raw PCM clips in memory before a person presses a button. The
+  // actual output still starts only from a later user gesture. We intentionally
+  // do not use `new Audio()` here: Linux WebKitGTK routes media elements through
+  // its GStreamer packaging path, while the existing sorting notes prove that
+  // AudioContext output is reliable in the desktop app.
   useEffect(() => {
-    const preloadAudio = Object.values(BOGO_PRACTICE_CASINO_SOUNDS).map(
-      ({ source }) => {
-        const audio = new Audio(source);
-        audio.autoplay = false;
-        audio.loop = false;
-        audio.preload = "auto";
-        audio.load();
-        return audio;
-      },
-    );
-    bogoPracticePreloadAudioRef.current = preloadAudio;
-
+    const clipLoads = bogoPracticeAudioClipLoadsRef.current;
+    const sounds = Object.keys(BOGO_PRACTICE_CASINO_SOUNDS) as BogoPracticeCasinoSound[];
+    sounds.forEach((sound) => {
+      void loadBogoPracticeCasinoClip(sound).catch(() => undefined);
+    });
     return () => {
-      if (bogoPracticePreloadAudioRef.current === preloadAudio) {
-        bogoPracticePreloadAudioRef.current = [];
-      }
-      preloadAudio.forEach(releaseBogoPracticeAudio);
+      clipLoads.clear();
     };
   }, []);
 
-  // The casino clips use native media playback rather than the synthesized
-  // sorting voices, so keep the one currently playing clip in step with the
-  // shared volume control as it changes.
+  // Keep an active casino buffer in step with the shared volume control.
   useEffect(() => {
-    const audio = bogoPracticeAudioRef.current;
-    if (audio) {
-      audio.volume = Math.max(
-        0,
-        Math.min(1, (soundVolume / 100) * BOGO_PRACTICE_CASINO_GAIN),
-      );
-    }
+    const context = audioContextRef.current;
+    const gain = bogoPracticeAudioGainRef.current;
+    if (!context || !gain) return;
+
+    const nextGain = Math.max(
+      0,
+      Math.min(1, (soundVolume / 100) * BOGO_PRACTICE_CASINO_GAIN),
+    );
+    gain.gain.cancelScheduledValues(context.currentTime);
+    gain.gain.setTargetAtTime(nextGain, context.currentTime, 0.012);
   }, [soundVolume]);
 
   useEffect(() => {
@@ -3327,6 +3333,7 @@ export default function Home() {
 
     let cancelled = false;
     let timer: number | undefined;
+    let nextVisualUpdateAt = 0;
 
     const runBatch = () => {
       if (cancelled || bogoSessionRef.current !== session) return;
@@ -3376,7 +3383,17 @@ export default function Home() {
         }
       }
 
-      setBogoLiveStep(getBogoSessionStep(session));
+      // `getBogoSessionStep` clones the row and feeds the full visualizer
+      // tree. At the fast end the CPU loop can complete hundreds of batches a
+      // second, which used to turn every batch into a full React render and
+      // make the desktop app unresponsive. The simulation and its measured
+      // rate remain continuous; only the visual snapshot is coalesced. Always
+      // flush the terminal state immediately so the completion still lands on
+      // the exact winning (or limited) shuffle.
+      if (session.done || now >= nextVisualUpdateAt) {
+        nextVisualUpdateAt = now + BOGO_VISUAL_UPDATE_INTERVAL;
+        setBogoLiveStep(getBogoSessionStep(session));
+      }
       if (session.done) {
         setRunState("complete");
         return;
@@ -3511,22 +3528,49 @@ export default function Home() {
     }
   }
 
-  function releaseBogoPracticeAudio(audio: HTMLAudioElement) {
-    // Every casino cue is a strictly one-shot media element. Tear it down
-    // before any next cue starts so an ended buffer can never emit a tail or
-    // re-enter playback as the next state update lands.
-    audio.onended = null;
-    audio.onplaying = null;
-    audio.onerror = null;
-    audio.loop = false;
-    audio.pause();
-    try {
-      audio.currentTime = 0;
-    } catch {
-      // A clip that has not finished loading cannot always seek yet.
+  function loadBogoPracticeCasinoClip(sound: BogoPracticeCasinoSound) {
+    const existingLoad = bogoPracticeAudioClipLoadsRef.current.get(sound);
+    if (existingLoad) return existingLoad;
+
+    const { source } = BOGO_PRACTICE_CASINO_SOUNDS[sound];
+    const load = fetch(source)
+      .then((response) => {
+        if (!response.ok) {
+          throw new Error("Casino audio could not be loaded.");
+        }
+        return response.arrayBuffer();
+      })
+      .then(decodePcmWav);
+
+    bogoPracticeAudioClipLoadsRef.current.set(sound, load);
+    void load.catch(() => {
+      // A transient local-protocol failure should not poison every later
+      // click. Let the next cue attempt a fresh request instead.
+      if (bogoPracticeAudioClipLoadsRef.current.get(sound) === load) {
+        bogoPracticeAudioClipLoadsRef.current.delete(sound);
+      }
+    });
+    return load;
+  }
+
+  function releaseBogoPracticeAudio(
+    source: AudioBufferSourceNode,
+    gain: GainNode | null,
+    { stop = true }: { stop?: boolean } = {},
+  ) {
+    // Every casino cue is a strictly one-shot buffer source. Stopping and
+    // disconnecting it before the next cue prevents rapid Gamble clicks from
+    // retaining an old tail or accumulating a playback backlog.
+    source.onended = null;
+    if (stop) {
+      try {
+        source.stop();
+      } catch {
+        // Stopping an already-ended buffer is intentionally harmless.
+      }
     }
-    audio.removeAttribute("src");
-    audio.load();
+    source.disconnect();
+    gain?.disconnect();
   }
 
   function clearBogoPracticeAudio() {
@@ -3536,10 +3580,12 @@ export default function Home() {
       bogoPracticeAudioTimerRef.current = null;
     }
 
-    const audio = bogoPracticeAudioRef.current;
-    bogoPracticeAudioRef.current = null;
-    if (!audio) return;
-    releaseBogoPracticeAudio(audio);
+    const source = bogoPracticeAudioSourceRef.current;
+    const gain = bogoPracticeAudioGainRef.current;
+    bogoPracticeAudioSourceRef.current = null;
+    bogoPracticeAudioGainRef.current = null;
+    if (!source) return;
+    releaseBogoPracticeAudio(source, gain);
   }
 
   function beginBogoPracticeCasinoAction() {
@@ -3577,12 +3623,14 @@ export default function Home() {
     clearBogoPracticeAudio();
     const soundRun = bogoPracticeAudioRunRef.current + 1;
     bogoPracticeAudioRunRef.current = soundRun;
-    const { source, silentDuration } = BOGO_PRACTICE_CASINO_SOUNDS[sound];
+    const { silentDuration } = BOGO_PRACTICE_CASINO_SOUNDS[sound];
     let settled = false;
     let playbackStarted = false;
     let sequenceStarted = false;
+    let usingTimedFallback = false;
 
-    let activeAudio: HTMLAudioElement | null = null;
+    let activeSource: AudioBufferSourceNode | null = null;
+    let activeGain: GainNode | null = null;
 
     const isCurrentCue = () =>
       bogoPracticeCasinoActionRef.current === casinoActionRun &&
@@ -3605,18 +3653,14 @@ export default function Home() {
       settled = true;
       clearAudioTimer();
 
-      if (activeAudio) {
-        if (bogoPracticeAudioRef.current === activeAudio) {
-          bogoPracticeAudioRef.current = null;
+      if (activeSource) {
+        if (bogoPracticeAudioSourceRef.current === activeSource) {
+          bogoPracticeAudioSourceRef.current = null;
+          bogoPracticeAudioGainRef.current = null;
         }
-        releaseBogoPracticeAudio(activeAudio);
-        activeAudio = null;
-      } else if (bogoPracticeAudioRef.current) {
-        // This is only reachable for an interrupted/failed player. Do not
-        // leave a dangling clip around while the lesson advances.
-        const audio = bogoPracticeAudioRef.current;
-        bogoPracticeAudioRef.current = null;
-        releaseBogoPracticeAudio(audio);
+        releaseBogoPracticeAudio(activeSource, activeGain, { stop: false });
+        activeSource = null;
+        activeGain = null;
       }
       onSettled();
     };
@@ -3625,62 +3669,83 @@ export default function Home() {
       if (
         settled ||
         playbackStarted ||
+        usingTimedFallback ||
         !isCurrentCue()
       ) {
         return;
       }
+      usingTimedFallback = true;
       clearAudioTimer();
       startSequence();
       bogoPracticeAudioTimerRef.current = window.setTimeout(settle, silentDuration);
     };
 
     // A silent volume still preserves the same paced visual lesson; it simply
-    // skips constructing a media player. Normal playback advances only from
-    // `ended`; the timer is reserved for muted or failed media playback.
+    // skips creating a Web Audio source. Successful playback advances only
+    // from `ended`; the timer is reserved for muted or unavailable clips.
     if (soundVolumeRef.current > 0) {
-      // The preload collection above warms the browser cache. Each actual cue
-      // still gets its own one-shot player, avoiding stale end-buffer reuse
-      // when a person opens the casino repeatedly.
-      const audio = new Audio(source);
-      activeAudio = audio;
-      audio.autoplay = false;
-      audio.loop = false;
-      audio.preload = "auto";
-      audio.defaultPlaybackRate = 1;
-      audio.playbackRate = 1;
-      audio.volume = Math.max(
-        0,
-        Math.min(1, (soundVolumeRef.current / 100) * BOGO_PRACTICE_CASINO_GAIN),
-      );
-      audio.onended = settle;
-      // `playing` is the browser's proof that sound is actually flowing. The
-      // watchdog below is cleared here, and no duration timer is allowed to
-      // interrupt the cue after this point—even if it briefly buffers.
-      audio.onplaying = () => {
-        if (!isCurrentCue() || settled) return;
-        playbackStarted = true;
-        clearAudioTimer();
-        startSequence();
-      };
-      audio.onerror = () => {
-        // A media error after `playing` is a genuine aborted cue rather than a
-        // slow start. Release the lock instead of leaving the lesson stranded;
-        // a healthy clip never takes this path and remains governed by `ended`.
-        if (playbackStarted) {
-          settle();
-          return;
-        }
-        scheduleTimedFallback();
-      };
-      bogoPracticeAudioRef.current = audio;
-      // Protect the disabled lesson from a player that never begins at all.
-      // This is intentionally a startup-only watchdog: a healthy cue advances
-      // solely through `ended`, so a slow start can never cut it short.
+      // Open/resume synchronously from the click that invoked this function.
+      // That preserves the browser's user-activation requirement even if the
+      // local clip finishes fetching a moment later.
+      const context = ensureAudioContext();
+
+      // Protect the disabled lesson from an unavailable local asset or output
+      // device. Once a buffer starts, this watchdog is cleared and can never
+      // cut off a healthy cue.
       bogoPracticeAudioTimerRef.current = window.setTimeout(
         scheduleTimedFallback,
         BOGO_PRACTICE_CASINO_STARTUP_TIMEOUT,
       );
-      void audio.play().catch(scheduleTimedFallback);
+
+      void Promise.all([context.resume(), loadBogoPracticeCasinoClip(sound)])
+        .then(([, clip]) => {
+          if (settled || usingTimedFallback || !isCurrentCue()) return;
+
+          const buffer = context.createBuffer(
+            clip.numberOfChannels,
+            clip.frameCount,
+            clip.sampleRate,
+          );
+          clip.channelData.forEach((channel, index) => buffer.copyToChannel(channel, index));
+
+          const source = context.createBufferSource();
+          const gain = context.createGain();
+          source.buffer = buffer;
+          source.loop = false;
+          gain.gain.setValueAtTime(
+            Math.max(
+              0,
+              Math.min(1, (soundVolumeRef.current / 100) * BOGO_PRACTICE_CASINO_GAIN),
+            ),
+            context.currentTime,
+          );
+          source.connect(gain);
+          gain.connect(context.destination);
+          activeSource = source;
+          activeGain = gain;
+          bogoPracticeAudioSourceRef.current = source;
+          bogoPracticeAudioGainRef.current = gain;
+          source.onended = settle;
+
+          try {
+            source.start();
+          } catch {
+            releaseBogoPracticeAudio(source, gain);
+            if (bogoPracticeAudioSourceRef.current === source) {
+              bogoPracticeAudioSourceRef.current = null;
+              bogoPracticeAudioGainRef.current = null;
+            }
+            activeSource = null;
+            activeGain = null;
+            scheduleTimedFallback();
+            return;
+          }
+
+          playbackStarted = true;
+          clearAudioTimer();
+          startSequence();
+        })
+        .catch(scheduleTimedFallback);
     } else {
       // With sound muted there is no media event to await, so preserve the
       // same readable pacing without constructing a silent player.
@@ -4725,22 +4790,73 @@ export default function Home() {
     setArraySizeInput(String(clampedSize));
   }
 
-  function beginSpeedVisualAdjustment() {
+  const beginSpeedVisualAdjustment = useCallback(() => {
     // Bogo does not use the move interpolation path, so there is nothing to
     // freeze there. For every other algorithm, retain the current visual mode
     // until the person finishes changing the control.
     if (isBogo) return;
     setSettledVisualSpeed(speedRef.current);
     setIsAdjustingSpeedControl(true);
-  }
+  }, [isBogo]);
 
-  function finishSpeedVisualAdjustment() {
+  const finishSpeedVisualAdjustment = useCallback(() => {
     if (isBogo) return;
     // `speedRef` is updated synchronously by handleSpeedChange, which also
     // covers a final native range input that arrives just before pointer-up.
     setSettledVisualSpeed(speedRef.current);
     setIsAdjustingSpeedControl(false);
-  }
+  }, [isBogo]);
+
+  const beginSpeedRangePointerInteraction = useCallback((pointerId: number) => {
+    speedRangePointerIdRef.current = pointerId;
+    beginSpeedVisualAdjustment();
+  }, [beginSpeedVisualAdjustment]);
+
+  const finishSpeedRangePointerInteraction = useCallback((pointerId?: number) => {
+    const activePointerId = speedRangePointerIdRef.current;
+    if (
+      pointerId !== undefined &&
+      activePointerId !== null &&
+      activePointerId !== pointerId
+    ) {
+      return;
+    }
+
+    speedRangePointerIdRef.current = null;
+    finishSpeedVisualAdjustment();
+  }, [finishSpeedVisualAdjustment]);
+
+  // Some Linux WebKit builds can lose an input range's pointer-up while the
+  // native thumb is being dragged. Do not capture the pointer ourselves—the
+  // native control already does that—but listen at the window boundary as a
+  // cleanup fallback for mouse, touch, pen, cancelled gestures, and a window
+  // focus/visibility change.
+  useEffect(() => {
+    if (!isAdjustingSpeedControl) return;
+
+    const finishOnPointerEnd = (event: PointerEvent) => {
+      if (speedRangePointerIdRef.current === null) return;
+      finishSpeedRangePointerInteraction(event.pointerId);
+    };
+    const finishOnWindowLoss = () => {
+      if (speedRangePointerIdRef.current === null) return;
+      finishSpeedRangePointerInteraction();
+    };
+    const finishOnVisibilityChange = () => {
+      if (document.visibilityState !== "visible") finishOnWindowLoss();
+    };
+
+    window.addEventListener("pointerup", finishOnPointerEnd, true);
+    window.addEventListener("pointercancel", finishOnPointerEnd, true);
+    window.addEventListener("blur", finishOnWindowLoss);
+    document.addEventListener("visibilitychange", finishOnVisibilityChange);
+    return () => {
+      window.removeEventListener("pointerup", finishOnPointerEnd, true);
+      window.removeEventListener("pointercancel", finishOnPointerEnd, true);
+      window.removeEventListener("blur", finishOnWindowLoss);
+      document.removeEventListener("visibilitychange", finishOnVisibilityChange);
+    };
+  }, [finishSpeedRangePointerInteraction, isAdjustingSpeedControl]);
 
   function isSpeedAdjustmentKey(key: string) {
     return ["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End", "PageUp", "PageDown"].includes(key);
@@ -5440,20 +5556,18 @@ export default function Home() {
                   value={speed}
                   onChange={(event) => handleSpeedChange(Number(event.target.value))}
                   onPointerDown={(event) => {
-                    // Pointer Events cover mouse, touch, and pen. Capturing
-                    // the pointer guarantees release is observed even if the
-                    // thumb is dragged outside the narrow range control.
-                    event.currentTarget.setPointerCapture(event.pointerId);
-                    beginSpeedVisualAdjustment();
+                    // Let the native range own its pointer capture. Taking a
+                    // second capture here can leave WebKitGTK's thumb stuck
+                    // to the cursor after release.
+                    if (event.pointerType === "mouse" && event.button !== 0) return;
+                    beginSpeedRangePointerInteraction(event.pointerId);
                   }}
                   onPointerUp={(event) => {
-                    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
-                      event.currentTarget.releasePointerCapture(event.pointerId);
-                    }
-                    finishSpeedVisualAdjustment();
+                    finishSpeedRangePointerInteraction(event.pointerId);
                   }}
-                  onPointerCancel={finishSpeedVisualAdjustment}
-                  onBlur={finishSpeedVisualAdjustment}
+                  onPointerCancel={(event) => finishSpeedRangePointerInteraction(event.pointerId)}
+                  onLostPointerCapture={(event) => finishSpeedRangePointerInteraction(event.pointerId)}
+                  onBlur={() => finishSpeedRangePointerInteraction()}
                   onKeyDown={(event) => {
                     if (isSpeedAdjustmentKey(event.key)) beginSpeedVisualAdjustment();
                   }}
