@@ -33,15 +33,15 @@ test("a fully ordered practice row must still be the lesson's original permutati
   assert.equal(isPracticeRowFinished([1, 3, 2, 4, 5, 6], lessonValues), false);
 });
 
-test("the Heap lesson's early finished row passes the global completion guard", () => {
-  // At Heap's fifth scripted step, swapping the root 3 with 1 directly
-  // produces the actual final row rather than that step's intermediate heap.
-  const scriptedStepTarget = [2, 1, 3, 4, 5, 6];
+test("a finished Heap row passes the global completion guard", () => {
+  // Heap's final extraction swaps the active root 3 directly with 1.
+  // The completion check must recognize the ordered row before any old
+  // per-step checker could hold the lesson open.
+  const lessonValues = [1, 2, 3, 4, 5, 6];
   const finishedShortcut = applyPracticeMove([3, 2, 1, 4, 5, 6], 0, 2, "swap");
 
   assert.deepEqual(finishedShortcut, [1, 2, 3, 4, 5, 6]);
-  assert.equal(isPracticeRowFinished(scriptedStepTarget, scriptedStepTarget), false);
-  assert.equal(isPracticeRowFinished(finishedShortcut, scriptedStepTarget), true);
+  assert.equal(isPracticeRowFinished(finishedShortcut, lessonValues), true);
 });
 
 test("one shared drop resolver distinguishes direct swaps from between-block inserts", () => {
@@ -85,8 +85,8 @@ test("the floating source never becomes its own direct drop target", () => {
   assert.equal(resolvePracticeDropTarget(44, 44, 0, blocks, gaps, blocks[0]), null);
 });
 
-test("the shared move mechanics preserve every lesson's 6-to-10 block rows", () => {
-  for (const size of [6, 8, 10]) {
+test("the shared move mechanics preserve every lesson's 6-to-12 block rows", () => {
+  for (const size of [6, 8, 10, 12]) {
     const values = Array.from({ length: size }, (_, index) => index + 1);
     const swapped = applyPracticeMove(values, 0, size - 1, "swap");
     const inserted = applyPracticeMove(values, 0, size, "insert");

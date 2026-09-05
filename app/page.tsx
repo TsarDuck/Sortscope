@@ -3,9 +3,7 @@
 import {
   Fragment,
   type CSSProperties,
-  type KeyboardEvent as ReactKeyboardEvent,
   type PointerEvent as ReactPointerEvent,
-  type WheelEvent as ReactWheelEvent,
   useEffect,
   useLayoutEffect,
   useMemo,
@@ -40,6 +38,10 @@ import {
   createSmallArrayPianoToneMap,
   getContinuousToneFrequency,
 } from "./lib/audio";
+import {
+  makeArrayForArrangement,
+  type ArrayArrangement,
+} from "./lib/array-arrangements";
 
 type AlgorithmId =
   | "insertion"
@@ -71,26 +73,7 @@ type StepPhase =
   | "complete";
 
 type BenchmarkPattern = "random" | "reverse" | "nearly-sorted";
-type BenchmarkTab = "table" | "lines";
-type GrowthView = {
-  zoom: number;
-  centerX: number;
-  centerY: number;
-};
-type GrowthGraphDomain = {
-  minimumExponent: number;
-  maximumExponent: number;
-  exponentSpan: number;
-};
-type GrowthViewport = GrowthGraphDomain & {
-  zoom: number;
-  xStart: number;
-  xEnd: number;
-  xSpan: number;
-  yMinimum: number;
-  yMaximum: number;
-  ySpan: number;
-};
+type BenchmarkTab = "table" | "bars";
 
 type PracticeGroupTone = "cyan" | "violet" | "mint" | "gold";
 
@@ -113,12 +96,26 @@ type BlockPracticeStep = {
   target: number[];
   hint: string;
   kind?: "blocks";
-  /** Quick Sort's currently parked pivot, when this is a pivot lesson step. */
+  /** Require this exact resulting row for a concept with one safe next move. */
+  validation?: "exact" | "progress";
+  /** The highlighted pivot for a partition lesson. */
   pivot?: number;
-  /** Inclusive indices for the only sub-array the current pivot may affect. */
+  /** Whether the pivot was parked or chosen from a PDQ median-of-three sample. */
+  pivotKind?: "parked" | "sampled";
+  /** Values PDQ inspected when it chose a sampled pivot. */
+  sampleValues?: number[];
+  /** The highlighted key for an insertion-style lesson. */
+  insertingKey?: number;
+  /** Inclusive indices for the part of the row currently being worked on. */
   activeRange?: [number, number];
-  /** Values whose final positions are already proven by earlier pivots. */
+  /** Values whose positions are already certified by the current rule. */
   settled?: number[];
+  /** Short status copy for PDQ's adaptive guard or Powersort's merge schedule. */
+  decision?: {
+    label: string;
+    detail: string;
+    power?: number;
+  };
   /** Visible run boundaries for merge-style lessons. Ranges use row slots. */
   groups?: PracticeGroup[];
 };
@@ -176,6 +173,11 @@ const BOGO_COMPLETION_SWEEP_DELAY = 720;
 // animation finish before removing it from the DOM.
 const BOGO_CELEBRATION_VISIBLE_DURATION = 4_800;
 const BOGO_CELEBRATION_FADE_DURATION = 560;
+// Lessons get the same satisfying, compact payoff as a successful Bogo run,
+// without the Bogo-specific message. Keep it short so restarting a lesson is
+// never held up by its celebration.
+const PRACTICE_CELEBRATION_VISIBLE_DURATION = 1_350;
+const PRACTICE_CELEBRATION_FADE_DURATION = 560;
 const THEORY_BENCHMARK_SIZES = [256, 1_024, 4_096, 16_384, 65_536, 262_144, 1_048_576];
 const BENCHMARK_ALGORITHMS = [
   { key: "bubble", label: "Bubble sort", className: "bubble" },
@@ -201,7 +203,7 @@ const BENCHMARK_COLORS: Record<BenchmarkAlgorithm, string> = {
   merge: "#edc05a",
   powersort: "#bd91f5",
 };
-const DEFAULT_GROWTH_ALGORITHM_VISIBILITY: Record<BenchmarkAlgorithm, boolean> = {
+const DEFAULT_WORKLOAD_BAR_ALGORITHM_VISIBILITY: Record<BenchmarkAlgorithm, boolean> = {
   bubble: true,
   insertion: true,
   cocktail: true,
@@ -212,18 +214,6 @@ const DEFAULT_GROWTH_ALGORITHM_VISIBILITY: Record<BenchmarkAlgorithm, boolean> =
   merge: true,
   powersort: true,
 };
-const GROWTH_GRAPH_WIDTH = 920;
-const GROWTH_GRAPH_HEIGHT = 356;
-const GROWTH_GRAPH_PLOT_LEFT = 86;
-const GROWTH_GRAPH_PLOT_RIGHT = 28;
-const GROWTH_GRAPH_PLOT_TOP = 24;
-const GROWTH_GRAPH_PLOT_BOTTOM = 52;
-const GROWTH_GRAPH_PLOT_WIDTH = GROWTH_GRAPH_WIDTH - GROWTH_GRAPH_PLOT_LEFT - GROWTH_GRAPH_PLOT_RIGHT;
-const GROWTH_GRAPH_PLOT_HEIGHT = GROWTH_GRAPH_HEIGHT - GROWTH_GRAPH_PLOT_TOP - GROWTH_GRAPH_PLOT_BOTTOM;
-const GROWTH_GRAPH_MIN_X_SPAN = 0.1;
-const GROWTH_GRAPH_MIN_Y_SPAN = 0.65;
-const GROWTH_GRAPH_MAX_ZOOM = 10;
-const GROWTH_GRAPH_ZOOM_STEP = 1.35;
 const BOGO_MIN_ATTEMPTS = 1;
 const BOGO_STANDARD_MAX_ATTEMPTS = 999_999_999;
 // At the top end, the live runner works in short CPU batches. This is a
@@ -455,22 +445,49 @@ const ALGORITHM_DETAILS: Record<AlgorithmId, AlgorithmDetails> = {
     ],
     practice: [
       {
-        prompt: "Use two swaps to carry the key, 1, left through the sorted prefix.",
+        prompt: "The yellow key is 1. Slide it left one place through 5 to open the insertion gap.",
         start: [2, 5, 1, 4, 3],
-        target: [1, 2, 5, 4, 3],
-        hint: "First move 1 past 5, then past 2. The prefix should read [1, 2, 5].",
+        target: [2, 1, 5, 4, 3],
+        insertingKey: 1,
+        activeRange: [0, 2],
+        validation: "exact",
+        hint: "Move 1 only one neighboring place left: drop it into the gap just before 5, or swap those two neighbors.",
       },
       {
-        prompt: "Insert the next key, 4, into the prefix.",
+        prompt: "Keep the same key, 1, moving one more place left through 2.",
+        start: [2, 1, 5, 4, 3],
+        target: [1, 2, 5, 4, 3],
+        insertingKey: 1,
+        activeRange: [0, 1],
+        validation: "exact",
+        hint: "1 still belongs before its immediate left neighbor, 2. Move it one slot left—do not jump across the row.",
+      },
+      {
+        prompt: "The next yellow key is 4. Slide it one place left through 5.",
         start: [1, 2, 5, 4, 3],
         target: [1, 2, 4, 5, 3],
-        hint: "4 only needs to pass 5.",
+        insertingKey: 4,
+        activeRange: [2, 3],
+        validation: "exact",
+        hint: "4 belongs immediately before 5, so make this one neighboring move.",
       },
       {
-        prompt: "Carry the last key, 3, left until the whole row is ordered.",
+        prompt: "Take the final yellow key, 3, one place left through 5.",
         start: [1, 2, 4, 5, 3],
+        target: [1, 2, 4, 3, 5],
+        insertingKey: 3,
+        activeRange: [2, 4],
+        validation: "exact",
+        hint: "The key advances one neighboring slot at a time. Move 3 only through 5 first.",
+      },
+      {
+        prompt: "Finish the insertion: slide 3 one last place left through 4.",
+        start: [1, 2, 4, 3, 5],
         target: [1, 2, 3, 4, 5],
-        hint: "Move 3 past 5, then past 4.",
+        insertingKey: 3,
+        activeRange: [2, 3],
+        validation: "exact",
+        hint: "3 now fits directly before 4. One neighboring move completes the sorted prefix and the row.",
       },
     ],
   },
@@ -510,28 +527,53 @@ const ALGORITHM_DETAILS: Record<AlgorithmId, AlgorithmDetails> = {
     ],
     practice: [
       {
-        prompt: "Start the bubble by moving 1 ahead of 4.",
-        start: [4, 1, 3, 2, 5],
-        target: [1, 4, 3, 2, 5],
-        hint: "The first pair is backwards: 4 is larger than 1.",
+        prompt: "Begin the first forward sweep: swap the backwards neighbors 4 and 1.",
+        start: [4, 1, 6, 3, 2, 5],
+        target: [1, 4, 6, 3, 2, 5],
+        validation: "exact",
+        hint: "Bubble Sort only trades neighboring values. 4 is larger than its right neighbor, 1.",
       },
       {
-        prompt: "Keep 4 bubbling right past 3.",
-        start: [1, 4, 3, 2, 5],
-        target: [1, 3, 4, 2, 5],
-        hint: "Compare the neighboring pair containing 4 and 3.",
+        prompt: "Keep scanning right. 6 is larger than 3, so it bubbles one place right.",
+        start: [1, 4, 6, 3, 2, 5],
+        target: [1, 4, 3, 6, 2, 5],
+        validation: "exact",
+        hint: "The pair 4 and 6 is already fine. Continue to the next neighboring pair, 6 and 3.",
       },
       {
-        prompt: "Finish the first sweep by sending 4 past 2.",
-        start: [1, 3, 4, 2, 5],
-        target: [1, 3, 2, 4, 5],
-        hint: "4 is still larger than the value beside it; 5 is already settled.",
+        prompt: "The same 6 meets 2 next. Swap that neighboring pair and keep its trip going.",
+        start: [1, 4, 3, 6, 2, 5],
+        target: [1, 4, 3, 2, 6, 5],
+        validation: "exact",
+        hint: "6 can travel across this pass only by one neighboring swap at a time.",
       },
       {
-        prompt: "Make the last neighboring swap to complete the five-value row.",
-        start: [1, 3, 2, 4, 5],
-        target: [1, 2, 3, 4, 5],
-        hint: "Compare 3 and 2; the two rightmost values stay in place.",
+        prompt: "Finish the first sweep: swap 6 and 5, locking 6 at the far right.",
+        start: [1, 4, 3, 2, 6, 5],
+        target: [1, 4, 3, 2, 5, 6],
+        validation: "exact",
+        hint: "After a complete left-to-right sweep, the largest unsorted value must be at the right edge.",
+      },
+      {
+        prompt: "Start the shorter second sweep. Swap the backwards neighbors 4 and 3.",
+        start: [1, 4, 3, 2, 5, 6],
+        target: [1, 3, 4, 2, 5, 6],
+        validation: "exact",
+        hint: "6 is fixed, so this pass stops before it. Continue comparing only neighboring values to its left.",
+      },
+      {
+        prompt: "Continue the second sweep: 4 is still larger than 2.",
+        start: [1, 3, 4, 2, 5, 6],
+        target: [1, 3, 2, 4, 5, 6],
+        validation: "exact",
+        hint: "Swap this adjacent backwards pair; 4 now reaches its settled position before 5 and 6.",
+      },
+      {
+        prompt: "One final neighboring swap in the remaining three slots completes the row.",
+        start: [1, 3, 2, 4, 5, 6],
+        target: [1, 2, 3, 4, 5, 6],
+        validation: "exact",
+        hint: "3 and 2 are the only backwards neighbors left. Bubble Sort finishes when a pass has no swaps.",
       },
     ],
   },
@@ -571,34 +613,53 @@ const ALGORITHM_DETAILS: Record<AlgorithmId, AlgorithmDetails> = {
     ],
     practice: [
       {
-        prompt: "Start the forward sweep by moving 1 ahead of 5.",
-        start: [5, 1, 3, 2, 4],
-        target: [1, 5, 3, 2, 4],
-        hint: "The first neighboring pair is backwards.",
+        prompt: "Forward sweep: 5 meets 1, so move the larger value one neighbor to the right.",
+        start: [3, 4, 5, 1, 2, 6, 8, 7],
+        target: [3, 4, 1, 5, 2, 6, 8, 7],
+        validation: "exact",
+        hint: "The first two pairs are already ordered. Cocktail Sort keeps scanning until it finds the backward neighboring pair 5 and 1.",
       },
       {
-        prompt: "Keep 5 moving right past 3.",
-        start: [1, 5, 3, 2, 4],
-        target: [1, 3, 5, 2, 4],
-        hint: "On a forward sweep, the larger neighbor keeps traveling right.",
+        prompt: "Stay on the forward sweep: 5 now meets 2 and keeps moving right.",
+        start: [3, 4, 1, 5, 2, 6, 8, 7],
+        target: [3, 4, 1, 2, 5, 6, 8, 7],
+        validation: "exact",
+        hint: "On the rightward trip, a large value can keep bubbling through several neighboring swaps in one pass.",
       },
       {
-        prompt: "Keep the forward sweep going past 2.",
-        start: [1, 3, 5, 2, 4],
-        target: [1, 3, 2, 5, 4],
-        hint: "5 is still the large value in this neighboring pair.",
+        prompt: "Finish the forward sweep at the far edge: swap 8 and 7, so 8 is fixed on the right.",
+        start: [3, 4, 1, 2, 5, 6, 8, 7],
+        target: [3, 4, 1, 2, 5, 6, 7, 8],
+        validation: "exact",
+        hint: "8 is the largest value. Reaching the right edge proves it will never need to move again.",
       },
       {
-        prompt: "Settle 5 at the right edge to finish the forward sweep.",
-        start: [1, 3, 2, 5, 4],
-        target: [1, 3, 2, 4, 5],
-        hint: "Swap the final backward neighboring pair in the forward direction.",
+        prompt: "Turn around. On the backward sweep, carry the small value 1 left through 4.",
+        start: [3, 4, 1, 2, 5, 6, 7, 8],
+        target: [3, 1, 4, 2, 5, 6, 7, 8],
+        validation: "exact",
+        hint: "Now comparisons move right-to-left, so small values can travel left immediately instead of waiting for another full pass.",
       },
       {
-        prompt: "Now use the backward sweep to carry 2 left into place.",
-        start: [1, 3, 2, 4, 5],
-        target: [1, 2, 3, 4, 5],
-        hint: "The return sweep fixes the small value that needs to travel left.",
+        prompt: "Keep the backward sweep going: move 1 left through 3 and lock the left edge.",
+        start: [3, 1, 4, 2, 5, 6, 7, 8],
+        target: [1, 3, 4, 2, 5, 6, 7, 8],
+        validation: "exact",
+        hint: "The backward pass has now settled 1 at the opposite edge from 8. That is Cocktail Sort's two-way advantage.",
+      },
+      {
+        prompt: "Start the smaller middle sweep: 4 moves right through 2.",
+        start: [1, 3, 4, 2, 5, 6, 7, 8],
+        target: [1, 3, 2, 4, 5, 6, 7, 8],
+        validation: "exact",
+        hint: "Both edges are fixed, so only the middle is still active. Continue the forward rule on the neighboring pair 4 and 2.",
+      },
+      {
+        prompt: "The middle is almost done. Swap 3 and 2 to finish the eight-value row.",
+        start: [1, 3, 2, 4, 5, 6, 7, 8],
+        target: [1, 2, 3, 4, 5, 6, 7, 8],
+        validation: "exact",
+        hint: "Cocktail Sort shrinks inward from both ends after every forward-and-backward pair of sweeps.",
       },
     ],
   },
@@ -702,37 +763,57 @@ const ALGORITHM_DETAILS: Record<AlgorithmId, AlgorithmDetails> = {
         prompt: "Build the six-value max heap by moving 6 to the root.",
         start: [4, 6, 5, 2, 3, 1],
         target: [6, 4, 5, 2, 3, 1],
+        validation: "exact",
         hint: "The root must be at least as large as both of its children.",
       },
       {
-        prompt: "Extract 6, then sift the new root down to restore the five-value heap.",
+        prompt: "Extract the root: move 6 directly to the far-right finished slot.",
         start: [6, 4, 5, 2, 3, 1],
+        target: [1, 4, 5, 2, 3, 6],
+        validation: "exact",
+        hint: "An extraction is one swap: trade the root 6 with the last active slot, 1. Do not slide it through intermediate positions.",
+      },
+      {
+        prompt: "Sift the new root down: move the larger child, 5, above 1.",
+        start: [1, 4, 5, 2, 3, 6],
         target: [5, 4, 1, 2, 3, 6],
-        hint: "First send 6 to the far right. Then move the larger child, 5, to the root.",
+        validation: "exact",
+        hint: "Compare the root's children 4 and 5; the larger child is 5, so it swaps with the root in one move.",
       },
       {
-        prompt: "Extract 5 and restore the next smaller heap.",
+        prompt: "Extract 5 to its next finished slot.",
         start: [5, 4, 1, 2, 3, 6],
+        target: [3, 4, 1, 2, 5, 6],
+        validation: "exact",
+        hint: "Swap the root 5 directly with the last active value, 3. The right side [5, 6] is now fixed.",
+      },
+      {
+        prompt: "Restore the four-value heap by sifting 4 above its temporary root, 3.",
+        start: [3, 4, 1, 2, 5, 6],
         target: [4, 3, 1, 2, 5, 6],
-        hint: "Send 5 beside 6, then sift 4 above the temporary root.",
+        validation: "exact",
+        hint: "4 is the larger root child, so it takes the root position in one direct swap.",
       },
       {
-        prompt: "Extract 4 and repair the three-value heap.",
+        prompt: "Extract 4 to the next finished slot.",
         start: [4, 3, 1, 2, 5, 6],
+        target: [2, 3, 1, 4, 5, 6],
+        validation: "exact",
+        hint: "Swap the root 4 directly with the last active slot, 2.",
+      },
+      {
+        prompt: "Sift 3 back to the root of the remaining three-value heap.",
+        start: [2, 3, 1, 4, 5, 6],
         target: [3, 2, 1, 4, 5, 6],
-        hint: "After 4 reaches its settled position, 3 should return to the root.",
+        validation: "exact",
+        hint: "3 is the larger child of 2, so it must return to the root before the next extraction.",
       },
       {
-        prompt: "Extract 3 and sift 2 back to the root.",
+        prompt: "Extract 3 directly to finish the six-value row.",
         start: [3, 2, 1, 4, 5, 6],
-        target: [2, 1, 3, 4, 5, 6],
-        hint: "The remaining two-value heap still needs its larger value on top.",
-      },
-      {
-        prompt: "Extract 2 to complete the ordered six-value row.",
-        start: [2, 1, 3, 4, 5, 6],
         target: [1, 2, 3, 4, 5, 6],
-        hint: "The final two active values are a tiny max heap.",
+        validation: "exact",
+        hint: "Swap the root 3 with the final active slot, 1. The remaining pair is already ordered.",
       },
     ],
   },
@@ -881,22 +962,88 @@ const ALGORITHM_DETAILS: Record<AlgorithmId, AlgorithmDetails> = {
     ],
     practice: [
       {
-        prompt: "Use a middle-looking pivot strategy: begin by moving 1 into the small side of this eight-value row.",
+        prompt: "PDQ samples the first, middle, and last values: 8, 3, and 4. Their middle value is 4, so park 4 as the sampled pivot.",
         start: [8, 1, 7, 3, 6, 2, 5, 4],
-        target: [1, 8, 7, 3, 6, 2, 5, 4],
-        hint: "A safe pivot still needs smaller values grouped on its left. Start with the obvious small value, 1.",
+        target: [4, 1, 7, 3, 6, 2, 5, 8],
+        pivot: 4,
+        pivotKind: "sampled",
+        sampleValues: [8, 3, 4],
+        activeRange: [0, 7],
+        validation: "exact",
+        decision: {
+          label: "Sampled pivot",
+          detail: "PDQ uses the median of the endpoint and midpoint samples: median(8, 3, 4) = 4.",
+        },
+        hint: "Swap the sampled pivot 4 with 8. The gold pivot stays visible while its branch is partitioned.",
       },
       {
-        prompt: "Keep building a balanced smaller side by moving 2 beside 1.",
-        start: [1, 8, 7, 3, 6, 2, 5, 4],
-        target: [1, 2, 7, 3, 6, 8, 5, 4],
-        hint: "This is the same partition rule as Quick Sort: move a value only when it belongs on this side of the pivot.",
+        prompt: "Use the sampled pivot 4 as a fence: move 2 into the low side so the branch splits into two balanced four-value groups.",
+        start: [4, 1, 7, 3, 6, 2, 5, 8],
+        target: [4, 1, 2, 3, 6, 7, 5, 8],
+        pivot: 4,
+        pivotKind: "sampled",
+        sampleValues: [8, 3, 4],
+        activeRange: [0, 7],
+        validation: "exact",
+        decision: {
+          label: "Healthy split",
+          detail: "Four values now sit on each side of the fence, so PDQ keeps its quick partition rhythm instead of breaking a pattern.",
+        },
+        groups: [
+          { range: [0, 3], label: "low partition", detail: "values no larger than the sampled fence", tone: "cyan", active: true },
+          { range: [4, 7], label: "high partition", detail: "values larger than the sampled fence", tone: "violet", active: true },
+        ],
+        hint: "2 belongs on the low side. Swap it with 7; the resulting row creates a visible 4 | 4 split.",
       },
       {
-        prompt: "Finish this miniature adaptive partition into a clean ordered row.",
-        start: [1, 2, 7, 3, 6, 8, 5, 4],
+        prompt: "On the high side, PDQ samples 6, 7, and 8. Its middle value is 7; move 5 below that sampled pivot.",
+        start: [4, 1, 2, 3, 6, 7, 5, 8],
+        target: [4, 1, 2, 3, 6, 5, 7, 8],
+        pivot: 7,
+        pivotKind: "sampled",
+        sampleValues: [6, 7, 8],
+        activeRange: [4, 7],
+        settled: [4],
+        validation: "exact",
+        decision: {
+          label: "Second sampled pivot",
+          detail: "median(6, 7, 8) = 7. This keeps the next branch from inheriting an awkward edge pivot.",
+        },
+        groups: [
+          { range: [0, 3], label: "certified low partition", detail: "leave this four-value branch alone", tone: "cyan" },
+          { range: [4, 7], label: "high partition", detail: "work around its new sampled pivot", tone: "violet", active: true },
+        ],
+        hint: "5 is smaller than pivot 7. Swap it with 7 to make the short high-side branch easier to clean up.",
+      },
+      {
+        prompt: "This left branch is now tiny, so PDQ stops partitioning and uses its small-piece insertion cleanup.",
+        start: [4, 1, 2, 3, 6, 5, 7, 8],
+        target: [1, 2, 3, 4, 6, 5, 7, 8],
+        activeRange: [0, 3],
+        settled: [7, 8],
+        validation: "exact",
+        decision: {
+          label: "Tiny-piece cleanup",
+          detail: "Real PDQ branches of 16 or fewer values use insertion sort rather than spending more time choosing pivots.",
+        },
+        groups: [
+          { range: [0, 3], label: "tiny cleanup branch", detail: "finish this short piece with one insertion move", tone: "gold", active: true },
+          { range: [4, 7], label: "remaining branch", detail: "already close to ordered", tone: "violet" },
+        ],
+        hint: "Move 4 from the front into the gap after 3. This is an insertion-style move, not a new full partition.",
+      },
+      {
+        prompt: "Finish the last tiny cleanup: insert 5 before 6. The branch and the whole lesson are now sorted.",
+        start: [1, 2, 3, 4, 6, 5, 7, 8],
         target: [1, 2, 3, 4, 5, 6, 7, 8],
-        hint: "Use helpful swaps only. PDQ sort lets small, nearly ordered pieces finish with a simple cleanup.",
+        activeRange: [4, 5],
+        settled: [1, 2, 3, 4, 7, 8],
+        validation: "exact",
+        decision: {
+          label: "Tiny-piece cleanup",
+          detail: "PDQ uses the simplest effective tool once only a small, nearly ordered piece remains.",
+        },
+        hint: "Place 5 directly before 6. The finished-row check will complete the walkthrough.",
       },
     ],
   },
@@ -989,10 +1136,8 @@ const ALGORITHM_DETAILS: Record<AlgorithmId, AlgorithmDetails> = {
         target: [1, 2, 5, 6, 3, 7, 4, 8],
         hint: "2 is the next smallest front value, so it belongs before 5.",
         groups: [
-          { range: [0, 1], label: "left run", detail: "take the next smallest front value from this run", tone: "cyan", active: true },
-          { range: [2, 3], label: "right run", detail: "take the next smallest front value from this run", tone: "violet", active: true },
-          { range: [4, 5], label: "waiting run", detail: "this pair merges in the next step", tone: "mint" },
-          { range: [6, 7], label: "waiting run", detail: "this pair merges in the next step", tone: "gold" },
+          { range: [0, 3], label: "working four-value group", detail: "merge these two ordered pairs into one four-value run", tone: "cyan", active: true },
+          { range: [4, 7], label: "waiting four-value group", detail: "this second pair of ordered pairs merges next", tone: "violet" },
         ],
       },
       {
@@ -1002,8 +1147,7 @@ const ALGORITHM_DETAILS: Record<AlgorithmId, AlgorithmDetails> = {
         hint: "4 needs to come before 7 while the completed left run stays untouched.",
         groups: [
           { range: [0, 3], label: "ready four-value run", detail: "this merged run is already in order", tone: "cyan" },
-          { range: [4, 5], label: "left run", detail: "take the next smallest front value from this run", tone: "mint", active: true },
-          { range: [6, 7], label: "right run", detail: "take the next smallest front value from this run", tone: "gold", active: true },
+          { range: [4, 7], label: "working four-value group", detail: "merge these two ordered pairs into one four-value run", tone: "violet", active: true },
         ],
       },
       {
@@ -1054,39 +1198,116 @@ const ALGORITHM_DETAILS: Record<AlgorithmId, AlgorithmDetails> = {
     ],
     practice: [
       {
-        prompt: "Turn the first falling pair into the rising run [1, 5].",
-        start: [5, 1, 6, 2, 7, 3, 8, 4],
-        target: [1, 5, 6, 2, 7, 3, 8, 4],
-        hint: "Powersort begins by spotting a run that is already easy to make increasing.",
+        prompt: "Discover the first short falling run B, then flip [6, 2] into the rising run [2, 6].",
+        start: [1, 5, 9, 11, 12, 6, 2, 8, 4, 10, 7, 3],
+        target: [1, 5, 9, 11, 12, 2, 6, 8, 4, 10, 7, 3],
+        validation: "exact",
+        decision: {
+          label: "Run discovery",
+          detail: "A is already rising. B is falling, so Powersort reverses only that local run before planning any merge.",
+        },
+        hint: "Swap the two values in the highlighted B run. The long rising run A stays untouched.",
         groups: [
-          { range: [0, 1], label: "falling run", detail: "reverse this short run so it rises", tone: "gold", active: true },
-          { range: [2, 3], label: "next run", detail: "this short run will be prepared next", tone: "violet" },
-          { range: [4, 5], label: "later run", detail: "keep this boundary visible for the merge plan", tone: "mint" },
-          { range: [6, 7], label: "later run", detail: "keep this boundary visible for the merge plan", tone: "cyan" },
+          { range: [0, 4], label: "run A", detail: "already rising: [1, 5, 9, 11, 12]", tone: "cyan" },
+          { range: [5, 6], label: "run B", detail: "falling: reverse it into [2, 6]", tone: "violet", active: true },
+          { range: [7, 8], label: "run C", detail: "a later short falling run", tone: "mint" },
+          { range: [9, 11], label: "run D", detail: "a later falling run", tone: "gold" },
         ],
       },
       {
-        prompt: "Make the next two-value rising run [2, 6].",
-        start: [1, 5, 6, 2, 7, 3, 8, 4],
-        target: [1, 5, 2, 6, 7, 3, 8, 4],
-        hint: "Leave the run [1, 5] alone while you prepare the next run." ,
+        prompt: "Discover run C next: flip [8, 4] into its rising form [4, 8].",
+        start: [1, 5, 9, 11, 12, 2, 6, 8, 4, 10, 7, 3],
+        target: [1, 5, 9, 11, 12, 2, 6, 4, 8, 10, 7, 3],
+        validation: "exact",
+        decision: {
+          label: "Run discovery",
+          detail: "Powersort preserves A and B, then turns C into an increasing run it can safely merge later.",
+        },
+        hint: "Reverse only C's two values. Do not start merging runs yet.",
         groups: [
-          { range: [0, 1], label: "ready run", detail: "Powersort can reuse this order", tone: "gold" },
-          { range: [2, 3], label: "falling run", detail: "reverse this short run so it rises", tone: "violet", active: true },
-          { range: [4, 5], label: "later run", detail: "keep this boundary visible for the merge plan", tone: "mint" },
-          { range: [6, 7], label: "later run", detail: "keep this boundary visible for the merge plan", tone: "cyan" },
+          { range: [0, 4], label: "run A", detail: "ready rising run", tone: "cyan" },
+          { range: [5, 6], label: "run B", detail: "ready rising run", tone: "violet" },
+          { range: [7, 8], label: "run C", detail: "falling: reverse it into [4, 8]", tone: "mint", active: true },
+          { range: [9, 11], label: "run D", detail: "will be prepared last", tone: "gold" },
         ],
       },
       {
-        prompt: "Use the discovered runs to finish the stable merge.",
-        start: [1, 5, 2, 6, 7, 3, 8, 4],
-        target: [1, 2, 3, 4, 5, 6, 7, 8],
-        hint: "Bring the smallest available front value forward each time; the runs give you a head start.",
+        prompt: "Discover the final run D: reverse its falling stretch [10, 7, 3] into [3, 7, 10].",
+        start: [1, 5, 9, 11, 12, 2, 6, 4, 8, 10, 7, 3],
+        target: [1, 5, 9, 11, 12, 2, 6, 4, 8, 3, 7, 10],
+        validation: "exact",
+        decision: {
+          label: "Run discovery",
+          detail: "Now Powersort has four naturally ordered runs of deliberately uneven lengths, ready for its power-based plan.",
+        },
+        hint: "Reverse this three-value falling run by moving 3 to its front. That completes run discovery.",
         groups: [
-          { range: [0, 1], label: "ready run", detail: "this discovered run already rises", tone: "gold", active: true },
-          { range: [2, 3], label: "ready run", detail: "this discovered run already rises", tone: "violet", active: true },
-          { range: [4, 5], label: "run to merge", detail: "use its smallest available value when it belongs next", tone: "mint", active: true },
-          { range: [6, 7], label: "run to merge", detail: "use its smallest available value when it belongs next", tone: "cyan", active: true },
+          { range: [0, 4], label: "run A", detail: "ready rising run", tone: "cyan" },
+          { range: [5, 6], label: "run B", detail: "ready rising run", tone: "violet" },
+          { range: [7, 8], label: "run C", detail: "ready rising run", tone: "mint" },
+          { range: [9, 11], label: "run D", detail: "falling: reverse it into [3, 7, 10]", tone: "gold", active: true },
+        ],
+      },
+      {
+        prompt: "Powersort measures the boundaries. Power 3 is deepest, so merge B and C first—not the leftmost pair.",
+        start: [1, 5, 9, 11, 12, 2, 6, 4, 8, 3, 7, 10],
+        target: [1, 5, 9, 11, 12, 2, 4, 6, 8, 3, 7, 10],
+        validation: "exact",
+        decision: {
+          power: 3,
+          label: "Merge B + C first",
+          detail: "Power 3 is the deepest pending boundary, so it outranks the earlier-looking A/B boundary with power 1.",
+        },
+        hint: "Swap 6 and 4 to begin the local B+C merge. A stays on the left, waiting for the lowest-power final merge.",
+        groups: [
+          { range: [0, 4], label: "run A", detail: "waits for the final merge", tone: "cyan" },
+          { range: [5, 8], label: "B + C merge", detail: "highest-power boundary: work here first", tone: "violet", active: true },
+          { range: [9, 11], label: "run D", detail: "waits for the next merge", tone: "gold" },
+        ],
+      },
+      {
+        prompt: "Next comes power 2: merge the combined B+C run with D, leaving the long run A for later.",
+        start: [1, 5, 9, 11, 12, 2, 4, 6, 8, 3, 7, 10],
+        target: [1, 5, 9, 11, 12, 2, 3, 4, 6, 7, 8, 10],
+        decision: {
+          power: 2,
+          label: "Merge B+C + D",
+          detail: "The next-deepest boundary wins. This deliberately differs from Merge Sort's fixed pair-by-pair schedule.",
+        },
+        hint: "Bring 3 into the combined right-side run first, then continue moving its next smaller values forward. Each helpful local move stays.",
+        groups: [
+          { range: [0, 4], label: "run A", detail: "still waits for the root merge", tone: "cyan" },
+          { range: [5, 11], label: "B + C + D merge", detail: "power 2: combine these uneven runs now", tone: "violet", active: true },
+        ],
+      },
+      {
+        prompt: "Only power 1 remains. Begin the final root merge between A and the already-combined right run.",
+        start: [1, 5, 9, 11, 12, 2, 3, 4, 6, 7, 8, 10],
+        target: [1, 2, 3, 4, 5, 9, 11, 12, 6, 7, 8, 10],
+        decision: {
+          power: 1,
+          label: "Final root merge",
+          detail: "Power 1 sits high in the merge tree, so Powersort waited until the three right-hand runs had become one.",
+        },
+        hint: "Move 2, then 3, then 4 into the gaps after 1. The groups show the final uneven merge.",
+        groups: [
+          { range: [0, 4], label: "run A", detail: "left side of the final merge", tone: "cyan", active: true },
+          { range: [5, 11], label: "combined B+C+D run", detail: "right side of the final merge", tone: "violet", active: true },
+        ],
+      },
+      {
+        prompt: "Finish the same power-1 root merge. The four discovered runs become one ordered row.",
+        start: [1, 2, 3, 4, 5, 9, 11, 12, 6, 7, 8, 10],
+        target: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+        decision: {
+          power: 1,
+          label: "Final root merge",
+          detail: "The priority plan is complete: short local merges happened first and the broad root merge happened last.",
+        },
+        hint: "Bring 6, 7, 8, and 10 into the remaining gaps. Every move that improves this final merge stays.",
+        groups: [
+          { range: [0, 4], label: "run A", detail: "left side of the final merge", tone: "cyan", active: true },
+          { range: [5, 11], label: "combined B+C+D run", detail: "right side of the final merge", tone: "violet", active: true },
         ],
       },
     ],
@@ -1165,17 +1386,6 @@ function createInitialStep(
   };
 }
 
-function makeRandomArray(length: number) {
-  const values = Array.from({ length }, (_, index) => index + 1);
-
-  for (let index = values.length - 1; index > 0; index -= 1) {
-    const swapIndex = Math.floor(Math.random() * (index + 1));
-    [values[index], values[swapIndex]] = [values[swapIndex], values[index]];
-  }
-
-  return values;
-}
-
 function arraysMatch(left: number[], right: number[]) {
   return left.length === right.length && left.every((value, index) => value === right[index]);
 }
@@ -1186,12 +1396,13 @@ function getPracticeGroupAtIndex(groups: PracticeGroup[], index: number) {
 
 // Every hands-on lesson uses a complete, consecutive set of values. Small
 // legacy examples are extended with already-visible trailing values so even a
-// first lesson has enough blocks to feel like a real little array, while the
-// more involved lessons remain comfortably below ten blocks.
+// first lesson has enough blocks to feel like a real little array. Powersort
+// is allowed to use twelve blocks because its uneven natural runs need enough
+// room to make its merge order visibly different from Merge Sort.
 function normalizePracticeSteps(steps: PracticeStep[]): PracticeStep[] {
   return steps.map((step) => {
     const largestValue = Math.max(...step.start, ...step.target, 1);
-    const blockCount = Math.min(10, Math.max(6, largestValue));
+    const blockCount = Math.min(12, Math.max(6, largestValue));
     const completeRow = (values: number[]) => {
       const nextValues = [...values];
       for (let value = 1; value <= blockCount; value += 1) {
@@ -1212,101 +1423,7 @@ function formatCount(value: number) {
   return Math.round(value).toLocaleString("en-US");
 }
 
-function formatGrowthSize(value: number) {
-  if (value >= 1_000_000) return (value / 1_000_000).toFixed(2).replace(/\.00$/, "") + "m";
-  if (value >= 1_000) return Math.round(value / 1_000) + "k";
-  return String(value);
-}
-
-function clamp(value: number, minimum: number, maximum: number) {
-  return Math.min(maximum, Math.max(minimum, value));
-}
-
-function getGrowthViewport(domain: GrowthGraphDomain, view: GrowthView): GrowthViewport {
-  const maximumZoom = Math.max(
-    1,
-    Math.min(
-      GROWTH_GRAPH_MAX_ZOOM,
-      1 / GROWTH_GRAPH_MIN_X_SPAN,
-      domain.exponentSpan / GROWTH_GRAPH_MIN_Y_SPAN,
-    ),
-  );
-  const zoom = clamp(view.zoom, 1, maximumZoom);
-  const xSpan = Math.max(GROWTH_GRAPH_MIN_X_SPAN, 1 / zoom);
-  const ySpan = Math.max(GROWTH_GRAPH_MIN_Y_SPAN, domain.exponentSpan / zoom);
-  const centerX = clamp(view.centerX, xSpan / 2, 1 - xSpan / 2);
-  const centerY = clamp(
-    view.centerY,
-    domain.minimumExponent + ySpan / 2,
-    domain.maximumExponent - ySpan / 2,
-  );
-
-  return {
-    ...domain,
-    zoom,
-    xStart: centerX - xSpan / 2,
-    xEnd: centerX + xSpan / 2,
-    xSpan,
-    yMinimum: centerY - ySpan / 2,
-    yMaximum: centerY + ySpan / 2,
-    ySpan,
-  };
-}
-
-function normalizeGrowthView(domain: GrowthGraphDomain, view: GrowthView): GrowthView {
-  const viewport = getGrowthViewport(domain, view);
-  return {
-    zoom: viewport.zoom,
-    centerX: (viewport.xStart + viewport.xEnd) / 2,
-    centerY: (viewport.yMinimum + viewport.yMaximum) / 2,
-  };
-}
-
-function zoomGrowthView(
-  domain: GrowthGraphDomain,
-  view: GrowthView,
-  multiplier: number,
-  focusX?: number,
-  focusY?: number,
-): GrowthView {
-  const viewport = getGrowthViewport(domain, view);
-  const maximumZoom = Math.max(
-    1,
-    Math.min(
-      GROWTH_GRAPH_MAX_ZOOM,
-      1 / GROWTH_GRAPH_MIN_X_SPAN,
-      domain.exponentSpan / GROWTH_GRAPH_MIN_Y_SPAN,
-    ),
-  );
-  const zoom = clamp(viewport.zoom * multiplier, 1, maximumZoom);
-  const zoomedViewport = getGrowthViewport(domain, { ...view, zoom });
-  const pinnedX = focusX ?? (viewport.xStart + viewport.xEnd) / 2;
-  const pinnedY = focusY ?? (viewport.yMinimum + viewport.yMaximum) / 2;
-  const xRatio = clamp((pinnedX - viewport.xStart) / viewport.xSpan, 0, 1);
-  const yRatio = clamp((viewport.yMaximum - pinnedY) / viewport.ySpan, 0, 1);
-
-  return normalizeGrowthView(domain, {
-    zoom,
-    centerX: pinnedX + (0.5 - xRatio) * zoomedViewport.xSpan,
-    centerY: pinnedY + (yRatio - 0.5) * zoomedViewport.ySpan,
-  });
-}
-
-function panGrowthView(
-  domain: GrowthGraphDomain,
-  view: GrowthView,
-  deltaX: number,
-  deltaY: number,
-): GrowthView {
-  const viewport = getGrowthViewport(domain, view);
-  return normalizeGrowthView(domain, {
-    ...view,
-    centerX: (viewport.xStart + viewport.xEnd) / 2 - (deltaX / GROWTH_GRAPH_PLOT_WIDTH) * viewport.xSpan,
-    centerY: (viewport.yMinimum + viewport.yMaximum) / 2 + (deltaY / GROWTH_GRAPH_PLOT_HEIGHT) * viewport.ySpan,
-  });
-}
-
-function formatGrowthMultiplier(value: number) {
+function formatWorkloadMultiplier(value: number) {
   if (value >= 100) return Math.round(value).toLocaleString("en-US") + "×";
   if (value >= 10) return value.toFixed(1).replace(/\.0$/, "") + "×";
   return value.toFixed(2).replace(/0$/, "").replace(/\.$/, "") + "×";
@@ -1622,21 +1739,14 @@ export default function Home() {
   const [bogoAttemptLimit, setBogoAttemptLimit] = useState(BOGO_MAX_ATTEMPTS);
   const [bogoAttemptInput, setBogoAttemptInput] = useState(String(BOGO_MAX_ATTEMPTS));
   const [bogoRunsUntilSolved, setBogoRunsUntilSolved] = useState(false);
+  const [arrayArrangement, setArrayArrangement] = useState<ArrayArrangement>("random");
   const [benchmarkPattern, setBenchmarkPattern] =
     useState<BenchmarkPattern>("random");
   const [benchmarkTab, setBenchmarkTab] = useState<BenchmarkTab>("table");
-  const [visibleGrowthAlgorithms, setVisibleGrowthAlgorithms] = useState(
-    () => ({ ...DEFAULT_GROWTH_ALGORITHM_VISIBILITY }),
+  const [visibleWorkloadBarAlgorithms, setVisibleWorkloadBarAlgorithms] = useState(
+    () => ({ ...DEFAULT_WORKLOAD_BAR_ALGORITHM_VISIBILITY }),
   );
-  const [growthFocusedAlgorithm, setGrowthFocusedAlgorithm] = useState<BenchmarkAlgorithm | "all">("all");
-  const [growthView, setGrowthView] = useState<GrowthView>({
-    zoom: 1,
-    centerX: 0.5,
-    centerY: 0,
-  });
-  const [growthInspectionIndex, setGrowthInspectionIndex] = useState(0);
-  const [growthHoverIndex, setGrowthHoverIndex] = useState<number | null>(null);
-  const [isGrowthPanning, setIsGrowthPanning] = useState(false);
+  const [workloadBarSize, setWorkloadBarSize] = useState(65_536);
   const [originalValues, setOriginalValues] = useState(INITIAL_VALUES);
   const [values, setValues] = useState(INITIAL_VALUES);
   const [steps, setSteps] = useState<SortStep[]>([]);
@@ -1650,6 +1760,9 @@ export default function Home() {
   >("calibrating");
   const [bogoElapsedMilliseconds, setBogoElapsedMilliseconds] = useState(0);
   const [bogoCelebrationPhase, setBogoCelebrationPhase] = useState<
+    "hidden" | "visible" | "fading"
+  >("hidden");
+  const [practiceCelebrationPhase, setPracticeCelebrationPhase] = useState<
     "hidden" | "visible" | "fading"
   >("hidden");
   const [completionSweepActive, setCompletionSweepActive] = useState(false);
@@ -1702,13 +1815,13 @@ export default function Home() {
   const practiceClickSuppressionTimerRef = useRef<number | null>(null);
   const practiceUndoTimerRef = useRef<number | null>(null);
   const practiceAdvanceTimerRef = useRef<number | null>(null);
-  const growthPanRef = useRef<{
-    pointerId: number;
-    startX: number;
-    startY: number;
-    view: GrowthView;
-    moved: boolean;
-  } | null>(null);
+  const practiceCelebrationFadeTimerRef = useRef<number | null>(null);
+  const practiceCelebrationUnmountTimerRef = useRef<number | null>(null);
+  // Completion can be reached by a final scripted move or the global sorted
+  // row check. This guard makes those paths share one celebration and one
+  // victory tone instead of occasionally firing twice in the same gesture.
+  const practiceCompletionRef = useRef(false);
+  const practiceCelebrationRunRef = useRef(0);
   const bogoSessionRef = useRef<BogoSession | null>(null);
   const bogoRateSampleRef = useRef<{
     startedAt: number;
@@ -1783,9 +1896,15 @@ export default function Home() {
   const practiceFinished = practiceStepIndex >= practiceSteps.length;
   const currentPractice = practiceSteps[Math.min(practiceStepIndex, practiceSteps.length - 1)];
   const isQuickPractice = algorithm === "quick" && currentPractice.pivot !== undefined;
-  const quickPivot = isQuickPractice ? currentPractice.pivot ?? null : null;
-  const quickActiveRange = isQuickPractice ? currentPractice.activeRange : undefined;
-  const quickSettledValues = isQuickPractice ? currentPractice.settled ?? [] : [];
+  const isPdqPractice = algorithm === "pdq" && currentPractice.pivot !== undefined;
+  const isPartitionPractice = isQuickPractice || isPdqPractice;
+  const partitionPivot = isPartitionPractice ? currentPractice.pivot ?? null : null;
+  const partitionActiveRange = isPartitionPractice ? currentPractice.activeRange : undefined;
+  const partitionSettledValues = isPartitionPractice ? currentPractice.settled ?? [] : [];
+  const partitionSampleValues = isPdqPractice ? currentPractice.sampleValues ?? [] : [];
+  const isInsertionPractice =
+    algorithm === "insertion" && currentPractice.insertingKey !== undefined;
+  const insertionKey = isInsertionPractice ? currentPractice.insertingKey ?? null : null;
   // Merge-family lessons use these position-based ranges to make the already
   // ordered runs visually explicit without changing the board's drag geometry.
   const practiceGroups = practiceFinished ? [] : currentPractice.groups ?? [];
@@ -1828,95 +1947,26 @@ export default function Home() {
     "--benchmark-columns": theoreticalBenchmarkData.length,
     minWidth: String(180 + theoreticalBenchmarkData.length * 118) + "px",
   } as CSSProperties;
-  const growthGraphDomain = useMemo<GrowthGraphDomain>(() => {
-    const modeledValues = theoreticalBenchmarkData.flatMap((entry) => Object.values(entry.work));
-    const minimumExponent = Math.floor(Math.log10(Math.max(1, Math.min(...modeledValues))));
-    const maximumExponent = Math.ceil(Math.log10(Math.max(...modeledValues)));
-    return { minimumExponent, maximumExponent, exponentSpan: Math.max(1, maximumExponent - minimumExponent) };
-  }, [theoreticalBenchmarkData]);
-  const growthViewport = useMemo(
-    () => getGrowthViewport(growthGraphDomain, growthView),
-    [growthGraphDomain, growthView],
-  );
-  const growthGraphTicks = useMemo(
+  const workloadBarEntry = useMemo(
     () =>
-      Array.from({ length: 5 }, (_, index) => {
-        const ratio = index / 4;
-        const exponent = growthViewport.yMaximum - growthViewport.ySpan * ratio;
-        return {
-          label: formatCount(10 ** exponent),
-          y: GROWTH_GRAPH_PLOT_TOP + GROWTH_GRAPH_PLOT_HEIGHT * ratio,
-        };
-      }),
-    [growthViewport],
+      theoreticalBenchmarkData.find((entry) => entry.size === workloadBarSize) ??
+      theoreticalBenchmarkData[0],
+    [theoreticalBenchmarkData, workloadBarSize],
   );
-  useEffect(() => {
-    setGrowthView((current) => {
-      const next = normalizeGrowthView(growthGraphDomain, current);
-      return next.zoom === current.zoom && next.centerX === current.centerX && next.centerY === current.centerY
-        ? current
-        : next;
-    });
-  }, [growthGraphDomain]);
-  const allGrowthSeries = useMemo(
+  const workloadBarRows = useMemo(
     () =>
-      BENCHMARK_ALGORITHMS.map((benchmarkAlgorithm) => ({
-        ...benchmarkAlgorithm,
-        color: BENCHMARK_COLORS[benchmarkAlgorithm.key],
-        points: theoreticalBenchmarkData.map((entry, index) => {
-          const work = entry.work[benchmarkAlgorithm.key];
-          return {
-            size: entry.size,
-            work,
-            exponent: Math.log10(Math.max(work, 1)),
-            normalizedX: index / Math.max(theoreticalBenchmarkData.length - 1, 1),
-          };
-        }),
-      })),
-    [theoreticalBenchmarkData],
-  );
-  const visibleGrowthSeries = useMemo(
-    () =>
-      allGrowthSeries
-        .filter((benchmarkAlgorithm) => visibleGrowthAlgorithms[benchmarkAlgorithm.key])
+      BENCHMARK_ALGORITHMS
+        .filter((benchmarkAlgorithm) => visibleWorkloadBarAlgorithms[benchmarkAlgorithm.key])
         .map((benchmarkAlgorithm) => ({
           ...benchmarkAlgorithm,
-          isFocused: growthFocusedAlgorithm === benchmarkAlgorithm.key,
-          points: benchmarkAlgorithm.points.map((point) => ({
-            ...point,
-            x: GROWTH_GRAPH_PLOT_LEFT +
-              ((point.normalizedX - growthViewport.xStart) / growthViewport.xSpan) * GROWTH_GRAPH_PLOT_WIDTH,
-            y: GROWTH_GRAPH_PLOT_TOP +
-              ((growthViewport.yMaximum - point.exponent) / growthViewport.ySpan) * GROWTH_GRAPH_PLOT_HEIGHT,
-          })),
-        })),
-    [allGrowthSeries, growthFocusedAlgorithm, growthViewport, visibleGrowthAlgorithms],
+          color: BENCHMARK_COLORS[benchmarkAlgorithm.key],
+          work: workloadBarEntry?.work[benchmarkAlgorithm.key] ?? 0,
+        }))
+        .sort((left, right) => right.work - left.work),
+    [visibleWorkloadBarAlgorithms, workloadBarEntry],
   );
-  const activeGrowthInspectionIndex = Math.min(
-    Math.max(growthHoverIndex ?? growthInspectionIndex, 0),
-    Math.max(theoreticalBenchmarkData.length - 1, 0),
-  );
-  const growthInspection = useMemo(() => {
-    const entry = theoreticalBenchmarkData[activeGrowthInspectionIndex];
-    const normalizedX = activeGrowthInspectionIndex / Math.max(theoreticalBenchmarkData.length - 1, 1);
-    const x = GROWTH_GRAPH_PLOT_LEFT +
-      ((normalizedX - growthViewport.xStart) / growthViewport.xSpan) * GROWTH_GRAPH_PLOT_WIDTH;
-    const rows = allGrowthSeries
-      .filter((series) => visibleGrowthAlgorithms[series.key])
-      .map((series) => ({
-        ...series,
-        work: entry?.work[series.key] ?? 0,
-      }))
-      .sort((left, right) => right.work - left.work);
-    const fastestWork = Math.max(1, rows.at(-1)?.work ?? 1);
-
-    return {
-      size: entry?.size ?? THEORY_BENCHMARK_SIZES[0],
-      x,
-      isVisible: x >= GROWTH_GRAPH_PLOT_LEFT && x <= GROWTH_GRAPH_PLOT_LEFT + GROWTH_GRAPH_PLOT_WIDTH,
-      rows: rows.map((row) => ({ ...row, multiplier: row.work / fastestWork })),
-    };
-  }, [activeGrowthInspectionIndex, allGrowthSeries, growthViewport, theoreticalBenchmarkData, visibleGrowthAlgorithms]);
+  const workloadBarMaximum = Math.max(1, ...workloadBarRows.map((row) => row.work));
+  const workloadBarFastest = Math.max(1, workloadBarRows.at(-1)?.work ?? 1);
 
   const currentStep = useMemo(
     () =>
@@ -2498,6 +2548,13 @@ export default function Home() {
       if (practiceAdvanceTimerRef.current !== null) {
         window.clearTimeout(practiceAdvanceTimerRef.current);
       }
+      if (practiceCelebrationFadeTimerRef.current !== null) {
+        window.clearTimeout(practiceCelebrationFadeTimerRef.current);
+      }
+      if (practiceCelebrationUnmountTimerRef.current !== null) {
+        window.clearTimeout(practiceCelebrationUnmountTimerRef.current);
+      }
+      practiceCelebrationRunRef.current += 1;
       if (practiceClickSuppressionTimerRef.current !== null) {
         window.clearTimeout(practiceClickSuppressionTimerRef.current);
       }
@@ -2668,10 +2725,13 @@ export default function Home() {
     return () => window.clearTimeout(timer);
   }, [delay, isBogo, runState, stepIndex, steps]);
 
-  function createNewArray(size = arraySize) {
+  function createNewArray(
+    size = arraySize,
+    arrangement: ArrayArrangement = arrayArrangement,
+  ) {
     resetCompletionSweep();
     resetBogoElapsedTimer();
-    const nextValues = makeRandomArray(size);
+    const nextValues = makeArrayForArrangement(size, arrangement);
     setBogoCelebrationPhase("hidden");
     bogoSessionRef.current = null;
     bogoRateSampleRef.current = null;
@@ -2682,6 +2742,13 @@ export default function Home() {
     setSteps([]);
     setStepIndex(0);
     setRunState("ready");
+  }
+
+  function handleArrayArrangementChange(nextArrangement: ArrayArrangement) {
+    setArrayArrangement(nextArrangement);
+    // Switching arrangement is an intentional fresh input, so it safely
+    // abandons any ready, paused, or completed trace and redraws immediately.
+    createNewArray(arraySize, nextArrangement);
   }
 
   function resetArray() {
@@ -2724,6 +2791,59 @@ export default function Home() {
       window.clearTimeout(practiceAdvanceTimerRef.current);
       practiceAdvanceTimerRef.current = null;
     }
+  }
+
+  function clearPracticeCelebration() {
+    // Bump the generation even when there is no visible overlay. That makes a
+    // delayed AudioContext resume from a just-reset lesson harmless.
+    practiceCelebrationRunRef.current += 1;
+    if (practiceCelebrationFadeTimerRef.current !== null) {
+      window.clearTimeout(practiceCelebrationFadeTimerRef.current);
+      practiceCelebrationFadeTimerRef.current = null;
+    }
+    if (practiceCelebrationUnmountTimerRef.current !== null) {
+      window.clearTimeout(practiceCelebrationUnmountTimerRef.current);
+      practiceCelebrationUnmountTimerRef.current = null;
+    }
+    setPracticeCelebrationPhase("hidden");
+  }
+
+  function startPracticeCelebration() {
+    if (practiceCompletionRef.current) return;
+
+    practiceCompletionRef.current = true;
+    clearPracticeCelebration();
+    const celebrationRun = practiceCelebrationRunRef.current;
+    setPracticeCelebrationPhase("visible");
+
+    if (soundEnabled) {
+      const context = ensureAudioContext();
+      void context
+        .resume()
+        .then(() => {
+          if (practiceCelebrationRunRef.current !== celebrationRun) return;
+          playBogoVictorySound();
+        })
+        .catch(() => undefined);
+    }
+
+    if (!prefersReducedMotion) {
+      practiceCelebrationFadeTimerRef.current = window.setTimeout(() => {
+        practiceCelebrationFadeTimerRef.current = null;
+        if (practiceCelebrationRunRef.current !== celebrationRun) return;
+        setPracticeCelebrationPhase("fading");
+      }, PRACTICE_CELEBRATION_VISIBLE_DURATION);
+    }
+
+    practiceCelebrationUnmountTimerRef.current = window.setTimeout(
+      () => {
+        practiceCelebrationUnmountTimerRef.current = null;
+        if (practiceCelebrationRunRef.current !== celebrationRun) return;
+        setPracticeCelebrationPhase("hidden");
+      },
+      PRACTICE_CELEBRATION_VISIBLE_DURATION +
+        (prefersReducedMotion ? 0 : PRACTICE_CELEBRATION_FADE_DURATION),
+    );
   }
 
   function clearPracticeClickSuppression() {
@@ -2769,12 +2889,15 @@ export default function Home() {
     practiceDropTargetRef.current = null;
     setPracticeSolved(true);
     setPracticeFeedback("Fully sorted—this completes the walkthrough.");
+    startPracticeCelebration();
   }
 
   function resetPractice(nextAlgorithm = algorithm) {
     clearPracticeUndo();
     clearPracticeAdvance();
     clearPracticeClickSuppression();
+    clearPracticeCelebration();
+    practiceCompletionRef.current = false;
     const firstStep = normalizePracticeSteps(ALGORITHM_DETAILS[nextAlgorithm].practice)[0];
     setPracticeStepIndex(0);
     setPracticeSelectedIndex(null);
@@ -2841,10 +2964,12 @@ export default function Home() {
 
     if (arraysMatch(nextValues, currentPractice.target)) {
       setPracticeSolved(true);
+      if (practiceStepIndex >= practiceSteps.length - 1) {
+        setPracticeFeedback("Correct—this completes the walkthrough.");
+        return "complete";
+      }
       setPracticeFeedback(
-        practiceStepIndex === practiceSteps.length - 1
-          ? "Correct—this completes the walkthrough."
-          : "Correct. Your move follows the rule; the next step is loading.",
+        "Correct. Your move follows the rule; the next step is loading.",
       );
       return "solved";
     }
@@ -2853,9 +2978,9 @@ export default function Home() {
     // Letting a merely "closer" swap remain can strand the pivot between
     // values with no legal next move, which is both confusing and unlike the
     // intended partition sequence.
-    if (isQuickPractice) {
+    if (isQuickPractice || currentPractice.validation === "exact") {
       setPracticeSolved(false);
-      setPracticeFeedback("That does not complete this pivot's move, so it will slide back. Hint: " + currentPractice.hint);
+      setPracticeFeedback("That does not complete this step's move, so it will slide back. Hint: " + currentPractice.hint);
       return "wrong";
     }
 
@@ -3082,16 +3207,9 @@ export default function Home() {
     clearPracticeAdvance();
     const nextStepIndex = practiceStepIndex + 1;
     if (nextStepIndex >= practiceSteps.length) {
-      setPracticeStepIndex(practiceSteps.length);
-      setPracticeSelectedIndex(null);
-      setPracticeDragIndex(null);
-      setPracticeDraggingId(null);
-      setPracticeDragOffset({ x: 0, y: 0 });
-      setPracticeDropIndex(null);
-      setPracticeDropMode(null);
-      practicePointerRef.current = null;
-      practiceDropTargetRef.current = null;
-      setPracticeSolved(false);
+      // A final scheduled step used to bypass the common completion handler,
+      // leaving the last lesson without its fixed-green finish or payoff.
+      completePracticeWalkthrough();
       return;
     }
 
@@ -3122,7 +3240,9 @@ export default function Home() {
       nextAlgorithm === "bogo" ? BOGO_MAX_ARRAY_SIZE : 256;
     const nextArraySize = Math.min(arraySize, nextMaximumArraySize);
     const nextValues =
-      nextArraySize === arraySize ? [...originalValues] : makeRandomArray(nextArraySize);
+      nextArraySize === arraySize
+        ? [...originalValues]
+        : makeArrayForArrangement(nextArraySize, arrayArrangement);
     setAlgorithm(nextAlgorithm);
     if (nextArraySize !== arraySize) {
       setArraySize(nextArraySize);
@@ -3160,7 +3280,7 @@ export default function Home() {
     // the exact same input. While the board is merely ready, preserve its
     // current values so the initial and freshly resized examples can be sorted.
     const sortValues = startWithNewArray || runState === "complete"
-      ? makeRandomArray(arraySize)
+      ? makeArrayForArrangement(arraySize, arrayArrangement)
       : originalValues;
     if (startWithNewArray || runState === "complete") {
       setOriginalValues(sortValues);
@@ -3370,155 +3490,11 @@ export default function Home() {
     setBogoRunsUntilSolved(confirmed);
   }
 
-  function handleGrowthAlgorithmVisibilityToggle(nextAlgorithm: BenchmarkAlgorithm) {
-    if (visibleGrowthAlgorithms[nextAlgorithm] && growthFocusedAlgorithm === nextAlgorithm) {
-      setGrowthFocusedAlgorithm("all");
-    }
-    setVisibleGrowthAlgorithms((current) => ({
+  function handleWorkloadBarAlgorithmVisibilityToggle(nextAlgorithm: BenchmarkAlgorithm) {
+    setVisibleWorkloadBarAlgorithms((current) => ({
       ...current,
       [nextAlgorithm]: !current[nextAlgorithm],
     }));
-  }
-
-  function handleGrowthFocusChange(nextFocus: BenchmarkAlgorithm | "all") {
-    setGrowthFocusedAlgorithm(nextFocus);
-    if (nextFocus !== "all") {
-      setVisibleGrowthAlgorithms((current) => ({ ...current, [nextFocus]: true }));
-    }
-  }
-
-  function resetGrowthView() {
-    setGrowthView({
-      zoom: 1,
-      centerX: 0.5,
-      centerY: (growthGraphDomain.minimumExponent + growthGraphDomain.maximumExponent) / 2,
-    });
-  }
-
-  function getGrowthPointerPosition(clientX: number, clientY: number, chart: HTMLDivElement) {
-    const bounds = chart.getBoundingClientRect();
-    const scaleX = GROWTH_GRAPH_WIDTH / Math.max(bounds.width, 1);
-    const scaleY = GROWTH_GRAPH_HEIGHT / Math.max(bounds.height, 1);
-    const chartX = (clientX - bounds.left) * scaleX;
-    const chartY = (clientY - bounds.top) * scaleY;
-    const plotX = clamp(chartX, GROWTH_GRAPH_PLOT_LEFT, GROWTH_GRAPH_PLOT_LEFT + GROWTH_GRAPH_PLOT_WIDTH);
-    const plotY = clamp(chartY, GROWTH_GRAPH_PLOT_TOP, GROWTH_GRAPH_PLOT_TOP + GROWTH_GRAPH_PLOT_HEIGHT);
-    const xRatio = (plotX - GROWTH_GRAPH_PLOT_LEFT) / GROWTH_GRAPH_PLOT_WIDTH;
-    const yRatio = (plotY - GROWTH_GRAPH_PLOT_TOP) / GROWTH_GRAPH_PLOT_HEIGHT;
-    const normalizedX = growthViewport.xStart + xRatio * growthViewport.xSpan;
-    const exponent = growthViewport.yMaximum - yRatio * growthViewport.ySpan;
-    const nearestIndex = Math.round(normalizedX * Math.max(theoreticalBenchmarkData.length - 1, 0));
-
-    return {
-      chartX,
-      chartY,
-      normalizedX,
-      exponent,
-      nearestIndex: clamp(nearestIndex, 0, Math.max(theoreticalBenchmarkData.length - 1, 0)),
-    };
-  }
-
-  function handleGrowthChartPointerDown(event: ReactPointerEvent<HTMLDivElement>) {
-    if (event.button !== 0) return;
-    const pointer = getGrowthPointerPosition(event.clientX, event.clientY, event.currentTarget);
-    growthPanRef.current = {
-      pointerId: event.pointerId,
-      startX: pointer.chartX,
-      startY: pointer.chartY,
-      view: growthView,
-      moved: false,
-    };
-    event.currentTarget.setPointerCapture(event.pointerId);
-  }
-
-  function handleGrowthChartPointerMove(event: ReactPointerEvent<HTMLDivElement>) {
-    const pointer = getGrowthPointerPosition(event.clientX, event.clientY, event.currentTarget);
-    const activePan = growthPanRef.current;
-    if (!activePan || activePan.pointerId !== event.pointerId) {
-      setGrowthHoverIndex(pointer.nearestIndex);
-      return;
-    }
-
-    const deltaX = pointer.chartX - activePan.startX;
-    const deltaY = pointer.chartY - activePan.startY;
-    if (!activePan.moved && Math.hypot(deltaX, deltaY) > 4) {
-      activePan.moved = true;
-      setIsGrowthPanning(true);
-    }
-    if (activePan.moved) {
-      setGrowthHoverIndex(null);
-      setGrowthView(panGrowthView(growthGraphDomain, activePan.view, deltaX, deltaY));
-    }
-  }
-
-  function finishGrowthChartPointer(event: ReactPointerEvent<HTMLDivElement>) {
-    const activePan = growthPanRef.current;
-    if (!activePan || activePan.pointerId !== event.pointerId) return;
-    const pointer = getGrowthPointerPosition(event.clientX, event.clientY, event.currentTarget);
-    if (!activePan.moved) setGrowthInspectionIndex(pointer.nearestIndex);
-    growthPanRef.current = null;
-    setIsGrowthPanning(false);
-    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
-      event.currentTarget.releasePointerCapture(event.pointerId);
-    }
-  }
-
-  function cancelGrowthChartPointer(event: ReactPointerEvent<HTMLDivElement>) {
-    if (growthPanRef.current?.pointerId !== event.pointerId) return;
-    growthPanRef.current = null;
-    setIsGrowthPanning(false);
-    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
-      event.currentTarget.releasePointerCapture(event.pointerId);
-    }
-  }
-
-  function handleGrowthChartWheel(event: ReactWheelEvent<HTMLDivElement>) {
-    event.preventDefault();
-    const pointer = getGrowthPointerPosition(event.clientX, event.clientY, event.currentTarget);
-    const multiplier = event.deltaY < 0 ? GROWTH_GRAPH_ZOOM_STEP : 1 / GROWTH_GRAPH_ZOOM_STEP;
-    setGrowthHoverIndex(pointer.nearestIndex);
-    setGrowthInspectionIndex(pointer.nearestIndex);
-    setGrowthView((current) =>
-      zoomGrowthView(growthGraphDomain, current, multiplier, pointer.normalizedX, pointer.exponent),
-    );
-  }
-
-  function handleGrowthChartKeyDown(event: ReactKeyboardEvent<HTMLDivElement>) {
-    const panStep = 0.2;
-    if (event.key === "+" || event.key === "=") {
-      event.preventDefault();
-      setGrowthView((current) => zoomGrowthView(growthGraphDomain, current, GROWTH_GRAPH_ZOOM_STEP));
-      return;
-    }
-    if (event.key === "-" || event.key === "_") {
-      event.preventDefault();
-      setGrowthView((current) => zoomGrowthView(growthGraphDomain, current, 1 / GROWTH_GRAPH_ZOOM_STEP));
-      return;
-    }
-    if (event.key === "0" || event.key === "Home") {
-      event.preventDefault();
-      resetGrowthView();
-      return;
-    }
-    if (event.key === "ArrowLeft") {
-      event.preventDefault();
-      setGrowthView((current) => panGrowthView(growthGraphDomain, current, GROWTH_GRAPH_PLOT_WIDTH * panStep, 0));
-      return;
-    }
-    if (event.key === "ArrowRight") {
-      event.preventDefault();
-      setGrowthView((current) => panGrowthView(growthGraphDomain, current, -GROWTH_GRAPH_PLOT_WIDTH * panStep, 0));
-      return;
-    }
-    if (event.key === "ArrowUp") {
-      event.preventDefault();
-      setGrowthView((current) => panGrowthView(growthGraphDomain, current, 0, GROWTH_GRAPH_PLOT_HEIGHT * panStep));
-      return;
-    }
-    if (event.key === "ArrowDown") {
-      event.preventDefault();
-      setGrowthView((current) => panGrowthView(growthGraphDomain, current, 0, -GROWTH_GRAPH_PLOT_HEIGHT * panStep));
-    }
   }
 
   const primaryLabel =
@@ -3561,6 +3537,33 @@ export default function Home() {
           <div className="bogo-celebration__message">
             <span>BOGO SORT</span>
             <strong>Holy shit, it actually worked!</strong>
+          </div>
+        </div>
+      )}
+      {practiceCelebrationPhase !== "hidden" && (
+        <div
+          className={
+            "practice-celebration " +
+            (practiceCelebrationPhase === "fading" ? "practice-celebration--fading " : "") +
+            (prefersReducedMotion ? "practice-celebration--reduced" : "")
+          }
+          role="status"
+          aria-live="polite"
+        >
+          <span className="sr-only">Lesson complete.</span>
+          <div className="bogo-confetti" aria-hidden="true">
+            {BOGO_CONFETTI.map((piece) => (
+              <i
+                className={"bogo-confetti__piece bogo-confetti__piece--" + piece.shape}
+                key={piece.id}
+                style={{
+                  left: String(piece.left) + "%",
+                  background: piece.color,
+                  animationDelay: String(piece.delay) + "s",
+                  animationDuration: String(piece.duration) + "s",
+                }}
+              />
+            ))}
           </div>
         </div>
       )}
@@ -3638,6 +3641,22 @@ export default function Home() {
                     <option value="pdq">PDQ sort</option>
                     <option value="merge">Merge sort</option>
                     <option value="powersort">Powersort</option>
+                  </select>
+                </label>
+
+                <label className="control-field control-field--arrangement">
+                  <span className="control-label">Starting arrangement</span>
+                  <select
+                    value={arrayArrangement}
+                    onChange={(event) =>
+                      handleArrayArrangementChange(event.target.value as ArrayArrangement)
+                    }
+                    disabled={isRunning}
+                    aria-label="Starting array arrangement"
+                  >
+                    <option value="random">Random shuffle</option>
+                    <option value="nearly-sorted">Nearly sorted</option>
+                    <option value="reverse">Reverse order</option>
                   </select>
                 </label>
 
@@ -4128,14 +4147,34 @@ export default function Home() {
                 ? "You completed this small walkthrough. Restart it any time to practice the moves again."
                 : currentPractice.prompt}
             </p>
-            {isQuickPractice && !practiceFinished && quickPivot !== null && quickActiveRange && (
-              <div className="practice-quick-status" aria-label="Current Quick Sort partition">
-                <span><strong>Pivot</strong> {quickPivot}</span>
-                <span><strong>Working range</strong> slots {quickActiveRange[0] + 1}–{quickActiveRange[1] + 1}</span>
+            {isPartitionPractice && !practiceFinished && partitionPivot !== null && partitionActiveRange && (
+              <div className="practice-quick-status practice-partition-status" aria-label={"Current " + algorithmLabel + " partition"}>
                 <span>
-                  <strong>Already fixed</strong>{" "}
-                  {quickSettledValues.length ? quickSettledValues.join(", ") : "none yet"}
+                  <strong>{isPdqPractice ? "Sampled pivot" : "Pivot"}</strong> {partitionPivot}
                 </span>
+                {partitionSampleValues.length > 0 && (
+                  <span><strong>Sampled values</strong> {partitionSampleValues.join(", ")}</span>
+                )}
+                <span><strong>Working range</strong> slots {partitionActiveRange[0] + 1}–{partitionActiveRange[1] + 1}</span>
+                <span>
+                  <strong>{isPdqPractice ? "Certified" : "Already fixed"}</strong>{" "}
+                  {partitionSettledValues.length ? partitionSettledValues.join(", ") : "none yet"}
+                </span>
+              </div>
+            )}
+            {isInsertionPractice && !practiceFinished && insertionKey !== null && (
+              <div className="practice-quick-status practice-insertion-status" aria-label="Current insertion sort key">
+                <span><strong>Key</strong> {insertionKey}</span>
+                <span><strong>Rule</strong> slide the yellow key one neighboring position left at a time</span>
+              </div>
+            )}
+            {currentPractice.decision && !practiceFinished && (
+              <div className="practice-decision-status" aria-label="Current algorithm decision">
+                {currentPractice.decision.power !== undefined && (
+                  <span className="practice-decision-status__power">power {currentPractice.decision.power}</span>
+                )}
+                <strong>{currentPractice.decision.label}</strong>
+                <span>{currentPractice.decision.detail}</span>
               </div>
             )}
             {practiceGroups.length > 0 && (
@@ -4162,12 +4201,20 @@ export default function Home() {
               </div>
             )}
             <p className="practice-lab__help">
-              {isQuickPractice
+              {isPdqPractice
+                ? "Gold is PDQ's sampled pivot and cyan badges show the values it inspected. Only this step's safe outcome stays; this zoomed branch then uses a tiny-piece cleanup when it is small enough."
+                : isQuickPractice
                 ? "The gold block is the parked pivot. Drop onto a block to swap it, or into a glowing gap to shift the row. Only the safe partition move stays, so the next pivot can never become stuck."
+                : isInsertionPractice
+                  ? "The gold block is the key being inserted. Move it only one neighboring slot left at a time; the next step appears as soon as that local insertion move is correct."
                 : "Click two blocks or drop one directly onto another to swap them. Drop into any glowing gap to shift the row instead. The final arrangement—not which value you started with—decides whether the move stays."}
             </p>
             <div
-              className={"practice-board " + (practiceDraggingId ? "practice-board--dragging" : "")}
+              className={
+                "practice-board " +
+                (practiceDraggingId ? "practice-board--dragging " : "") +
+                (practiceFinished ? "practice-board--complete" : "")
+              }
               ref={practiceBoardRef}
               role="group"
               aria-label={algorithmLabel + " interactive practice blocks"}
@@ -4178,21 +4225,32 @@ export default function Home() {
                       const practiceGroup = getPracticeGroupAtIndex(practiceGroups, index);
                       const isGroupStart = practiceGroup?.range[0] === index;
                       const isGroupEnd = practiceGroup?.range[1] === index;
-                      const isQuickWalkthroughComplete = isQuickPractice && practiceFinished;
-                      const isQuickPivot = !isQuickWalkthroughComplete && isQuickPractice && value === quickPivot;
-                      const isQuickSettled = isQuickWalkthroughComplete || (!isQuickPivot && quickSettledValues.includes(value));
-                      const isInQuickRange =
-                        isQuickWalkthroughComplete ||
-                        !isQuickPractice ||
-                        !quickActiveRange ||
-                        (index >= quickActiveRange[0] && index <= quickActiveRange[1]);
-                      const quickLabel = isQuickWalkthroughComplete || isQuickSettled
+                      const isPracticeWalkthroughComplete = practiceFinished;
+                      const isPartitionPivot =
+                        !isPracticeWalkthroughComplete && isPartitionPractice && value === partitionPivot;
+                      const isPartitionSettled =
+                        isPracticeWalkthroughComplete ||
+                        (!isPartitionPivot && partitionSettledValues.includes(value));
+                      const isInPartitionRange =
+                        isPracticeWalkthroughComplete ||
+                        !isPartitionPractice ||
+                        !partitionActiveRange ||
+                        (index >= partitionActiveRange[0] && index <= partitionActiveRange[1]);
+                      const isPdqSample =
+                        !isPracticeWalkthroughComplete &&
+                        isPdqPractice &&
+                        !isPartitionPivot &&
+                        partitionSampleValues.includes(value);
+                      const isInsertionKey =
+                        !isPracticeWalkthroughComplete && isInsertionPractice && value === insertionKey;
+                      const partitionLabel = isPracticeWalkthroughComplete || isPartitionSettled
                         ? ", fixed in its final position"
-                        : isQuickPivot
+                        : isPartitionPivot
                         ? ", current pivot"
-                        : isQuickPractice && !isInQuickRange
+                        : isPartitionPractice && !isInPartitionRange
                             ? ", outside the current partition"
                             : "";
+                      const insertionLabel = isInsertionKey ? ", current insertion key" : "";
                       const groupLabel = practiceGroup
                         ? ", " + practiceGroup.label + (practiceGroup.active ? ", working group" : "") +
                           (practiceGroup.detail ? ". " + practiceGroup.detail : "")
@@ -4215,10 +4273,13 @@ export default function Home() {
                             (practiceGroup ? "practice-block--grouped practice-block--group-" + practiceGroup.tone + " " : "") +
                             (isGroupStart ? "practice-block--group-start " : "") +
                             (isGroupEnd ? "practice-block--group-end " : "") +
-                            (isQuickPivot ? "practice-block--quick-pivot " : "") +
-                            (isQuickSettled ? "practice-block--quick-settled " : "") +
-                            (isQuickPractice && !isQuickWalkthroughComplete && isInQuickRange ? "practice-block--quick-active " : "") +
-                            (isQuickPractice && !isQuickWalkthroughComplete && !isInQuickRange ? "practice-block--quick-waiting " : "") +
+                            (isPracticeWalkthroughComplete ? "practice-block--completed " : "") +
+                            (isPartitionPivot ? "practice-block--partition-pivot " : "") +
+                            (isPartitionSettled ? "practice-block--partition-settled " : "") +
+                            (isPdqSample ? "practice-block--pdq-sample " : "") +
+                            (isInsertionKey ? "practice-block--insertion-key " : "") +
+                            (isPartitionPractice && !isPracticeWalkthroughComplete && isInPartitionRange ? "practice-block--partition-active " : "") +
+                            (isPartitionPractice && !isPracticeWalkthroughComplete && !isInPartitionRange ? "practice-block--partition-waiting " : "") +
                             (practiceSelectedIndex === index ? "practice-block--selected " : "") +
                             (isDragging ? "practice-block--dragging " : "") +
                             (practiceDropMode === "swap" && practiceDropIndex === index && practiceDragIndex !== index
@@ -4237,7 +4298,7 @@ export default function Home() {
                           disabled={practiceUndoPending || practiceSolved}
                           aria-pressed={practiceSelectedIndex === index}
                           aria-grabbed={isDragging}
-                          aria-label={"Value " + value + groupLabel + quickLabel}
+                          aria-label={"Value " + value + groupLabel + partitionLabel + insertionLabel}
                           style={
                             isDragging
                               ? {
@@ -4252,8 +4313,10 @@ export default function Home() {
                           }
                         >
                           <span className="practice-block__value">{value}</span>
-                          {isQuickPivot && <span className="practice-block__badge">pivot</span>}
-                          {isQuickSettled && <span className="practice-block__badge practice-block__badge--fixed">fixed</span>}
+                          {isPartitionPivot && <span className="practice-block__badge">pivot</span>}
+                          {isPdqSample && <span className="practice-block__badge practice-block__badge--sample">sample</span>}
+                          {isInsertionKey && <span className="practice-block__badge">key</span>}
+                          {isPartitionSettled && <span className="practice-block__badge practice-block__badge--fixed">fixed</span>}
                         </button>
                         </Fragment>
                       );
@@ -4328,15 +4391,15 @@ export default function Home() {
               Work table
             </button>
             <button
-              className={"benchmark-tab " + (benchmarkTab === "lines" ? "benchmark-tab--active" : "")}
-              id="efficiency-lines-tab"
+              className={"benchmark-tab " + (benchmarkTab === "bars" ? "benchmark-tab--active" : "")}
+              id="efficiency-bars-tab"
               type="button"
               role="tab"
-              aria-selected={benchmarkTab === "lines"}
-              aria-controls="efficiency-lines-panel"
-              onClick={() => setBenchmarkTab("lines")}
+              aria-selected={benchmarkTab === "bars"}
+              aria-controls="efficiency-bars-panel"
+              onClick={() => setBenchmarkTab("bars")}
             >
-              Growth lines
+              Workload bars
             </button>
           </div>
 
@@ -4390,211 +4453,112 @@ export default function Home() {
               </div>
             </div>
           ) : (
-            <div id="efficiency-lines-panel" className="growth-panel" role="tabpanel" aria-labelledby="efficiency-lines-tab">
-              <div className="growth-panel__header">
-                <div className="growth-panel__intro">
-                  <p className="growth-panel__eyebrow">ILLUSTRATIVE MODEL · N=256–1,048,576</p>
-                  <p className="growth-panel__copy">
-                    Workload is on the vertical axis and array size is on the horizontal axis. Use the inspector to read exact modeled values, then zoom into nearby lines to separate them.
+            <div id="efficiency-bars-panel" className="workload-bars-panel" role="tabpanel" aria-labelledby="efficiency-bars-tab">
+              <div className="workload-bars-panel__header">
+                <div>
+                  <p className="workload-bars-panel__eyebrow">ILLUSTRATIVE MODEL · SINGLE N</p>
+                  <p className="workload-bars-panel__copy">
+                    Choose one theoretical array size, then compare the modeled work directly.
+                    Every visible bar uses the same linear scale, so length shows its share of the
+                    largest selected workload.
                   </p>
                 </div>
 
-                <div className="growth-panel__tools">
-                  <label className="growth-focus-control">
-                    <span>Highlight a line</span>
-                    <select
-                      value={growthFocusedAlgorithm}
-                      onChange={(event) => handleGrowthFocusChange(event.target.value as BenchmarkAlgorithm | "all")}
-                    >
-                      <option value="all">All visible lines</option>
-                      {BENCHMARK_ALGORITHMS.map((benchmarkAlgorithm) => (
-                        <option key={benchmarkAlgorithm.key} value={benchmarkAlgorithm.key}>
-                          {benchmarkAlgorithm.label}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                  <div className="growth-zoom-controls" role="group" aria-label="Growth chart zoom controls">
-                    <button
-                      type="button"
-                      onClick={() => setGrowthView((current) => zoomGrowthView(growthGraphDomain, current, GROWTH_GRAPH_ZOOM_STEP))}
-                      aria-label="Zoom in on the growth chart"
-                    >
-                      Zoom in
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setGrowthView((current) => zoomGrowthView(growthGraphDomain, current, 1 / GROWTH_GRAPH_ZOOM_STEP))}
-                      aria-label="Zoom out on the growth chart"
-                    >
-                      Zoom out
-                    </button>
-                    <button type="button" onClick={resetGrowthView} aria-label="Reset growth chart zoom and pan">
-                      Reset view
-                    </button>
-                    <span aria-label={"Current zoom " + Math.round(growthViewport.zoom * 100) + " percent"}>
-                      {Math.round(growthViewport.zoom * 100)}%
-                    </span>
-                  </div>
-                  <p className="growth-panel__gesture" id="growth-chart-help">
-                    Hover or click to inspect a size. Scroll to zoom. Drag to pan. Use arrow keys when the chart is focused.
-                  </p>
-                </div>
-
-                <div className="growth-toggle-list" role="group" aria-label="Algorithms shown in the growth chart">
-                  {BENCHMARK_ALGORITHMS.map((benchmarkAlgorithm) => {
-                    const isVisible = visibleGrowthAlgorithms[benchmarkAlgorithm.key];
-                    return (
-                      <button
-                        className={
-                          "growth-toggle " +
-                          (isVisible ? "growth-toggle--active " : "") +
-                          (growthFocusedAlgorithm === benchmarkAlgorithm.key ? "growth-toggle--focused" : "")
-                        }
-                        key={benchmarkAlgorithm.key}
-                        type="button"
-                        aria-pressed={isVisible}
-                        onClick={() => handleGrowthAlgorithmVisibilityToggle(benchmarkAlgorithm.key)}
-                        style={{ "--growth-line-color": BENCHMARK_COLORS[benchmarkAlgorithm.key] } as CSSProperties}
-                      >
-                        <i className={"benchmark-legend__swatch benchmark-legend__swatch--" + benchmarkAlgorithm.className} />
-                        {benchmarkAlgorithm.label}
-                      </button>
-                    );
-                  })}
-                </div>
+                <label className="workload-bars-size-control">
+                  <span>Theoretical array size, N</span>
+                  <select
+                    value={workloadBarSize}
+                    onChange={(event) => setWorkloadBarSize(Number(event.target.value))}
+                    aria-label="Theoretical array size for workload bars"
+                  >
+                    {THEORY_BENCHMARK_SIZES.map((size) => (
+                      <option key={size} value={size}>n = {formatCount(size)}</option>
+                    ))}
+                  </select>
+                </label>
               </div>
 
-              <div className="growth-analysis">
-                <div className="growth-chart__scroller">
-                  <div
-                    className={"growth-chart " + (isGrowthPanning ? "growth-chart--panning" : "")}
-                    role="region"
-                    tabIndex={0}
-                    aria-describedby="growth-chart-help"
-                    aria-label={
-                      visibleGrowthSeries.length
-                        ? "Interactive illustrative workload line chart with logarithmic workload and array-size axes. Showing " + visibleGrowthSeries.map((series) => series.label).join(", ") + "."
-                        : "Interactive illustrative workload line chart. No algorithms are currently selected."
-                    }
-                    onPointerDown={handleGrowthChartPointerDown}
-                    onPointerMove={handleGrowthChartPointerMove}
-                    onPointerUp={finishGrowthChartPointer}
-                    onPointerCancel={cancelGrowthChartPointer}
-                    onPointerLeave={() => {
-                      if (!growthPanRef.current) setGrowthHoverIndex(null);
-                    }}
-                    onWheel={handleGrowthChartWheel}
-                    onKeyDown={handleGrowthChartKeyDown}
-                    style={{ width: String(GROWTH_GRAPH_WIDTH) + "px", height: String(GROWTH_GRAPH_HEIGHT) + "px" }}
-                  >
-                    <span className="growth-chart__axis-title growth-chart__axis-title--y">WORKLOAD · LOG SCALE</span>
-                    {growthGraphTicks.map((tick, index) => (
-                      <Fragment key={tick.label + index}>
-                        <i className="growth-chart__gridline" style={{ top: String(tick.y) + "px" }} />
-                        <span className="growth-chart__y-label" style={{ top: String(tick.y) + "px" }}>{tick.label}</span>
-                      </Fragment>
-                    ))}
-                    {visibleGrowthSeries.map((series) => (
-                      <div
-                        className={
-                          "growth-chart__series " +
-                          (series.isFocused ? "growth-chart__series--focused " : "") +
-                          (growthFocusedAlgorithm !== "all" && !series.isFocused ? "growth-chart__series--dimmed" : "")
-                        }
-                        key={series.key}
-                        aria-hidden="true"
-                        style={{ "--growth-line-color": series.color } as CSSProperties}
-                      >
-                        {series.points.slice(0, -1).map((point, index) => {
-                          const nextPoint = series.points[index + 1];
-                          const deltaX = nextPoint.x - point.x;
-                          const deltaY = nextPoint.y - point.y;
-                          const length = Math.hypot(deltaX, deltaY);
-                          const angle = Math.atan2(deltaY, deltaX) * (180 / Math.PI);
-                          return (
-                            <i
-                              className="growth-chart__segment"
-                              key={point.size}
-                              style={{
-                                left: String(point.x) + "px",
-                                top: String(point.y) + "px",
-                                width: String(length) + "px",
-                                transform: "translateY(-50%) rotate(" + String(angle) + "deg)",
-                              }}
-                            />
-                          );
-                        })}
-                        {series.points.map((point) => (
-                          <i
-                            className="growth-chart__point"
-                            key={point.size}
-                            title={series.label + ": n=" + formatCount(point.size) + ", " + formatCount(point.work) + " modeled work"}
-                            style={{ left: String(point.x) + "px", top: String(point.y) + "px" }}
-                          />
-                        ))}
-                      </div>
-                    ))}
-                    {growthInspection.isVisible && visibleGrowthSeries.length > 0 && (
-                      <>
-                        <i className="growth-chart__crosshair" style={{ left: String(growthInspection.x) + "px" }} />
-                        <span className="growth-chart__crosshair-label" style={{ left: String(growthInspection.x) + "px" }}>
-                          n={formatGrowthSize(growthInspection.size)}
-                        </span>
-                      </>
-                    )}
-                    {theoreticalBenchmarkData.map((entry, index) => {
-                      const normalizedX = index / Math.max(theoreticalBenchmarkData.length - 1, 1);
-                      const x = GROWTH_GRAPH_PLOT_LEFT +
-                        ((normalizedX - growthViewport.xStart) / growthViewport.xSpan) * GROWTH_GRAPH_PLOT_WIDTH;
-                      return (
-                        <Fragment key={entry.size}>
-                          <i className="growth-chart__x-gridline" style={{ left: String(x) + "px" }} />
-                          <span
-                            className="growth-chart__x-label"
-                            title={"n=" + formatCount(entry.size)}
-                            style={{ left: String(x) + "px" }}
-                          >
-                            {formatGrowthSize(entry.size)}
-                          </span>
-                        </Fragment>
-                      );
-                    })}
-                    <span className="growth-chart__axis-title growth-chart__axis-title--x">ARRAY SIZE, N · LOG SCALE</span>
-                    {visibleGrowthSeries.length === 0 && (
-                      <p className="growth-chart__empty">Select an algorithm above to draw its workload line.</p>
-                    )}
-                  </div>
+              <div className="workload-bars-toggle-list" role="group" aria-label="Algorithms shown in the workload bars">
+                {BENCHMARK_ALGORITHMS.map((benchmarkAlgorithm) => {
+                  const isVisible = visibleWorkloadBarAlgorithms[benchmarkAlgorithm.key];
+                  return (
+                    <button
+                      className={"workload-bars-toggle " + (isVisible ? "workload-bars-toggle--active" : "")}
+                      key={benchmarkAlgorithm.key}
+                      type="button"
+                      aria-pressed={isVisible}
+                      onClick={() => handleWorkloadBarAlgorithmVisibilityToggle(benchmarkAlgorithm.key)}
+                      style={{ "--workload-bar-color": BENCHMARK_COLORS[benchmarkAlgorithm.key] } as CSSProperties}
+                    >
+                      <i className={"benchmark-legend__swatch benchmark-legend__swatch--" + benchmarkAlgorithm.className} />
+                      {benchmarkAlgorithm.label}
+                    </button>
+                  );
+                })}
+              </div>
+
+              <section
+                className="workload-bars"
+                aria-label={
+                  workloadBarRows.length
+                    ? "Illustrative workload bars at n=" + formatCount(workloadBarEntry?.size ?? workloadBarSize) + "."
+                    : "Illustrative workload bars. No algorithms are selected."
+                }
+              >
+                <div className="workload-bars__scale">
+                  <span>Highest selected workload</span>
+                  <strong>{formatCount(workloadBarMaximum)}</strong>
+                  <p>
+                    {benchmarkPattern === "random"
+                      ? "Random-shuffle model"
+                      : benchmarkPattern === "reverse"
+                        ? "Reverse-order model"
+                        : "Nearly-sorted model"}
+                  </p>
                 </div>
 
-                <aside className="growth-inspector" aria-label={"Modeled workload at n=" + formatCount(growthInspection.size)}>
-                  <p className="growth-inspector__eyebrow">READOUT AT N={formatGrowthSize(growthInspection.size)}</p>
-                  <strong>{formatCount(growthInspection.size)} values</strong>
-                  <p>Exact modeled work makes similar-looking curves easier to compare.</p>
-                  {growthInspection.rows.length ? (
-                    <ol className="growth-inspector__list">
-                      {growthInspection.rows.map((row) => (
+                {workloadBarRows.length ? (
+                  <ol className="workload-bars__list">
+                    {workloadBarRows.map((row) => {
+                      const ratio = row.work / workloadBarMaximum;
+                      const multiplier = row.work / workloadBarFastest;
+                      const relativeLabel =
+                        multiplier === 1
+                          ? "fastest selected algorithm"
+                          : formatWorkloadMultiplier(multiplier) + " the fastest selected algorithm";
+
+                      return (
                         <li
                           key={row.key}
-                          className={growthFocusedAlgorithm === row.key ? "growth-inspector__row--focused" : ""}
-                          style={{ "--growth-line-color": row.color } as CSSProperties}
+                          className="workload-bar-row"
+                          style={{ "--workload-bar-color": row.color } as CSSProperties}
                         >
-                          <span>
-                            <i className={"benchmark-legend__swatch benchmark-legend__swatch--" + row.className} />
-                            {row.label}
-                          </span>
-                          <strong>{formatCount(row.work)}</strong>
-                          <small>
-                            {row.multiplier === 1 ? "fastest active line" : formatGrowthMultiplier(row.multiplier) + " the fastest"}
-                          </small>
+                          <div className="workload-bar-row__heading">
+                            <span>
+                              <i className={"benchmark-legend__swatch benchmark-legend__swatch--" + row.className} />
+                              {row.label}
+                            </span>
+                            <strong>{formatCount(row.work)}</strong>
+                          </div>
+                          <div
+                            className="workload-bar-row__track"
+                            role="progressbar"
+                            aria-label={row.label + ": " + formatCount(row.work) + " modeled work, " + relativeLabel}
+                            aria-valuemin={0}
+                            aria-valuemax={Math.round(workloadBarMaximum)}
+                            aria-valuenow={Math.round(row.work)}
+                          >
+                            <b style={{ width: String(ratio * 100) + "%" }} />
+                          </div>
+                          <small>{relativeLabel}</small>
                         </li>
-                      ))}
-                    </ol>
-                  ) : (
-                    <p className="growth-inspector__empty">Turn on an algorithm to inspect its modeled work.</p>
-                  )}
-                </aside>
-              </div>
+                      );
+                    })}
+                  </ol>
+                ) : (
+                  <p className="workload-bars__empty">Select at least one algorithm to compare its modeled workload.</p>
+                )}
+              </section>
             </div>
           )}
         </section>
