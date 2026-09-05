@@ -83,7 +83,7 @@ test("insertion sort finishes in numeric order without mutating its source", () 
   assert.equal(steps.at(-1)?.writes, 4);
 });
 
-test("adaptive mean uses a size-scaled mean cascade before its certified local finish", () => {
+test("adaptive mean repeatedly scouts lanes, checks fences, and ejects crossings", () => {
   const source = Array.from(
     { length: 64 },
     (_, index) => (index % 2 === 0 ? index / 2 + 1 : 64 - (index - 1) / 2),
@@ -95,8 +95,15 @@ test("adaptive mean uses a size-scaled mean cascade before its certified local f
     splitSteps.slice(0, 3).map((step) => step.groups?.length),
     [2, 4, 8],
   );
-  assert.match(splitSteps[0]?.message ?? "", /Mean cascade round 1/);
-  assert.match(splitSteps[3]?.message ?? "", /Adaptive mean guard finds/);
+  assert.match(splitSteps[0]?.message ?? "", /Mean scout 1/);
+  assert.ok(steps.some((step) => step.phase === "guard"));
+  assert.ok(steps.some((step) => step.phase === "eject"));
+  const firstEjection = steps.findIndex((step) => step.phase === "eject");
+  assert.ok(firstEjection >= 0);
+  assert.ok(
+    steps.slice(firstEjection + 1).some((step) => step.phase === "average"),
+    "Adaptive Mean should resume mean scouting after a fence ejection.",
+  );
   assert.deepEqual(finalValues(steps), [...source].sort((left, right) => left - right));
   const metrics = analyzeRangeGuardMeanSort(source);
   assert.equal(metrics.comparisons, 0);
@@ -104,26 +111,40 @@ test("adaptive mean uses a size-scaled mean cascade before its certified local f
   assert.ok((metrics.meanComputationOperations ?? 0) > 0);
   assert.ok((metrics.meanRankingArithmeticOperations ?? 0) > 0);
   assert.ok((metrics.refinementOperations ?? 0) > 0);
-  assert.ok(steps.filter((step) => step.phase === "reorder").length > 3);
+  assert.ok(steps.filter((step) => step.phase === "reorder").length >= 3);
   assert.deepEqual(source, Array.from(
     { length: 64 },
     (_, index) => (index % 2 === 0 ? index / 2 + 1 : 64 - (index - 1) / 2),
   ));
 });
 
-test("adaptive mean respects duplicate-safe range boundaries", () => {
+test("adaptive mean respects duplicate-safe locked range fences", () => {
   const source = [
     16, 1, 15, 2, 14, 3, 13, 4, 12, 5, 11, 6, 10, 7, 9, 8,
     31, 16, 30, 17, 29, 18, 28, 19, 27, 20, 26, 21, 25, 22, 24, 23,
   ];
   const guarded = buildRangeGuardMeanSteps(source);
-  const rangeScan = guarded.find(
-    (step) => step.phase === "split" && step.message.includes("Adaptive mean guard finds"),
-  );
+  const rangeScan = guarded.find((step) => step.phase === "guard");
 
-  assert.match(rangeScan?.message ?? "", /2 certified independent value regions/);
-  assert.equal(rangeScan?.groups?.length, 2);
+  assert.match(rangeScan?.message ?? "", /locked boundar/);
+  assert.ok((rangeScan?.groups?.length ?? 0) >= 2);
   assert.deepEqual(finalValues(guarded), [...source].sort((left, right) => left - right));
+});
+
+test("adaptive mean makes its outlier ejection visible before local polish", () => {
+  const source = [1, 16, 2, 15, 3, 14, 4, 13, 5, 12, 6, 11, 7, 10, 8, 9];
+  const steps = buildRangeGuardMeanSteps(source);
+  const ejection = steps.find((step) => step.phase === "eject");
+  const polish = steps.find((step) => step.phase === "polish");
+
+  assert.ok(ejection);
+  assert.ok((ejection?.outliers?.length ?? 0) > 0);
+  assert.ok(polish);
+  assert.ok(
+    (polish?.groups ?? []).every((group) => group.end - group.start <= 8),
+    "Only small independent lanes should reach the local polish.",
+  );
+  assert.deepEqual(finalValues(steps), [...source].sort((left, right) => left - right));
 });
 
 test("adaptive mean finishes generic values exactly without mutating its source", () => {

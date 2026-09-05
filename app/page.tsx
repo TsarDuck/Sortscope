@@ -53,6 +53,9 @@ type StepPhase =
   | "split"
   | "average"
   | "reorder"
+  | "guard"
+  | "eject"
+  | "polish"
   | "swap"
   | "sweep"
   | "heapify"
@@ -114,6 +117,7 @@ type SortStep = {
   writes: number;
   message: string;
   groups?: MeanGroup[];
+  outliers?: number[];
   settled?: number[];
   rangeStart?: number;
   rangeEnd?: number;
@@ -129,10 +133,15 @@ const AUDIBLE_PHASES: StepPhase[] = [
   "merge",
   "shuffle",
   "reorder",
+  "eject",
+  "polish",
 ];
 
 const DEFAULT_ARRAY_SIZE = 24;
 const DEFAULT_SPEED = 62;
+const BOGO_MAX_ARRAY_SIZE = 24;
+const COMPLETION_SWEEP_DURATION = 1_050;
+const BOGO_COMPLETION_SWEEP_DELAY = 720;
 const BENCHMARK_SIZES = [16, 32, 64, 128, 256];
 const THEORY_BENCHMARK_SIZES = [16, 64, 256, 1_024, 4_096, 16_384, 65_536];
 const BENCHMARK_ALGORITHMS = [
@@ -192,9 +201,10 @@ function getTheoreticalWork(
     case "merge":
       return 2 * n * logN;
     case "rangeGuardMean":
-      // A capped 2→4→8→16 mean-band cascade uses lightweight block handles,
-      // then resolves only the range components that still overlap.
-      return 2.25 * n * logN + 2 * n;
+      // Repeated mean scouts, range fences, and outlier ejections remain in
+      // the n log n family, but carry more teaching-oriented setup work than
+      // Merge or Heap. This is an illustrative growth shape, not a timing.
+      return 3.1 * n * logN + 2 * n;
   }
 }
 
@@ -733,56 +743,56 @@ const ALGORITHM_DETAILS: Record<AlgorithmId, AlgorithmDetails> = {
   "range-guard-mean": {
     label: "Adaptive Mean sort",
     number: "09",
-    heroCopy: "Rank progressively narrower mean bands, prove the safe boundaries, then finish only the overlaps.",
-    controlTitle: "Cascade mean bands, then certify ranges",
+    heroCopy: "Route lanes by average, lock safe range fences, and eject the outliers that cross them.",
+    controlTitle: "Route mean lanes and eject crossings",
     stageLabel: "round",
-    stageDescription: "mean cascade + range finish",
+    stageDescription: "mean scouts + outlier fences",
     eyebrow: "THE BIG IDEA",
-    learnTitle: "Use means to arrange broad bands, then let ranges decide what still needs exact work.",
+    learnTitle: "Averages place lanes; fences rescue the values that averages hide.",
     learnCopy: [
-      "Adaptive Mean sort starts with two balanced bands, ranks their arithmetic means, then repeats with four, eight, or sixteen narrower bands as the row grows. The bands themselves stay intact while lightweight handles change order, so the mean phase is a real driver of the layout rather than a one-time hint.",
-      "A smaller average is useful but never proof: [1, 100] has a middling mean even though its values belong at opposite ends. After the final mean round, the guard asks whether the largest value on the left is no bigger than the smallest value on the right. Only that exact range test can certify a boundary.",
-      "Certified regions stay independent. Any regions whose ranges still overlap finish with adaptive natural merges: increasing runs stay put, decreasing runs reverse once, and only the remaining runs merge. Tiny rows use the direct finish because extra mean-band setup would cost more than it saves.",
+      "Adaptive Mean sort repeatedly opens two spatial lanes inside every still-messy region, measures both arithmetic means, and routes the lower-mean lane before the higher-mean lane. This is not a one-time prelude: the newly routed lanes become the starting point for the next mean scout.",
+      "An average is useful but never proof. After routing, a range fence checks whether the largest value on the left is no bigger than the smallest value on the right. If it is, that fence locks. If it crosses, the algorithm uses the parent region's weighted mean as a fence and stably ejects values at or below it left and higher values right.",
+      "Both a locked fence and an outlier ejection create a proven numeric boundary. Their child lanes repeat the same mean-scouter, fence, and ejection rhythm until only small independent lanes remain. Those tiny lanes get a local polish; the algorithm never relies on a whole-row merge.",
     ],
     complexity: ["BEST O(n)", "WORST O(n log n)", "SPACE O(n)"],
     cardTitle: "ADAPTIVE MEAN SORT",
-    cardTag: "mean-led · certified regions",
+    cardTag: "mean-led · outlier routing",
     steps: [
-      "Split into two broad mean bands, then progressively narrower ones.",
-      "Rank each round's band handles by their exact arithmetic means.",
-      "Certify boundaries only when max(left) ≤ min(right).",
-      "Finish only overlapping regions with natural runs and stable merges.",
+      "Split each active region into two spatial mean lanes.",
+      "Route the lower average lane before the higher average lane.",
+      "Lock a fence only when max(left) ≤ min(right).",
+      "Otherwise eject values around the weighted mean, then scout the child lanes again.",
     ],
     examples: [
-      { values: "2 bands → 4 bands → 8 bands", detail: "Each round splits the current bands in half and ranks only their mean-bearing handles, keeping every band's values together." },
-      { values: "[1, 100] μ=50.5 | [48, 49] μ=48.5", detail: "The right band ranks earlier by mean, but its range still crosses the left band—so the mean is guidance, not proof." },
-      { values: "max([1, 16]) = 16 ≤ min([16, 31]) = 16", detail: "This is a certified boundary. Equal edge values are safe: every left value is still no larger than every right value." },
-      { values: "overlap region [1, 4] + [2, 3] → [1, 2, 3, 4]", detail: "Only an overlapping region needs an exact natural merge before all certified regions can join." },
+      { values: "[6, 1, 8, 2] | [7, 3, 5, 4]", detail: "First split the current region into two spatial lanes and measure their means. A lower mean lane routes left, but the values themselves stay together for now." },
+      { values: "max([6, 1, 8, 2]) = 8 > min([7, 3, 5, 4]) = 3", detail: "The range fence crosses, so mean order alone is not safe. The highlighted 8 and 3 show why the fence refuses to lock." },
+      { values: "μ = 4.5 → [1, 2, 3, 4] | [6, 8, 7, 5]", detail: "Eject every value at or below 4.5 left and every higher value right. That creates a real boundary, not a hopeful average." },
+      { values: "mean scout → fence → ejection → mean scout", detail: "The two new lanes are independent, so the algorithm repeats the same idea inside each one before a tiny local polish." },
     ],
     benefits: [
-      { title: "Mean bands guide the early layout", copy: "It repeatedly ranks broad-to-narrow groups by average, giving the row a useful first structure before exact work begins." },
-      { title: "Proof limits cleanup", copy: "Range boundaries that truly cannot cross let separate regions finish independently instead of repairing the whole row." },
+      { title: "Means remain in charge", copy: "Every large region is measured and routed again after it is split, so average-based grouping is the main rhythm instead of a decorative first step." },
+      { title: "Outliers get an explicit rescue route", copy: "A crossed fence turns hidden trouble into a visible ejection, sending lower values left and higher values right with a proven boundary." },
     ],
     tradeoffs: [
-      { title: "An average can hide outliers", copy: "A middle-looking mean never proves that every value in its band belongs in the middle, so the guard remains essential." },
-      { title: "Not a universal Heap replacement", copy: "Its measured work can beat Heap Sort in this lab, but both have the same worst-case growth and input shape still matters." },
+      { title: "Means can still be skewed", copy: "A single extreme value can make a lopsided split, so this version keeps a depth guardrail and locally polishes only a stubborn lane when needed." },
+      { title: "More storytelling, more setup", copy: "The mean scans and fence checks make its moves easier to understand, but Merge and Heap Sort can still be simpler or faster for some data." },
     ],
     practice: [
       {
         kind: "partitions",
-        prompt: "These mean-ranked ranges are already certified: the lower range ends at 3 and the higher range begins at 4. Keep the lower range first.",
+        prompt: "Route these whole lanes by their averages. Keep the lower-mean lane before the higher-mean lane.",
         partitions: [
           { id: "high-range", values: [4, 5, 6], mean: 5 },
           { id: "low-range", values: [1, 2, 3], mean: 2 },
         ],
         targetOrder: ["low-range", "high-range"],
-        hint: "Because 3 ≤ 4, every value in the lower range can safely stay before every value in the higher range.",
+        hint: "This is the mean-routing move: whole lanes move together before the range fence checks their actual extremes.",
       },
       {
-        prompt: "Now finish only the six-value region whose ranges still overlap.",
-        start: [1, 2, 5, 3, 4, 6],
+        prompt: "This fence crosses: move the low outlier left and the high outlier right.",
+        start: [1, 2, 6, 3, 4, 5],
         target: [1, 2, 3, 4, 5, 6],
-        hint: "Merge the natural runs [1, 2, 5] and [3, 4, 6]; only 5 needs to travel right.",
+        hint: "The weighted mean is 3.5. Eject 3 left and 6 right; the resulting fence is certified.",
       },
     ],
   },
@@ -1031,6 +1041,13 @@ function getBarClass(
     if (step.phase === "split") return "bar--partition";
     if (step.phase === "average") return "bar--mean";
     if (step.phase === "reorder") return "bar--rank";
+    if (step.phase === "guard") {
+      return step.outliers?.includes(index) ? "bar--outlier" : "bar--guard";
+    }
+    if (step.phase === "eject") {
+      return step.outliers?.includes(index) ? "bar--outlier" : "bar--eject";
+    }
+    if (step.phase === "polish") return "bar--polish";
     return "bar--idle";
   }
 
@@ -1158,6 +1175,9 @@ function getPhaseLabel(phase: StepPhase) {
     split: "Split groups",
     average: "Measure means",
     reorder: "Rank groups",
+    guard: "Check fences",
+    eject: "Eject outliers",
+    polish: "Polish lanes",
     swap: "Swap values",
     sweep: "Sweep",
     heapify: "Restore heap",
@@ -1189,6 +1209,7 @@ export default function Home() {
   const [runState, setRunState] = useState<RunState>("ready");
   const [bogoLiveStep, setBogoLiveStep] = useState<SortStep | null>(null);
   const [bogoCelebration, setBogoCelebration] = useState(false);
+  const [completionSweepActive, setCompletionSweepActive] = useState(false);
   const [soundVolume, setSoundVolume] = useState(50);
   const [practiceStepIndex, setPracticeStepIndex] = useState(0);
   const [practiceValues, setPracticeValues] = useState([5, 3, 4, 1]);
@@ -1203,8 +1224,12 @@ export default function Home() {
   const [practiceUndoPending, setPracticeUndoPending] = useState(false);
   const [practiceMedianSelection, setPracticeMedianSelection] = useState<number | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
+  const soundVolumeRef = useRef(soundVolume);
   const lastToneTimeRef = useRef(0);
   const lastBogoTextureTimeRef = useRef(0);
+  const completionSweepStartedRef = useRef(false);
+  const completionSweepStartTimerRef = useRef<number | null>(null);
+  const completionSweepEndTimerRef = useRef<number | null>(null);
   const meanBarElementsRef = useRef(new Map<number, HTMLDivElement>());
   const meanBarPositionsRef = useRef(new Map<number, number>());
   const motionBarElementsRef = useRef(new Map<string, HTMLDivElement>());
@@ -1228,6 +1253,7 @@ export default function Home() {
   const [meanSlideStage, setMeanSlideStage] = useState<"idle" | "prepare" | "animate">("idle");
   const [motionSlideOffsets, setMotionSlideOffsets] = useState<Record<string, number>>({});
   const [motionSlideStage, setMotionSlideStage] = useState<"idle" | "prepare" | "animate">("idle");
+  soundVolumeRef.current = soundVolume;
   const prefersReducedMotion = usePrefersReducedMotion();
   const usesRangeGroups = algorithm === "range-guard-mean";
   const isBogo = algorithm === "bogo";
@@ -1256,7 +1282,7 @@ export default function Home() {
           ? Math.max(1, originalValues.length)
         : Math.max(originalValues.length - 1, 0);
   const minimumArraySize = 4;
-  const maximumArraySize = 256;
+  const maximumArraySize = isBogo ? BOGO_MAX_ARRAY_SIZE : 256;
   const benchmarkData = useMemo(
     () =>
       BENCHMARK_SIZES.map((size) => {
@@ -1390,6 +1416,43 @@ export default function Home() {
     return () => window.clearTimeout(timer);
   }, [currentStep.phase, isBogo, runState]);
 
+  useEffect(() => {
+    const hasFinishedSorting = runState === "complete" && currentStep.phase === "complete";
+
+    if (!hasFinishedSorting) {
+      resetCompletionSweep();
+      return;
+    }
+
+    if (completionSweepStartedRef.current) return;
+    completionSweepStartedRef.current = true;
+
+    const beginSweep = () => {
+      completionSweepStartTimerRef.current = null;
+      setCompletionSweepActive(true);
+
+      if (soundVolumeRef.current > 0) {
+        const context = ensureAudioContext();
+        void context.resume().then(playCompletionSweepSound).catch(() => undefined);
+      }
+
+      completionSweepEndTimerRef.current = window.setTimeout(() => {
+        completionSweepEndTimerRef.current = null;
+        setCompletionSweepActive(false);
+      }, COMPLETION_SWEEP_DURATION);
+    };
+
+    if (isBogo) {
+      completionSweepStartTimerRef.current = window.setTimeout(
+        beginSweep,
+        BOGO_COMPLETION_SWEEP_DELAY,
+      );
+      return;
+    }
+
+    beginSweep();
+  }, [currentStep.phase, isBogo, runState]);
+
   useLayoutEffect(() => {
     const captureMeanBarPositions = () => {
       const positions = new Map<number, number>();
@@ -1412,7 +1475,8 @@ export default function Home() {
     const nextPositions = captureMeanBarPositions();
     const shouldAnimateMeanMove =
       currentStep.phase === "reorder" ||
-      (currentStep.phase === "split" && currentStep.message.includes("Adaptive mean guard"));
+      currentStep.phase === "eject" ||
+      currentStep.phase === "polish";
     if (!shouldAnimateMeanMove) {
       meanBarPositionsRef.current = nextPositions;
       return;
@@ -1575,7 +1639,8 @@ export default function Home() {
     ? 18
     : usesRangeGroups
       ? currentStep.phase === "reorder" ||
-          (currentStep.phase === "split" && currentStep.message.includes("Adaptive mean guard"))
+          currentStep.phase === "eject" ||
+          currentStep.phase === "polish"
         ? meanSlideDuration + 120
         : meanStaticDelay
       : usesEvenMergePacing
@@ -1638,6 +1703,19 @@ export default function Home() {
             (isBogo && bogoRunsUntilSolved ? " with no shuffle cap." : " of " + totalStages + ".")
           : "Ready to demonstrate " + algorithmLabel + ".";
 
+  function resetCompletionSweep() {
+    if (completionSweepStartTimerRef.current !== null) {
+      window.clearTimeout(completionSweepStartTimerRef.current);
+      completionSweepStartTimerRef.current = null;
+    }
+    if (completionSweepEndTimerRef.current !== null) {
+      window.clearTimeout(completionSweepEndTimerRef.current);
+      completionSweepEndTimerRef.current = null;
+    }
+    completionSweepStartedRef.current = false;
+    setCompletionSweepActive(false);
+  }
+
   function ensureAudioContext() {
     if (!audioContextRef.current) {
       audioContextRef.current = new AudioContext();
@@ -1648,6 +1726,62 @@ export default function Home() {
     }
 
     return audioContextRef.current;
+  }
+
+  function playMusicalVoice(
+    context: AudioContext,
+    startTime: number,
+    frequency: number,
+    targetDuration: number,
+    peakGain: number,
+  ) {
+    // A C2 fundamental needs a few complete cycles to read as a note. The old
+    // very short envelope turned it into a soft thump, especially on laptop
+    // speakers. An octave reinforcement carries the same pitch into a range
+    // speakers reproduce clearly without abandoning the low note.
+    const duration = Math.min(0.12, Math.max(targetDuration, 4.5 / Math.max(frequency, 1)));
+    const attack = Math.min(0.006, Math.max(0.002, duration * 0.11));
+    const bodyTime = Math.max(attack + 0.008, duration * 0.5);
+    const fundamental = context.createOscillator();
+    const octave = context.createOscillator();
+    const fundamentalLevel = context.createGain();
+    const octaveLevel = context.createGain();
+    const rumbleFilter = context.createBiquadFilter();
+    const toneFilter = context.createBiquadFilter();
+    const envelope = context.createGain();
+
+    fundamental.type = "triangle";
+    fundamental.frequency.setValueAtTime(frequency, startTime);
+    octave.type = "sine";
+    octave.frequency.setValueAtTime(frequency * 2, startTime);
+    fundamentalLevel.gain.setValueAtTime(0.82, startTime);
+    octaveLevel.gain.setValueAtTime(0.46, startTime);
+    // Remove sub-bass rumble, while the C3 harmonic makes the C2 root clear.
+    rumbleFilter.type = "highpass";
+    rumbleFilter.frequency.setValueAtTime(52, startTime);
+    rumbleFilter.Q.setValueAtTime(0.45, startTime);
+    toneFilter.type = "lowpass";
+    toneFilter.frequency.setValueAtTime(2_200, startTime);
+    toneFilter.Q.setValueAtTime(0.45, startTime);
+    envelope.gain.setValueAtTime(0.0001, startTime);
+    envelope.gain.exponentialRampToValueAtTime(peakGain, startTime + attack);
+    envelope.gain.exponentialRampToValueAtTime(
+      Math.max(0.0001, peakGain * 0.66),
+      startTime + bodyTime,
+    );
+    envelope.gain.exponentialRampToValueAtTime(0.0001, startTime + duration);
+
+    fundamental.connect(fundamentalLevel);
+    octave.connect(octaveLevel);
+    fundamentalLevel.connect(rumbleFilter);
+    octaveLevel.connect(rumbleFilter);
+    rumbleFilter.connect(toneFilter);
+    toneFilter.connect(envelope);
+    envelope.connect(context.destination);
+    fundamental.start(startTime);
+    octave.start(startTime);
+    fundamental.stop(startTime + duration + 0.015);
+    octave.stop(startTime + duration + 0.015);
   }
 
   function playSortingTone(step: SortStep) {
@@ -1664,37 +1798,46 @@ export default function Home() {
       Math.max(0, step.inserting ?? step.comparing ?? step.shifting ?? 0),
     );
     const activeValue = step.values[activeIndex] ?? step.key ?? 1;
-    const normalizedValue = Math.min(1, Math.max(0, activeValue / largestValue));
-    const oscillator = context.createOscillator();
-    const gain = context.createGain();
+    const normalizedValue = Math.min(
+      1,
+      Math.max(0, (activeValue - 1) / Math.max(largestValue - 1, 1)),
+    );
     const isImpact =
       step.phase === "swap" ||
       step.phase === "shift" ||
       step.phase === "insert" ||
       step.phase === "merge" ||
-      step.phase === "reorder";
-    const duration = isImpact ? 0.046 : 0.028;
-    const basePeakGain = isImpact ? 0.22 : 0.15;
+      step.phase === "reorder" ||
+      step.phase === "eject" ||
+      step.phase === "polish";
+    const targetDuration = isImpact ? 0.052 : 0.034;
+    const basePeakGain = isImpact ? 0.2 : 0.14;
     const peakGain = basePeakGain * (soundVolume / 100) ** 2.5;
-    // Keep even the smallest value above the muddy low register found on many
-    // laptop speakers. A shorter upper range still preserves the value-to-pitch
-    // relationship without making high values piercing.
-    const semitone = Math.round(normalizedValue * 19);
-    const frequency = 261.63 * 2 ** (semitone / 12);
+    // Values span C2 through C4. The shared voice layers C3 over C2, so the
+    // low end stays musical and audible instead of being raised out of range.
+    const semitone = Math.round(normalizedValue * 24);
+    const frequency = 65.41 * 2 ** (semitone / 12);
 
-    // Use the same short, quantized triangle voice that makes Selection Sort's
-    // moves feel crisp. Quantized pitches keep rapid comparisons legible rather
-    // than turning into a smooth sine-wave wash.
-    oscillator.type = "triangle";
-    oscillator.frequency.setValueAtTime(frequency, now);
-    gain.gain.setValueAtTime(0.0001, now);
-    gain.gain.exponentialRampToValueAtTime(peakGain, now + 0.002);
-    gain.gain.exponentialRampToValueAtTime(Math.max(0.0001, peakGain * 0.38), now + 0.008);
-    gain.gain.exponentialRampToValueAtTime(0.0001, now + duration);
-    oscillator.connect(gain);
-    gain.connect(context.destination);
-    oscillator.start(now);
-    oscillator.stop(now + duration + 0.01);
+    playMusicalVoice(context, now, frequency, targetDuration, peakGain);
+  }
+
+  function playCompletionSweepSound() {
+    const context = audioContextRef.current;
+    const volume = soundVolumeRef.current;
+    if (!context || context.state !== "running" || volume <= 0) return;
+
+    const now = context.currentTime + 0.015;
+    const sweepSemitones = [0, 2, 4, 5, 7, 9, 11, 12, 14, 16, 17, 19, 21, 23, 24];
+    const targetDuration = 0.095;
+    const spacing =
+      (COMPLETION_SWEEP_DURATION / 1_000 - targetDuration) /
+      Math.max(sweepSemitones.length - 1, 1);
+    const peakGain = 0.16 * (volume / 100) ** 2.5;
+
+    sweepSemitones.forEach((semitone, index) => {
+      const frequency = 65.41 * 2 ** (semitone / 12);
+      playMusicalVoice(context, now + index * spacing, frequency, targetDuration, peakGain);
+    });
   }
 
   function playBogoShuffleTexture(attempt: number) {
@@ -1709,13 +1852,15 @@ export default function Home() {
     const filter = context.createBiquadFilter();
     const gain = context.createGain();
     const motion = ((attempt * 0.61803398875) % 1 + 1) % 1;
-    const frequency = 220 + motion * 360;
+    // Keep Bogo's synthetic shuffle texture out of the same muddy low range
+    // as the old smallest-value tone.
+    const frequency = 293.66 + motion * 340;
     const peakGain = 0.17 * (soundVolume / 100) ** 2.15;
 
     oscillator.type = "triangle";
     oscillator.frequency.setValueAtTime(frequency, now);
     oscillator.frequency.exponentialRampToValueAtTime(
-      Math.max(220, frequency * 0.78),
+      Math.max(277.18, frequency * 0.8),
       now + 0.07,
     );
     filter.type = "bandpass";
@@ -1759,6 +1904,12 @@ export default function Home() {
 
   useEffect(() => {
     return () => {
+      if (completionSweepStartTimerRef.current !== null) {
+        window.clearTimeout(completionSweepStartTimerRef.current);
+      }
+      if (completionSweepEndTimerRef.current !== null) {
+        window.clearTimeout(completionSweepEndTimerRef.current);
+      }
       void audioContextRef.current?.close();
     };
   }, []);
@@ -1851,6 +2002,7 @@ export default function Home() {
   }, [delay, isBogo, runState, stepIndex, steps]);
 
   function createNewArray(size = arraySize) {
+    resetCompletionSweep();
     const nextValues = makeRandomArray(size);
     setBogoCelebration(false);
     bogoSessionRef.current = null;
@@ -1863,6 +2015,7 @@ export default function Home() {
   }
 
   function resetArray() {
+    resetCompletionSweep();
     setBogoCelebration(false);
     bogoSessionRef.current = null;
     setBogoLiveStep(null);
@@ -2197,11 +2350,22 @@ export default function Home() {
   }
 
   function handleAlgorithmChange(nextAlgorithm: AlgorithmId) {
+    resetCompletionSweep();
     setBogoCelebration(false);
     bogoSessionRef.current = null;
     setBogoLiveStep(null);
+    const nextMaximumArraySize =
+      nextAlgorithm === "bogo" ? BOGO_MAX_ARRAY_SIZE : 256;
+    const nextArraySize = Math.min(arraySize, nextMaximumArraySize);
+    const nextValues =
+      nextArraySize === arraySize ? [...originalValues] : makeRandomArray(nextArraySize);
     setAlgorithm(nextAlgorithm);
-    setValues([...originalValues]);
+    if (nextArraySize !== arraySize) {
+      setArraySize(nextArraySize);
+      setArraySizeInput(String(nextArraySize));
+    }
+    setOriginalValues(nextValues);
+    setValues(nextValues);
     setSteps([]);
     setStepIndex(0);
     setRunState("ready");
@@ -2220,6 +2384,7 @@ export default function Home() {
     }
 
     const audioContext = soundEnabled ? ensureAudioContext() : null;
+    resetCompletionSweep();
     setBogoCelebration(false);
     if (algorithm === "bogo") {
       if (audioContext) {
@@ -2333,7 +2498,7 @@ export default function Home() {
     }
 
     const confirmed = window.confirm(
-      "Let Bogo Sort run until it solves?\n\nThis removes the shuffle cap. It may run indefinitely and keep using browser resources until it gets lucky. You can still pause or reset it.",
+      "Let Bogo Sort run until it solves?\n\nThis removes the shuffle cap. It may run until the sun explodes (or until you pause or reset it).",
     );
     setBogoRunsUntilSolved(confirmed);
   }
@@ -2486,7 +2651,7 @@ export default function Home() {
                       <span>
                         <strong>Let it run until solved</strong>
                         <small id="bogo-unlimited-warning-note">
-                          Warning: removes the cap and may use browser resources indefinitely.
+                          Warning: no cap — may run until the sun explodes.
                         </small>
                       </span>
                     </label>
@@ -2496,7 +2661,7 @@ export default function Home() {
 
               <label className="control-field control-field--range">
                 <span className="control-label">
-                  Array size
+                  {isBogo ? "Array size · max 24" : "Array size"}
                   <input
                     className="control-number"
                     type="number"
@@ -2604,6 +2769,17 @@ export default function Home() {
 
             <div className="chart-stage" role="img" aria-label={"Array values: " + displayValues + ". " + currentStep.message}>
               <div className="chart-grid" aria-hidden="true" />
+              {completionSweepActive && (
+                <div
+                  className={
+                    "completion-sweep " +
+                    (prefersReducedMotion ? "completion-sweep--reduced" : "")
+                  }
+                  aria-hidden="true"
+                >
+                  <span className="completion-sweep__line" />
+                </div>
+              )}
               {usesRangeGroups && currentStep.groups && (
                 <div
                   className={"mean-bands mean-bands--" + meanSlideStage}
@@ -2708,9 +2884,12 @@ export default function Home() {
                 {usesRangeGroups ? (
                   <>
                     <span><i className="legend__swatch legend__swatch--idle" />current row</span>
-                    <span><i className="legend__swatch legend__swatch--partition" />group / range scan</span>
+                    <span><i className="legend__swatch legend__swatch--partition" />mean lanes</span>
                     <span><i className="legend__swatch legend__swatch--mean" />mean measured</span>
-                    <span><i className="legend__swatch legend__swatch--rank" />groups ranked</span>
+                    <span><i className="legend__swatch legend__swatch--rank" />lanes routed</span>
+                    <span><i className="legend__swatch legend__swatch--guard" />range fence</span>
+                    <span><i className="legend__swatch legend__swatch--outlier" />ejected outlier</span>
+                    <span><i className="legend__swatch legend__swatch--polish" />local polish</span>
                   </>
                 ) : isBogo ? (
                   <>
@@ -2786,12 +2965,12 @@ export default function Home() {
             <div className="stat-card">
               <span>{usesRangeGroups ? "WORK CHECKS" : isBogo ? "ORDER CHECKS" : "COMPARISONS"}</span>
               <strong>{currentStep.comparisons}</strong>
-              <p>{usesRangeGroups ? "means + ranges" : isBogo ? "values checked" : "values checked"}</p>
+              <p>{usesRangeGroups ? "means + fences" : isBogo ? "values checked" : "values checked"}</p>
             </div>
             <div className="stat-card">
               <span>{usesRangeGroups ? "TRACKED MOVES" : isBogo ? "SHUFFLE WRITES" : "ARRAY WRITES"}</span>
               <strong>{currentStep.writes}</strong>
-              <p>{usesRangeGroups ? "band handles + local writes" : isBogo ? "random swaps" : "moves + writes"}</p>
+              <p>{usesRangeGroups ? "routes + ejections" : isBogo ? "random swaps" : "moves + writes"}</p>
             </div>
             <div className="stat-card stat-card--progress">
               <span>{isBogo && bogoRunsUntilSolved && runState !== "complete" ? "OPEN ENDED" : "PROGRESS"}</span>
@@ -3090,7 +3269,7 @@ export default function Home() {
             <p className="benchmark-chart__note">
               {benchmarkView === "theory"
                 ? "This view illustrates each algorithm's growth shape for the selected arrangement. Meter length uses a log scale so O(n log n) curves remain visible next to quadratic ones; the rounded number is a relative model unit, not a timed result or an exact operation total."
-                : "Each column applies this visualizer's counted-work model at that exact size: value comparisons, primary writes, and Adaptive Mean's mean/range events. Meter length uses a log scale so faster algorithms remain visible; the rounded number is not browser runtime."}
+                : "Each column applies this visualizer's counted-work model at that exact size: value comparisons, primary writes, and Adaptive Mean's mean scans, fences, and ejections. Meter length uses a log scale so faster algorithms remain visible; the rounded number is not browser runtime."}
             </p>
             <p className="benchmark-chart__order">Rows run from highest counted work at the top to lowest at the bottom, based on the rightmost size.</p>
             <div className="benchmark-matrix" style={benchmarkMatrixStyle}>

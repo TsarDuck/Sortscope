@@ -18,6 +18,9 @@ export type StepPhase =
   | "split"
   | "average"
   | "reorder"
+  | "guard"
+  | "eject"
+  | "polish"
   | "swap"
   | "sweep"
   | "heapify"
@@ -48,6 +51,7 @@ export type SortStep = {
   writes: number;
   message: string;
   groups?: MeanGroup[];
+  outliers?: number[];
   settled?: number[];
   rangeStart?: number;
   rangeEnd?: number;
@@ -76,43 +80,8 @@ export type BogoSession = {
   initiallySorted: boolean;
 };
 
-type MeanChunk = {
-  id: number;
-  values: number[];
-  sum: number;
-  originalIndex: number;
-};
-
-type MeanBand = {
-  id: number;
-  source: number[];
-  start: number;
-  end: number;
-  sum: number;
-  originalIndex: number;
-};
-
-type MeanCascadeRound = {
-  groupCount: number;
-  splitBands: MeanBand[];
-  rankedBands: MeanBand[];
-  meanOperations: number;
-  rankComparisons: number;
-  descriptorMoves: number;
-};
-
-type MeanCascade = {
-  rounds: MeanCascadeRound[];
-  bands: MeanBand[];
-  meanOperations: number;
-  rankComparisons: number;
-  descriptorMoves: number;
-};
-
 export const BOGO_MAX_ATTEMPTS = 1_000_000;
 const COMPACT_FRAME_THRESHOLD = 24;
-const MEAN_CASCADE_MIN_SIZE = 16;
-const MAX_MEAN_CASCADE_BANDS = 16;
 
 export function createInitialStep(
   values: number[],
@@ -127,7 +96,7 @@ export function createInitialStep(
     quick: "Choose a pivot, partition around it, then repeat on each side.",
     merge: "Split the row into runs, then merge ordered neighbors.",
     bogo: "Shuffle the whole row until chance happens to order it.",
-    "range-guard-mean": "The row will cascade progressively narrower mean bands, then exactly resolve only the crossing ranges.",
+    "range-guard-mean": "Mean lanes will route by average, then range fences will eject the outliers that cross them.",
   };
 
   return {
@@ -623,6 +592,463 @@ function sortNaturalRuns(source: number[]): NaturalSortResult {
   return { values, comparisons, writes, frames };
 }
 
+type AdaptiveMeanLane = {
+  id: number;
+  values: number[];
+  sum: number;
+  depth: number;
+};
+
+type AdaptiveMeanTraceEvent = {
+  pass: number;
+  phase: "split" | "average" | "reorder" | "guard" | "eject" | "polish";
+  values: number[];
+  groups: MeanGroup[];
+  comparisons: number;
+  writes: number;
+  message: string;
+  outliers?: number[];
+};
+
+type AdaptiveMeanPlan = {
+  events: AdaptiveMeanTraceEvent[];
+  values: number[];
+  comparisons: number;
+  writes: number;
+  meanOperations: number;
+  rankComparisons: number;
+  meanRankingArithmeticOperations: number;
+  refinementOperations: number;
+  rounds: number;
+  fallbackLaneCount: number;
+};
+
+type AdaptiveMeanPair = {
+  parent: AdaptiveMeanLane;
+  left: AdaptiveMeanLane;
+  right: AdaptiveMeanLane;
+  rankedLeft: AdaptiveMeanLane;
+  rankedRight: AdaptiveMeanLane;
+  rankedStart: number;
+  fence?: {
+    safe: boolean;
+    comparisons: number;
+    leftMaximumIndex: number;
+    rightMinimumIndex: number;
+  };
+};
+
+type AdaptiveMeanPiece = {
+  lane: AdaptiveMeanLane;
+  outlierFlags?: boolean[];
+};
+
+const ADAPTIVE_MEAN_TINY_CUTOFF = 16;
+const ADAPTIVE_MEAN_LEAF_SIZE = 8;
+
+function createAdaptiveMeanLane(
+  values: number[],
+  id: number,
+  depth: number,
+  knownSum?: number,
+): AdaptiveMeanLane {
+  let sum = knownSum ?? 0;
+
+  if (knownSum === undefined) {
+    for (const value of values) sum += value;
+  }
+
+  return { id, values, sum, depth };
+}
+
+function flattenAdaptiveMeanLanes(lanes: AdaptiveMeanLane[]) {
+  return lanes.flatMap((lane) => lane.values);
+}
+
+function describeAdaptiveMeanGroups(lanes: AdaptiveMeanLane[]): MeanGroup[] {
+  let start = 0;
+
+  return lanes.map((lane, rank) => {
+    const end = start + lane.values.length;
+    const group = {
+      id: lane.id,
+      start,
+      end,
+      mean: lane.sum / Math.max(lane.values.length, 1),
+      rank,
+    } satisfies MeanGroup;
+    start = end;
+    return group;
+  });
+}
+
+function splitAdaptiveMeanLane(lane: AdaptiveMeanLane, nextId: number) {
+  const midpoint = Math.ceil(lane.values.length / 2);
+  const leftValues: number[] = [];
+  const rightValues: number[] = [];
+  let leftSum = 0;
+  let rightSum = 0;
+
+  lane.values.forEach((value, index) => {
+    if (index < midpoint) {
+      leftValues.push(value);
+      leftSum += value;
+    } else {
+      rightValues.push(value);
+      rightSum += value;
+    }
+  });
+
+  return {
+    left: createAdaptiveMeanLane(leftValues, nextId, lane.depth + 1, leftSum),
+    right: createAdaptiveMeanLane(rightValues, nextId + 1, lane.depth + 1, rightSum),
+    meanOperations: lane.values.length + 2,
+  };
+}
+
+function compareAdaptiveMeanLanes(left: AdaptiveMeanLane, right: AdaptiveMeanLane) {
+  return left.sum * right.values.length - right.sum * left.values.length;
+}
+
+function inspectAdaptiveMeanFence(left: AdaptiveMeanLane, right: AdaptiveMeanLane) {
+  let leftMaximum = left.values[0] ?? -Infinity;
+  let leftMaximumIndex = 0;
+  let rightMinimum = right.values[0] ?? Infinity;
+  let rightMinimumIndex = 0;
+  let comparisons = 0;
+
+  for (let index = 1; index < left.values.length; index += 1) {
+    comparisons += 1;
+    if (left.values[index] > leftMaximum) {
+      leftMaximum = left.values[index];
+      leftMaximumIndex = index;
+    }
+  }
+
+  for (let index = 1; index < right.values.length; index += 1) {
+    comparisons += 1;
+    if (right.values[index] < rightMinimum) {
+      rightMinimum = right.values[index];
+      rightMinimumIndex = index;
+    }
+  }
+
+  comparisons += 1;
+  return {
+    safe: leftMaximum <= rightMinimum,
+    comparisons,
+    leftMaximumIndex,
+    rightMinimumIndex,
+  };
+}
+
+function ejectAdaptiveMeanOutliers(
+  pair: AdaptiveMeanPair,
+  nextId: number,
+) {
+  const pivot = pair.parent.sum / pair.parent.values.length;
+  const lowValues: number[] = [];
+  const highValues: number[] = [];
+  const lowFlags: boolean[] = [];
+  const highFlags: boolean[] = [];
+  let lowSum = 0;
+  let highSum = 0;
+
+  const classify = (values: number[], cameFromRightLane: boolean) => {
+    values.forEach((value) => {
+      if (value <= pivot) {
+        lowValues.push(value);
+        lowSum += value;
+        lowFlags.push(cameFromRightLane);
+      } else {
+        highValues.push(value);
+        highSum += value;
+        highFlags.push(!cameFromRightLane);
+      }
+    });
+  };
+
+  // Keep the ranked lane order while inspecting values. A value that crosses
+  // this neighboring fence is the visible outlier; the stable scatter keeps
+  // everything else in its current lane order.
+  classify(pair.rankedLeft.values, false);
+  classify(pair.rankedRight.values, true);
+
+  return {
+    low: createAdaptiveMeanLane(lowValues, nextId, pair.parent.depth + 1, lowSum),
+    high: createAdaptiveMeanLane(highValues, nextId + 1, pair.parent.depth + 1, highSum),
+    lowFlags,
+    highFlags,
+    comparisons: pair.parent.values.length,
+    writes: pair.parent.values.length,
+  };
+}
+
+/**
+ * A mean-led partition routine. Every active segment first routes two spatial
+ * halves by mean, then either locks a range fence or stably ejects the values
+ * that cross it around that segment's weighted mean. Both outcomes create a
+ * certified numeric boundary, so only the final small lanes need polishing.
+ */
+function buildAdaptiveMeanPlan(source: number[]): AdaptiveMeanPlan {
+  const sourceValues = [...source];
+  const events: AdaptiveMeanTraceEvent[] = [];
+  let trackedChecks = 0;
+  let trackedMoves = 0;
+  let meanOperations = 0;
+  let rankComparisons = 0;
+  let meanRankingArithmeticOperations = 0;
+  let refinementOperations = 0;
+  let nextId = 2;
+  let rounds = 0;
+  let fallbackLaneCount = 0;
+
+  const emit = (
+    pass: number,
+    phase: AdaptiveMeanTraceEvent["phase"],
+    lanes: AdaptiveMeanLane[],
+    message: string,
+    outliers?: number[],
+  ) => {
+    events.push({
+      pass,
+      phase,
+      values: flattenAdaptiveMeanLanes(lanes),
+      groups: describeAdaptiveMeanGroups(lanes),
+      comparisons: trackedChecks,
+      writes: trackedMoves,
+      message,
+      ...(outliers && outliers.length > 0 ? { outliers } : {}),
+    });
+  };
+
+  if (sourceValues.length <= 1) {
+    return {
+      events,
+      values: sourceValues,
+      comparisons: trackedChecks,
+      writes: trackedMoves,
+      meanOperations,
+      rankComparisons,
+      meanRankingArithmeticOperations,
+      refinementOperations,
+      rounds,
+      fallbackLaneCount,
+    };
+  }
+
+  if (sourceValues.length < ADAPTIVE_MEAN_TINY_CUTOFF) {
+    const direct = sortNaturalRuns(sourceValues);
+    refinementOperations += direct.comparisons;
+    trackedChecks += direct.comparisons;
+    trackedMoves += direct.writes;
+    const lane = createAdaptiveMeanLane(direct.values, 1, 0);
+    emit(
+      1,
+      "polish",
+      [lane],
+      "Small row: polish this one lane directly before mean routing would pay off.",
+    );
+
+    return {
+      events,
+      values: direct.values,
+      comparisons: trackedChecks,
+      writes: trackedMoves,
+      meanOperations,
+      rankComparisons,
+      meanRankingArithmeticOperations,
+      refinementOperations,
+      rounds: 1,
+      fallbackLaneCount,
+    };
+  }
+
+  const maxDepth = Math.max(2, Math.ceil(Math.log2(sourceValues.length)) * 2);
+  let lanes = [createAdaptiveMeanLane(sourceValues, 1, 0)];
+
+  while (lanes.some((lane) => lane.values.length > ADAPTIVE_MEAN_LEAF_SIZE && lane.depth < maxDepth)) {
+    rounds += 1;
+    const pairs = new Map<number, AdaptiveMeanPair>();
+    const splitLanes: AdaptiveMeanLane[] = [];
+    const rankedLanes: AdaptiveMeanLane[] = [];
+    const pairEntries: AdaptiveMeanPair[] = [];
+
+    lanes.forEach((lane) => {
+      const shouldPolish =
+        lane.values.length <= ADAPTIVE_MEAN_LEAF_SIZE || lane.depth >= maxDepth;
+      if (shouldPolish) {
+        splitLanes.push(lane);
+        rankedLanes.push(lane);
+        return;
+      }
+
+      const split = splitAdaptiveMeanLane(lane, nextId);
+      nextId += 2;
+      meanOperations += split.meanOperations;
+      trackedChecks += split.meanOperations;
+
+      const meanOrder = compareAdaptiveMeanLanes(split.left, split.right);
+      rankComparisons += 1;
+      meanRankingArithmeticOperations += 3;
+      trackedChecks += 1;
+      const rankedLeft = meanOrder <= 0 ? split.left : split.right;
+      const rankedRight = meanOrder <= 0 ? split.right : split.left;
+      if (meanOrder > 0) trackedMoves += 2;
+
+      const pair = {
+        parent: lane,
+        left: split.left,
+        right: split.right,
+        rankedLeft,
+        rankedRight,
+        rankedStart: rankedLanes.length,
+      } satisfies AdaptiveMeanPair;
+      pairs.set(lane.id, pair);
+      pairEntries.push(pair);
+      splitLanes.push(split.left, split.right);
+      rankedLanes.push(rankedLeft, rankedRight);
+    });
+
+    emit(
+      rounds,
+      "split",
+      splitLanes,
+      "Mean scout " +
+        rounds +
+        ": open two spatial lanes inside each active region.",
+    );
+    emit(
+      rounds,
+      "average",
+      splitLanes,
+      "Measure each lane's average before deciding which whole lane should lead.",
+    );
+    emit(
+      rounds,
+      "reorder",
+      rankedLanes,
+      "Route each neighboring lane pair from lower mean to higher mean.",
+    );
+
+    const guardOutliers: number[] = [];
+    let lockedFenceCount = 0;
+    let crossingFenceCount = 0;
+
+    pairEntries.forEach((pair) => {
+      const fence = inspectAdaptiveMeanFence(pair.rankedLeft, pair.rankedRight);
+      pair.fence = fence;
+      refinementOperations += fence.comparisons;
+      trackedChecks += fence.comparisons;
+
+      if (fence.safe) {
+        lockedFenceCount += 1;
+        return;
+      }
+
+      crossingFenceCount += 1;
+      guardOutliers.push(
+        pair.rankedStart + fence.leftMaximumIndex,
+        pair.rankedStart + pair.rankedLeft.values.length + fence.rightMinimumIndex,
+      );
+    });
+
+    emit(
+      rounds,
+      "guard",
+      rankedLanes,
+      "Range fences: " +
+        lockedFenceCount +
+        " locked " +
+        (lockedFenceCount === 1 ? "boundary" : "boundaries") +
+        ", " +
+        crossingFenceCount +
+        " crossing " +
+        (crossingFenceCount === 1 ? "pair" : "pairs") +
+        ".",
+      guardOutliers,
+    );
+
+    const nextPieces: AdaptiveMeanPiece[] = [];
+
+    lanes.forEach((lane) => {
+      const pair = pairs.get(lane.id);
+      if (!pair) {
+        nextPieces.push({ lane });
+        return;
+      }
+
+      if (pair.fence?.safe) {
+        nextPieces.push({ lane: pair.rankedLeft }, { lane: pair.rankedRight });
+        return;
+      }
+
+      const ejection = ejectAdaptiveMeanOutliers(pair, nextId);
+      nextId += 2;
+      refinementOperations += ejection.comparisons;
+      trackedChecks += ejection.comparisons;
+      trackedMoves += ejection.writes;
+      nextPieces.push(
+        { lane: ejection.low, outlierFlags: ejection.lowFlags },
+        { lane: ejection.high, outlierFlags: ejection.highFlags },
+      );
+    });
+
+    const nextLanes = nextPieces.map((piece) => piece.lane);
+    if (crossingFenceCount > 0) {
+      const ejectedIndices: number[] = [];
+      let start = 0;
+      nextPieces.forEach((piece) => {
+        piece.outlierFlags?.forEach((isOutlier, index) => {
+          if (isOutlier) ejectedIndices.push(start + index);
+        });
+        start += piece.lane.values.length;
+      });
+      emit(
+        rounds,
+        "eject",
+        nextLanes,
+        "Outlier fence " +
+          rounds +
+          ": send values at or below each weighted mean left, and higher values right.",
+        ejectedIndices,
+      );
+    }
+
+    lanes = nextLanes;
+  }
+
+  const polishedLanes = lanes.map((lane) => {
+    if (lane.values.length > ADAPTIVE_MEAN_LEAF_SIZE) fallbackLaneCount += 1;
+    const polish = sortNaturalRuns(lane.values);
+    refinementOperations += polish.comparisons;
+    trackedChecks += polish.comparisons;
+    trackedMoves += polish.writes;
+    return createAdaptiveMeanLane(polish.values, lane.id, lane.depth, lane.sum);
+  });
+  emit(
+    Math.max(rounds + 1, 1),
+    "polish",
+    polishedLanes,
+    fallbackLaneCount > 0
+      ? "A stubborn lane reached the balance guardrail, so only that lane gets an exact local polish."
+      : "Polish the independent lanes locally; no whole-row merge is needed.",
+  );
+
+  return {
+    events,
+    values: flattenAdaptiveMeanLanes(polishedLanes),
+    comparisons: trackedChecks,
+    writes: trackedMoves,
+    meanOperations,
+    rankComparisons,
+    meanRankingArithmeticOperations,
+    refinementOperations,
+    rounds: Math.max(rounds + 1, 1),
+    fallbackLaneCount,
+  };
+}
+
 function finishRangeComponents(chunks: MeanChunk[]): RangeFinishResult {
   const range = getRangeComponents(chunks);
   const sortedComponents = range.components.map((component) => sortNaturalRuns(component.values));
@@ -773,14 +1199,11 @@ export function buildInsertionSteps(
 
 export function buildRangeGuardMeanSteps(source: number[]): SortStep[] {
   const steps = [createInitialStep(source, "range-guard-mean")];
-  const values = [...source];
-  let pass = 0;
-  let trackedChecks = 0;
-  let trackedMoves = 0;
+  const plan = buildAdaptiveMeanPlan(source);
 
-  if (values.length <= 1) {
+  if (source.length <= 1) {
     steps.push({
-      values: [...values],
+      values: [...source],
       pass: 0,
       phase: "complete",
       key: null,
@@ -788,7 +1211,7 @@ export function buildRangeGuardMeanSteps(source: number[]): SortStep[] {
       shifting: null,
       inserting: null,
       gapIndex: null,
-      sortedCount: values.length,
+      sortedCount: source.length,
       comparisons: 0,
       writes: 0,
       message: "No grouping is needed; the row is already ordered.",
@@ -796,164 +1219,42 @@ export function buildRangeGuardMeanSteps(source: number[]): SortStep[] {
     return steps;
   }
 
-  const cascade = buildMeanCascade(values);
-  let working = [...values];
-
-  cascade.rounds.forEach((round, roundIndex) => {
-    pass = roundIndex + 1;
-    const splitGroups = describeMeanBandGroups(round.splitBands);
-    const splitValues = round.splitBands.flatMap((band) =>
-      band.source.slice(band.start, band.end),
-    );
-    trackedChecks += round.splitBands.length;
-
+  plan.events.forEach((event) => {
     steps.push({
-      values: splitValues,
-      pass,
-      phase: "split",
+      values: [...event.values],
+      pass: event.pass,
+      phase: event.phase,
       key: null,
       comparing: null,
       shifting: null,
       inserting: null,
       gapIndex: null,
       sortedCount: 0,
-      comparisons: trackedChecks,
-      writes: trackedMoves,
-      message:
-        "Mean cascade round " +
-        (roundIndex + 1) +
-        ": split into " +
-        round.groupCount +
-        (round.groupCount === 2 ? " broad bands." : " narrower bands."),
-      groups: splitGroups,
-    });
-
-    steps.push({
-      values: splitValues,
-      pass,
-      phase: "average",
-      key: null,
-      comparing: null,
-      shifting: null,
-      inserting: null,
-      gapIndex: null,
-      sortedCount: 0,
-      comparisons: trackedChecks,
-      writes: trackedMoves,
-      message:
-        "Band means: " + splitGroups.map((group) => "μ " + formatMean(group.mean)).join(", ") + ".",
-      groups: splitGroups,
-    });
-
-    trackedChecks += round.rankComparisons;
-    trackedMoves += round.descriptorMoves;
-    const rankedGroups = describeMeanBandGroups(round.rankedBands);
-    working = round.rankedBands.flatMap((band) =>
-      band.source.slice(band.start, band.end),
-    );
-
-    steps.push({
-      values: [...working],
-      pass,
-      phase: "reorder",
-      key: null,
-      comparing: null,
-      shifting: null,
-      inserting: null,
-      gapIndex: null,
-      sortedCount: 0,
-      comparisons: trackedChecks,
-      writes: trackedMoves,
-      message:
-        "Rank the " +
-        round.groupCount +
-        " mean-band handles, then keep their values together for the next round.",
-      groups: rankedGroups,
+      comparisons: event.comparisons,
+      writes: event.writes,
+      message: event.message,
+      groups: event.groups,
+      ...(event.outliers ? { outliers: event.outliers } : {}),
     });
   });
-
-  const finalBands =
-    cascade.rounds.length > 0
-      ? materializeMeanBands(cascade.bands)
-      : [createMeanChunk([...working], 0, 0)];
-  if (cascade.rounds.length > 0) {
-    // The cascade moves lightweight block handles. This is the one point where
-    // its final logical order is materialized for the exact range repair.
-    trackedMoves += values.length;
-    working = finalBands.flatMap((chunk) => chunk.values);
-  }
-  const finish = finishRangeComponents(finalBands);
-
-  pass += 1;
-  const finishGroups = describeMeanGroups(finish.inputChunks);
-  trackedChecks += finish.comparisons;
 
   steps.push({
-    values: [...working],
-    pass,
-    phase: "split",
-    key: null,
-    comparing: null,
-    shifting: null,
-    inserting: null,
-    gapIndex: null,
-    sortedCount: 0,
-    comparisons: trackedChecks,
-    writes: trackedMoves,
-    message:
-      cascade.rounds.length === 0
-        ? "Small row: use a direct adaptive finish instead of paying for mean-band setup."
-        : "Adaptive mean guard finds " +
-          finish.componentCount +
-          " certified " +
-          (finish.componentCount === 1 ? "value region" : "independent value regions") +
-          ". Only those regions need exact local work.",
-    groups: finishGroups,
-  });
-
-  trackedMoves += finish.writes;
-  if (finish.componentCount > 1) trackedMoves += values.length;
-  const finalGroups = describeMeanGroups(finish.chunks);
-
-  finish.frames.forEach((frame, frameIndex) => {
-    steps.push({
-      values: [...frame],
-      pass: pass + frameIndex,
-      phase: "reorder",
-      key: null,
-      comparing: null,
-      shifting: null,
-      inserting: null,
-      gapIndex: null,
-      sortedCount: 0,
-      comparisons: trackedChecks,
-      writes: trackedMoves,
-      message:
-        "Adaptive local finish " +
-        (frameIndex + 1) +
-        " of " +
-        finish.frames.length +
-        ": merge only the natural runs inside each guarded region.",
-      groups: finalGroups,
-    });
-  });
-
-  const finalPass = pass + Math.max(0, finish.frames.length - 1);
-  steps.push({
-    values: [...finish.values],
-    pass: finalPass,
+    values: [...plan.values],
+    pass: plan.rounds,
     phase: "complete",
     key: null,
     comparing: null,
     shifting: null,
     inserting: null,
     gapIndex: null,
-    sortedCount: finish.values.length,
-    comparisons: trackedChecks,
-    writes: trackedMoves,
+    sortedCount: plan.values.length,
+    comparisons: plan.comparisons,
+    writes: plan.writes,
     message:
-      "The mean-ranked bands now join through certified range boundaries into one sorted row.",
-    groups: finalGroups,
+      "Every lane is now ordered, and every locked or ejected fence joins into one sorted row.",
+    groups:
+      plan.events.at(-1)?.groups ??
+      describeAdaptiveMeanGroups([createAdaptiveMeanLane(plan.values, 1, 0)]),
   });
 
   return steps;
@@ -2308,49 +2609,19 @@ export function analyzeMergeSort(source: number[]): SortMetrics {
 }
 
 export function analyzeRangeGuardMeanSort(source: number[]): SortMetrics {
-  const sourceValues = [...source];
-
-  if (sourceValues.length <= 1) {
-    return {
-      comparisons: 0,
-      rankComparisons: 0,
-      writes: 0,
-      rounds: 0,
-      finalValues: sourceValues,
-      meanComputationOperations: 0,
-      refinementOperations: 0,
-    };
-  }
-
-  const cascade = buildMeanCascade(sourceValues);
-  // Ranking two rational means uses two multiplications and one subtraction
-  // before their relative order is compared. Count that support arithmetic
-  // separately so the work model does not make the mean-led phase look free.
-  const meanRankingArithmeticOperations = cascade.rankComparisons * 3;
-  let outputWrites = cascade.descriptorMoves;
-  const finalBands =
-    cascade.rounds.length > 0
-      ? materializeMeanBands(cascade.bands)
-      : [createMeanChunk([...sourceValues], 0, 0)];
-
-  if (cascade.rounds.length > 0) outputWrites += sourceValues.length;
-
-  const finish = finishRangeComponents(finalBands);
-  const refinementOperations = finish.comparisons;
-  outputWrites += finish.writes;
-  if (finish.componentCount > 1) outputWrites += sourceValues.length;
+  const plan = buildAdaptiveMeanPlan(source);
 
   return {
-    // Mean-band count is a visual status indicator, not a value comparison.
-    // The measured-work model already includes mean arithmetic, exact mean
-    // ranking comparisons, and the range/local-finish comparisons below.
+    // The mean scout, exact mean ranking, range fences, and local polish are
+    // reported separately so the Efficiency Lab does not hide the work that
+    // makes this a distinct mean-led partition process.
     comparisons: 0,
-    rankComparisons: cascade.rankComparisons,
-    writes: outputWrites,
-    rounds: cascade.rounds.length + Math.max(1, finish.frames.length),
-    finalValues: finish.values,
-    meanComputationOperations: cascade.meanOperations,
-    meanRankingArithmeticOperations,
-    refinementOperations,
+    rankComparisons: plan.rankComparisons,
+    writes: plan.writes,
+    rounds: plan.rounds,
+    finalValues: plan.values,
+    meanComputationOperations: plan.meanOperations,
+    meanRankingArithmeticOperations: plan.meanRankingArithmeticOperations,
+    refinementOperations: plan.refinementOperations,
   };
 }
