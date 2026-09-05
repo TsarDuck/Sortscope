@@ -1803,6 +1803,15 @@ input:focus-visible {
   padding: 20px;
 }
 
+/* The guided lessons are meant to be handled, not merely watched. Keep the
+   casino's compact four-card table unchanged, but give the draggable lesson
+   row generous targets and breathing room. Sixty pixels still lets a
+   twelve-value Powersort row fit across the normal desktop lesson panel. */
+.practice-board:not(.practice-board--bogo) {
+  min-height: 100px;
+  padding: 20px;
+}
+
 .practice-bogo-entry {
   display: grid;
   justify-items: center;
@@ -1877,6 +1886,15 @@ input:focus-visible {
   box-shadow: 0 0 12px rgba(128, 247, 180, 0.78) !important;
 }
 
+.practice-board:not(.practice-board--bogo) .practice-drop-slot {
+  min-height: 60px;
+}
+
+.practice-board:not(.practice-board--bogo) .practice-drop-slot::before {
+  top: 9px;
+  bottom: 9px;
+}
+
 .practice-block {
   position: relative;
   min-width: 48px;
@@ -1894,6 +1912,14 @@ input:focus-visible {
   touch-action: none;
   user-select: none;
   transition: transform 150ms ease, border-color 150ms ease, box-shadow 150ms ease, background 150ms ease;
+}
+
+.practice-board:not(.practice-board--bogo) .practice-block {
+  min-width: 60px;
+  min-height: 60px;
+  padding: 11px 14px;
+  border-radius: 11px;
+  font-size: 0.98rem;
 }
 
 .practice-block--bogo {
@@ -1959,6 +1985,12 @@ input:focus-visible {
   box-shadow: inset -2px 0 0 var(--practice-run-color), 0 6px 16px rgba(4, 6, 24, 0.24);
 }
 
+.practice-board:not(.practice-board--bogo) .practice-block--grouped::before {
+  top: 5px;
+  right: 8px;
+  left: 8px;
+}
+
 /* The active-run brackets live on the fixed gap slots around a group. They
    therefore stay in place while a neighboring block follows the pointer. */
 .practice-drop-slot--active-run-boundary::before {
@@ -1968,6 +2000,11 @@ input:focus-visible {
   border-radius: 999px;
   background: #69e8ff !important;
   box-shadow: 0 0 0 1px rgba(168, 247, 255, 0.6), 0 0 14px rgba(69, 218, 255, 0.9) !important;
+}
+
+.practice-board:not(.practice-board--bogo) .practice-drop-slot--active-run-boundary::before {
+  top: -9px;
+  bottom: -9px;
 }
 
 .practice-block:hover,
@@ -3228,6 +3265,42 @@ input:focus-visible {
   .practice-lab__actions,
   .practice-lab__feedback {
     grid-column: 1;
+  }
+
+  /* Keep the larger lesson targets comfortably touchable on a narrow screen
+     without forcing the six-to-twelve-block walkthroughs outside the card. */
+  .practice-board:not(.practice-board--bogo) {
+    gap: 7px;
+    min-height: 90px;
+    padding: 14px;
+  }
+
+  .practice-board:not(.practice-board--bogo) .practice-block {
+    min-width: 54px;
+    min-height: 54px;
+    padding: 10px 12px;
+    border-radius: 10px;
+    font-size: 0.92rem;
+  }
+
+  .practice-board:not(.practice-board--bogo) .practice-drop-slot {
+    min-height: 54px;
+  }
+
+  .practice-board:not(.practice-board--bogo) .practice-drop-slot::before {
+    top: 8px;
+    bottom: 8px;
+  }
+
+  .practice-board:not(.practice-board--bogo) .practice-block--grouped::before {
+    top: 4px;
+    right: 7px;
+    left: 7px;
+  }
+
+  .practice-board:not(.practice-board--bogo) .practice-drop-slot--active-run-boundary::before {
+    top: -8px;
+    bottom: -8px;
   }
 
   .comparison-lab {

@@ -223,6 +223,10 @@ const BOGO_STANDARD_MAX_ATTEMPTS = 999_999_999;
 // without borrowing the Control Room's potentially enormous input.
 const BOGO_PRACTICE_INITIAL_VALUES = [4, 2, 1, 3];
 const BOGO_PRACTICE_ROLL_INTERVAL = 52;
+// The supplied casino clips are mastered a little hotter than the synthesized
+// sort tones. Play them at 88% of the selected master volume at every slider
+// setting, while preserving the slider's full 0–100% behavior.
+const BOGO_PRACTICE_CASINO_GAIN = 0.88;
 // These fallbacks deliberately run a little past the bundled clip lengths.
 // `ended` normally resolves the interaction first; the timeout only prevents
 // a missing or stalled media event from trapping the lesson behind a disabled
@@ -2642,7 +2646,12 @@ export default function Home() {
   // shared volume control as it changes.
   useEffect(() => {
     const audio = bogoPracticeAudioRef.current;
-    if (audio) audio.volume = Math.max(0, Math.min(1, soundVolume / 100));
+    if (audio) {
+      audio.volume = Math.max(
+        0,
+        Math.min(1, (soundVolume / 100) * BOGO_PRACTICE_CASINO_GAIN),
+      );
+    }
   }, [soundVolume]);
 
   useEffect(() => {
@@ -2977,7 +2986,10 @@ export default function Home() {
       audio.preload = "auto";
       audio.defaultPlaybackRate = 1;
       audio.playbackRate = 1;
-      audio.volume = Math.max(0, Math.min(1, soundVolumeRef.current / 100));
+      audio.volume = Math.max(
+        0,
+        Math.min(1, (soundVolumeRef.current / 100) * BOGO_PRACTICE_CASINO_GAIN),
+      );
       audio.onended = settle;
       audio.onerror = scheduleFallback;
       bogoPracticeAudioRef.current = audio;
