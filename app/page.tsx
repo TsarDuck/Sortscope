@@ -1906,17 +1906,35 @@ export default function Home() {
     playbackSpeed <= 100
       ? Math.round(4 + 716 * (1 - (playbackSpeed - 1) / 99) ** 1.3)
       : Math.max(1, Math.round(4 * (1 - (playbackSpeed - 100) / (MAX_SPEED - 100)) ** 2));
-  const minimumFrameDelay = isLargeArray && !isBogo
+  // Non-Bogo runs share the same animation floor through the deliberately
+  // slow first half of the dial. This keeps a lower speed meaningfully slow
+  // regardless of array size instead of making short rows race ahead.
+  const standardMinimumFrameDelay = isBogo
     ? playbackSpeed > 100
-      ? 8
-      : playbackSpeed === 100
-        ? 10
-        : 16
-    : playbackSpeed > 100
       ? 2
       : playbackSpeed === 100
         ? 3
-        : 7;
+        : 7
+    : 16;
+  // At the fast end, a short row has far fewer snapshots to show, so its
+  // minimum frame time rises smoothly as the row gets smaller. That keeps a
+  // 4–24 value sort quick at 100% without letting it disappear in one blink;
+  // 25+ values retain the existing fast, smooth large-row floor.
+  const highSpeedProgress = Math.max(
+    0,
+    Math.min(1, (playbackSpeed - 100) / (MAX_SPEED - 100)),
+  );
+  const compactRowRatio = Math.max(
+    0,
+    Math.min(1, (DEFAULT_ARRAY_SIZE - originalValues.length) / (DEFAULT_ARRAY_SIZE - 4)),
+  );
+  const smallRowHighSpeedFloor = 8 + 32 * compactRowRatio ** 1.35;
+  const highSpeedMinimumFrameDelay = isLargeArray ? 8 : smallRowHighSpeedFloor;
+  const minimumFrameDelay = !isBogo && playbackSpeed > 100
+    ? Math.round(
+        16 + (highSpeedMinimumFrameDelay - 16) * highSpeedProgress,
+      )
+    : standardMinimumFrameDelay;
   const bogoSlowMotionDelay =
     isBogo && originalValues.length <= DEFAULT_ARRAY_SIZE
       ? getBogoSlowMotionDelay(speed)
@@ -2743,8 +2761,11 @@ export default function Home() {
       pointerId: event.pointerId,
       startX: event.clientX,
       startY: event.clientY,
-      anchorX: bounds.left + bounds.width / 2 - event.clientX,
-      anchorY: bounds.top + bounds.height / 2 - event.clientY,
+      // Added to the pointer delta below, this shifts the block's center
+      // directly underneath the pointer rather than preserving the initial
+      // point where it was picked up.
+      anchorX: event.clientX - (bounds.left + bounds.width / 2),
+      anchorY: event.clientY - (bounds.top + bounds.height / 2),
       moved: false,
     };
     setPracticeDragIndex(index);
