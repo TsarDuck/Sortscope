@@ -3578,17 +3578,19 @@ export default function Home() {
               {practiceValues.map((value, index) => {
                       const practiceItemId = "value-" + value;
                       const isDragging = practiceDraggingId === practiceItemId;
-                      const isQuickPivot = isQuickPractice && value === quickPivot;
-                      const isQuickSettled = !isQuickPivot && quickSettledValues.includes(value);
+                      const isQuickWalkthroughComplete = isQuickPractice && practiceFinished;
+                      const isQuickPivot = !isQuickWalkthroughComplete && isQuickPractice && value === quickPivot;
+                      const isQuickSettled = isQuickWalkthroughComplete || (!isQuickPivot && quickSettledValues.includes(value));
                       const isInQuickRange =
+                        isQuickWalkthroughComplete ||
                         !isQuickPractice ||
                         !quickActiveRange ||
                         (index >= quickActiveRange[0] && index <= quickActiveRange[1]);
-                      const quickLabel = isQuickPivot
+                      const quickLabel = isQuickWalkthroughComplete || isQuickSettled
+                        ? ", fixed in its final position"
+                        : isQuickPivot
                         ? ", current pivot"
-                        : isQuickSettled
-                          ? ", fixed in its final position"
-                          : isQuickPractice && !isInQuickRange
+                        : isQuickPractice && !isInQuickRange
                             ? ", outside the current partition"
                             : "";
                       return (
@@ -3610,8 +3612,8 @@ export default function Home() {
                             "practice-block " +
                             (isQuickPivot ? "practice-block--quick-pivot " : "") +
                             (isQuickSettled ? "practice-block--quick-settled " : "") +
-                            (isQuickPractice && isInQuickRange ? "practice-block--quick-active " : "") +
-                            (isQuickPractice && !isInQuickRange ? "practice-block--quick-waiting " : "") +
+                            (isQuickPractice && !isQuickWalkthroughComplete && isInQuickRange ? "practice-block--quick-active " : "") +
+                            (isQuickPractice && !isQuickWalkthroughComplete && !isInQuickRange ? "practice-block--quick-waiting " : "") +
                             (practiceSelectedIndex === index ? "practice-block--selected " : "") +
                             (isDragging ? "practice-block--dragging " : "") +
                             ((isQuickPractice || practiceDropMode === "swap") && practiceDropIndex === index && practiceDragIndex !== index
