@@ -1843,6 +1843,7 @@ export default function Home() {
   const practiceCelebrationFadeTimerRef = useRef<number | null>(null);
   const practiceCelebrationUnmountTimerRef = useRef<number | null>(null);
   const bogoPracticeAudioRef = useRef<HTMLAudioElement | null>(null);
+  const bogoPracticeEntryAudioRef = useRef<HTMLAudioElement | null>(null);
   const bogoPracticeAudioFallbackTimerRef = useRef<number | null>(null);
   const bogoPracticeAudioRunRef = useRef(0);
   const bogoPracticeRollIntervalRef = useRef<number | null>(null);
@@ -2613,6 +2614,28 @@ export default function Home() {
     };
   }, []);
 
+  // Keep the entry clip decoded and ready before a person presses the casino
+  // button. `load()` fetches/prepares media only; playback still begins solely
+  // from the later user click in `beginBogoPracticeCasino`.
+  useEffect(() => {
+    const entryAudio = new Audio(BOGO_PRACTICE_CASINO_SOUNDS.entry.source);
+    entryAudio.autoplay = false;
+    entryAudio.preload = "auto";
+    entryAudio.load();
+    bogoPracticeEntryAudioRef.current = entryAudio;
+
+    return () => {
+      if (bogoPracticeEntryAudioRef.current === entryAudio) {
+        bogoPracticeEntryAudioRef.current = null;
+      }
+      entryAudio.onended = null;
+      entryAudio.onerror = null;
+      entryAudio.pause();
+      entryAudio.removeAttribute("src");
+      entryAudio.load();
+    };
+  }, []);
+
   // The casino clips use native media playback rather than the synthesized
   // sorting voices, so keep the one currently playing clip in step with the
   // shared volume control as it changes.
@@ -2858,6 +2881,14 @@ export default function Home() {
     audio.onended = null;
     audio.onerror = null;
     audio.pause();
+    try {
+      audio.currentTime = 0;
+    } catch {
+      // A clip that has not finished loading cannot always seek yet.
+    }
+    // The entry clip stays cached between casino runs so "Gamble again" can
+    // start it from the same prewarmed media element without a fresh fetch.
+    if (audio === bogoPracticeEntryAudioRef.current) return;
     audio.removeAttribute("src");
     audio.load();
   }
@@ -2908,9 +2939,16 @@ export default function Home() {
     // skips constructing a media player. The timer also acts as the watchdog
     // when a browser never delivers an `ended` event for a failed clip.
     if (soundVolumeRef.current > 0) {
-      const audio = new Audio(source);
+      const cachedEntryAudio =
+        sound === "entry" ? bogoPracticeEntryAudioRef.current : null;
+      const audio = cachedEntryAudio ?? new Audio(source);
       audio.preload = "auto";
       audio.volume = Math.max(0, Math.min(1, soundVolumeRef.current / 100));
+      try {
+        audio.currentTime = 0;
+      } catch {
+        // Seeking is retried implicitly when a just-created clip begins.
+      }
       audio.onended = settle;
       // Let the watchdog retain the intended visual beat if a static asset
       // fails to decode or a browser rejects late asynchronous playback.
@@ -4355,9 +4393,7 @@ export default function Home() {
                     ? bogoPracticeEntered
                       ? bogoPracticeRolling
                         ? "shuffling"
-                        : bogoPracticeBusy
-                          ? "checking"
-                          : String(bogoPracticeAttempts) + " gambles"
+                        : String(bogoPracticeAttempts) + " gambles"
                       : "casino closed"
                     : "step " + String(practiceStepIndex + 1) + " of " + String(practiceSteps.length)}
               </span>
@@ -4655,13 +4691,11 @@ export default function Home() {
                         disabled={bogoPracticeBusy}
                         aria-describedby="bogo-practice-gamble-help"
                       >
-                        <span>{bogoPracticeRolling ? "Shuffling…" : bogoPracticeBusy ? "Checking…" : "Gamble"}</span>
+                        <span>{bogoPracticeRolling ? "Shuffling…" : "Gamble"}</span>
                         <small>
                           {bogoPracticeRolling
                             ? "the cards are rolling"
-                            : bogoPracticeBusy
-                              ? "wait for the casino sound"
-                              : "shuffle all 4 blocks"}
+                            : "shuffle all 4 blocks"}
                         </small>
                       </button>
                     )}
