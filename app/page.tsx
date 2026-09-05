@@ -975,7 +975,7 @@ const ALGORITHM_DETAILS: Record<AlgorithmId, AlgorithmDetails> = {
     stageLabel: "adaptive partition",
     stageDescription: "pivot choice and safety check",
     eyebrow: "THE BIG IDEA",
-    learnTitle: "Quick Sort with a better escape plan.",
+    learnTitle: "Find order in the chaos.",
     learnCopy: [
       "PDQ sort stands for pattern-defeating quicksort. Like Quick Sort, it divides a row around a pivot. The difference is that it watches for warning signs: a lopsided split, a row that is already almost ordered, or a repeating pattern that keeps tricking ordinary pivots.",
       "When a partition looks healthy, PDQ sort keeps the fast Quick Sort rhythm. When it sees trouble, it changes a few positions to break the pattern, uses tiny insertion-sort cleanups for short pieces, and has a Heap Sort safety fallback. It is designed to be quick in everyday data without risking Quick Sort's familiar worst-case slowdown.",
