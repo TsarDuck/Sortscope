@@ -168,7 +168,10 @@ button:disabled {
 }
 
 .hero__algorithm-title {
+  display: grid;
   min-width: 0;
+  width: max-content;
+  max-width: 100%;
   color: #b7afff;
 }
 
@@ -176,11 +179,11 @@ button:disabled {
   --hero-picker-control-size: clamp(44px, 4.6vw, 60px);
   --hero-picker-gap: clamp(7px, 1.45vw, 17px);
   position: relative;
-  display: grid;
-  grid-template-columns: var(--hero-picker-control-size) minmax(0, 720px) var(--hero-picker-control-size);
+  display: flex;
   align-items: center;
-  column-gap: var(--hero-picker-gap);
-  width: min(100%, calc(720px + (var(--hero-picker-control-size) * 2) + (var(--hero-picker-gap) * 2)));
+  gap: var(--hero-picker-gap);
+  width: fit-content;
+  max-width: 100%;
 }
 
 .hero__algorithm-picker-title {
@@ -197,6 +200,8 @@ button:disabled {
 
 .hero__algorithm-trigger {
   display: block;
+  grid-area: 1 / 1;
+  justify-self: center;
   max-width: 100%;
   margin: 0;
   padding: 0.03em 0.06em;
@@ -211,6 +216,18 @@ button:disabled {
   line-height: inherit;
   text-align: left;
   transition: color 150ms ease, text-shadow 150ms ease, transform 150ms ease;
+}
+
+.hero__algorithm-title-sizers {
+  display: grid;
+  grid-area: 1 / 1;
+  visibility: hidden;
+  pointer-events: none;
+}
+
+.hero__algorithm-title-sizers > span {
+  grid-area: 1 / 1;
+  white-space: nowrap;
 }
 
 .hero__algorithm-trigger:hover:not(:disabled) {
@@ -3207,12 +3224,26 @@ input:focus-visible {
   .hero__algorithm-picker {
     --hero-picker-control-size: 42px;
     --hero-picker-gap: 7px;
+    display: grid;
     width: 100%;
     grid-template-columns: var(--hero-picker-control-size) minmax(0, 1fr) var(--hero-picker-control-size);
   }
 
   .hero__algorithm-picker-title {
     min-width: 0;
+  }
+
+  .hero__algorithm-title {
+    width: 100%;
+  }
+
+  .hero__algorithm-title-sizers {
+    display: none;
+  }
+
+  .hero__algorithm-trigger {
+    justify-self: start;
+    white-space: normal;
   }
 
   .hero__algorithm-picker-label {

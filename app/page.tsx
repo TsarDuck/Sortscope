@@ -4105,6 +4105,11 @@ export default function Home() {
               <div className="hero__algorithm-picker-title">
                 <p className="hero__algorithm-picker-label">CURRENT ALGORITHM</p>
                 <h1 id="page-title" className="hero__algorithm-title">
+                  <span className="hero__algorithm-title-sizers" aria-hidden="true">
+                    {ALGORITHM_ORDER.map((option) => (
+                      <span key={option}>{ALGORITHM_DETAILS[option].label}</span>
+                    ))}
+                  </span>
                   <button
                     ref={algorithmPickerTriggerRef}
                     className="hero__algorithm-trigger"
