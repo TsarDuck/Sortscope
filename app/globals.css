@@ -1496,21 +1496,18 @@ input:focus-visible {
   letter-spacing: 0.09em;
 }
 
-.algorithm-card {
+.algorithm-card-wrap {
   align-self: stretch;
-  overflow: hidden;
-  border: 1px solid var(--border);
-  border-radius: 17px;
-  background: rgba(25, 29, 57, 0.72);
-  box-shadow: inset 0 1px rgba(255, 255, 255, 0.035);
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
 }
 
 .algorithm-card__header {
   display: flex;
   justify-content: space-between;
   gap: 12px;
-  padding: 15px 18px;
-  border-bottom: 1px solid var(--border);
+  padding: 0 18px 10px;
   color: #aeb6d8;
   font-size: 0.61rem;
   font-weight: 800;
@@ -1523,23 +1520,34 @@ input:focus-visible {
   text-transform: none;
 }
 
+.algorithm-card {
+  position: relative;
+  display: flex;
+  min-height: 0;
+  flex: 1;
+  min-width: 0;
+  flex-direction: column;
+}
+
 .algorithm-card__tabs {
   display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 10px 18px;
-  border-bottom: 1px solid rgba(199, 207, 255, 0.1);
-  background: rgba(6, 9, 26, 0.16);
+  position: relative;
+  z-index: 2;
+  align-items: flex-end;
+  gap: 5px;
+  padding: 0 0 0 12px;
+  transform: translateY(1px);
 }
 
 .algorithm-card__tab {
   appearance: none;
-  min-height: 29px;
-  padding: 0 10px;
-  border: 1px solid transparent;
-  border-radius: 6px;
+  min-height: 34px;
+  padding: 0 12px;
+  border: 1px solid rgba(126, 134, 183, 0.38);
+  border-bottom-color: rgba(126, 134, 183, 0.48);
+  border-radius: 9px 9px 0 0;
   color: #8993bc;
-  background: transparent;
+  background: rgba(7, 10, 28, 0.67);
   cursor: pointer;
   font: inherit;
   font-size: 0.6rem;
@@ -1555,19 +1563,36 @@ input:focus-visible {
 
 .algorithm-card__tab:hover {
   color: #d7d5ff;
-  background: rgba(173, 162, 255, 0.08);
+  background: rgba(48, 43, 91, 0.62);
 }
 
 .algorithm-card__tab[aria-selected="true"] {
-  border-color: rgba(151, 137, 255, 0.46);
+  position: relative;
+  z-index: 1;
+  margin-bottom: -1px;
+  border-color: var(--border);
+  border-bottom-color: rgba(25, 29, 57, 0.72);
   color: #dedbff;
-  background: rgba(151, 137, 255, 0.16);
+  background: rgba(25, 29, 57, 0.72);
   box-shadow: inset 0 1px rgba(255, 255, 255, 0.09);
 }
 
 .algorithm-card__tab:focus-visible {
   outline: 2px solid #59d9f5;
   outline-offset: 2px;
+}
+
+.algorithm-card__panel {
+  position: relative;
+  z-index: 1;
+  min-height: 0;
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 17px;
+  background: rgba(25, 29, 57, 0.72);
+  box-shadow: inset 0 1px rgba(255, 255, 255, 0.035);
 }
 
 .algorithm-card__panel--python {

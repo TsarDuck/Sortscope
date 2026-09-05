@@ -245,9 +245,9 @@ const BOGO_STANDARD_MAX_ATTEMPTS = 999_999_999;
 const BOGO_PRACTICE_INITIAL_VALUES = [4, 2, 1, 3];
 const BOGO_PRACTICE_ROLL_INTERVAL = 52;
 // The supplied casino clips are mastered a little hotter than the synthesized
-// sort tones. Play them at 88% of the selected master volume at every slider
+// sort tones. Play them at 78% of the selected master volume at every slider
 // setting, while preserving the slider's full 0–100% behavior.
-const BOGO_PRACTICE_CASINO_GAIN = 0.88;
+const BOGO_PRACTICE_CASINO_GAIN = 0.78;
 // Native media can take a moment to begin under load. Once a clip has actually
 // started, it is always allowed to reach its own `ended` event; this watchdog
 // only gives a genuinely unavailable player a graceful, timed visual fallback.
@@ -5235,82 +5235,84 @@ export default function Home() {
             </div>
           </div>
 
-          <div className="algorithm-card">
+          <div className="algorithm-card-wrap">
             <div className="algorithm-card__header">
               <span>{algorithmDetails.cardTitle}</span>
               <span>{algorithmDetails.cardTag}</span>
             </div>
-            <div
-              className="algorithm-card__tabs"
-              role="tablist"
-              aria-label={algorithmLabel + " algorithm details"}
-            >
-              <button
-                id={algorithm + "-walkthrough-tab"}
-                className="algorithm-card__tab"
-                type="button"
-                role="tab"
-                aria-selected={algorithmCardTab === "walkthrough"}
-                aria-controls={algorithm + "-walkthrough-panel"}
-                tabIndex={algorithmCardTab === "walkthrough" ? 0 : -1}
-                onClick={() => setAlgorithmCardTab("walkthrough")}
-                onKeyDown={(event) => handleAlgorithmCardTabKeyDown(event, "walkthrough")}
-              >
-                Walkthrough
-              </button>
-              <button
-                id={algorithm + "-python-tab"}
-                className="algorithm-card__tab"
-                type="button"
-                role="tab"
-                aria-selected={algorithmCardTab === "python"}
-                aria-controls={algorithm + "-python-panel"}
-                tabIndex={algorithmCardTab === "python" ? 0 : -1}
-                onClick={() => setAlgorithmCardTab("python")}
-                onKeyDown={(event) => handleAlgorithmCardTabKeyDown(event, "python")}
-              >
-                Python
-              </button>
-            </div>
-            {algorithmCardTab === "walkthrough" ? (
+            <div className="algorithm-card">
               <div
-                id={algorithm + "-walkthrough-panel"}
-                className="algorithm-card__panel"
-                role="tabpanel"
-                aria-labelledby={algorithm + "-walkthrough-tab"}
+                className="algorithm-card__tabs"
+                role="tablist"
+                aria-label={algorithmLabel + " algorithm details"}
               >
-                <ol className="algorithm-steps">
-                  {algorithmDetails.steps.map((step, index) => {
-                    const example = algorithmDetails.examples[index];
-                    return (
-                    <li key={step}>
-                      <i>{String(index + 1).padStart(2, "0")}</i>
-                      <div className="algorithm-step__body">
-                        <strong>{step}</strong>
-                        <code>{example.values}</code>
-                        <p>{example.detail}</p>
-                      </div>
-                    </li>
-                    );
-                  })}
-                </ol>
+                <button
+                  id={algorithm + "-walkthrough-tab"}
+                  className="algorithm-card__tab"
+                  type="button"
+                  role="tab"
+                  aria-selected={algorithmCardTab === "walkthrough"}
+                  aria-controls={algorithm + "-walkthrough-panel"}
+                  tabIndex={algorithmCardTab === "walkthrough" ? 0 : -1}
+                  onClick={() => setAlgorithmCardTab("walkthrough")}
+                  onKeyDown={(event) => handleAlgorithmCardTabKeyDown(event, "walkthrough")}
+                >
+                  Walkthrough
+                </button>
+                <button
+                  id={algorithm + "-python-tab"}
+                  className="algorithm-card__tab"
+                  type="button"
+                  role="tab"
+                  aria-selected={algorithmCardTab === "python"}
+                  aria-controls={algorithm + "-python-panel"}
+                  tabIndex={algorithmCardTab === "python" ? 0 : -1}
+                  onClick={() => setAlgorithmCardTab("python")}
+                  onKeyDown={(event) => handleAlgorithmCardTabKeyDown(event, "python")}
+                >
+                  Python
+                </button>
               </div>
-            ) : (
-              <div
-                id={algorithm + "-python-panel"}
-                className="algorithm-card__panel algorithm-card__panel--python"
-                role="tabpanel"
-                aria-labelledby={algorithm + "-python-tab"}
-              >
-                <div className="algorithm-card__code-heading">
-                  <span>PYTHON IMPLEMENTATION</span>
-                  <span>matches the visualizer&apos;s sorting rule</span>
+              {algorithmCardTab === "walkthrough" ? (
+                <div
+                  id={algorithm + "-walkthrough-panel"}
+                  className="algorithm-card__panel"
+                  role="tabpanel"
+                  aria-labelledby={algorithm + "-walkthrough-tab"}
+                >
+                  <ol className="algorithm-steps">
+                    {algorithmDetails.steps.map((step, index) => {
+                      const example = algorithmDetails.examples[index];
+                      return (
+                      <li key={step}>
+                        <i>{String(index + 1).padStart(2, "0")}</i>
+                        <div className="algorithm-step__body">
+                          <strong>{step}</strong>
+                          <code>{example.values}</code>
+                          <p>{example.detail}</p>
+                        </div>
+                      </li>
+                      );
+                    })}
+                  </ol>
                 </div>
-                <pre className="algorithm-card__code">
-                  <code>{PYTHON_IMPLEMENTATIONS[algorithm]}</code>
-                </pre>
-              </div>
-            )}
+              ) : (
+                <div
+                  id={algorithm + "-python-panel"}
+                  className="algorithm-card__panel algorithm-card__panel--python"
+                  role="tabpanel"
+                  aria-labelledby={algorithm + "-python-tab"}
+                >
+                  <div className="algorithm-card__code-heading">
+                    <span>PYTHON IMPLEMENTATION</span>
+                    <span>matches the visualizer&apos;s sorting rule</span>
+                  </div>
+                  <pre className="algorithm-card__code">
+                    <code>{PYTHON_IMPLEMENTATIONS[algorithm]}</code>
+                  </pre>
+                </div>
+              )}
+            </div>
           </div>
 
           <div className="algorithm-insights" aria-label={algorithmLabel + " benefits and trade-offs"}>
