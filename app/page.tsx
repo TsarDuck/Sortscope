@@ -1,5 +1,6 @@
 import {
   Fragment,
+  memo,
   type CSSProperties,
   type KeyboardEvent as ReactKeyboardEvent,
   type PointerEvent as ReactPointerEvent,
@@ -41,6 +42,7 @@ import {
   createSmallArrayPianoToneMap,
   decodePcmWav,
   getContinuousToneFrequency,
+  getSafeScheduledAudioTime,
   PIANO_TONE_MAX_ARRAY_SIZE,
   type DecodedPcmWav,
 } from "./lib/audio";
@@ -215,7 +217,12 @@ const COMPLETION_SWEEP_RELEASE_TAIL = 70;
 // the sweep still plays one note per value without starving the visual frame.
 const COMPLETION_SWEEP_SCHEDULE_AHEAD_SECONDS = 0.12;
 const COMPLETION_SWEEP_SCHEDULE_INTERVAL = 45;
+const COMPLETION_SWEEP_OUTPUT_RELEASE_SECONDS = 0.018;
 const MAX_LIVE_TONE_SOURCES = 16;
+// Give dense Web Audio voices several render quanta to receive their attack
+// envelope. This is inaudible as timing latency, but prevents a busy frame
+// from starting an oscillator at its default (full) gain and clicking.
+const DENSE_TONE_SCHEDULE_LEAD_SECONDS = 0.008;
 // A full React tree and 256 bar nodes cannot be repainted meaningfully more
 // than about 30 times per second on every desktop WebView. At the fastest
 // settings, advance several already-recorded algorithm steps per paint rather
@@ -2034,6 +2041,7 @@ function getBarClass(
   index: number,
   step: SortStep,
   algorithm: AlgorithmId,
+  settledIndices: ReadonlySet<number> | null,
 ) {
   if (algorithm === "bogo") {
     if (step.phase === "complete") return "bar--sorted";
@@ -2050,7 +2058,7 @@ function getBarClass(
     if (algorithm === "quick" && index === step.pivotIndex) return "bar--pivot";
     // A settled pivot is in its final index. Keep that proof visible at every
     // array size while the active pivot and swaps show the current partition.
-    if (step.settled?.includes(index) || step.visualSettled?.includes(index)) {
+    if (settledIndices?.has(index)) {
       return "bar--sorted";
     }
     if (step.phase === "select" && index === step.inserting) return "bar--key";
@@ -2117,7 +2125,7 @@ function getBarClass(
   }
 
   if (algorithm === "bubble" || algorithm === "cocktail") {
-    if (step.phase === "complete" || step.settled?.includes(index)) return "bar--sorted";
+    if (step.phase === "complete" || settledIndices?.has(index)) return "bar--sorted";
     if (
       (step.phase === "swap" || step.phase === "sweep") &&
       (index === step.comparing || index === step.shifting)
@@ -2130,7 +2138,7 @@ function getBarClass(
   }
 
   if (algorithm === "selection") {
-    if (step.phase === "complete" || step.settled?.includes(index)) return "bar--sorted";
+    if (step.phase === "complete" || settledIndices?.has(index)) return "bar--sorted";
     if (step.phase === "swap" && (index === step.comparing || index === step.shifting)) {
       return "bar--swap";
     }
@@ -2140,7 +2148,7 @@ function getBarClass(
   }
 
   if (algorithm === "heap") {
-    if (step.phase === "complete" || step.settled?.includes(index)) return "bar--sorted";
+    if (step.phase === "complete" || settledIndices?.has(index)) return "bar--sorted";
     if (step.phase === "heapify") {
       // In a sift-down frame `comparing` is the current parent/root and
       // `shifting` is its chosen child. Keeping those roles distinct matters
@@ -2196,6 +2204,69 @@ function haveSameBarTokens(left: RenderedBarItem[], right: RenderedBarItem[]) {
   const rightTokens = new Set(right.map((item) => item.token));
   return left.every((item) => rightTokens.has(item.token));
 }
+
+type SortingBarSlotProps = {
+  value: number;
+  isGap: boolean;
+  height: number;
+  barClassName: string;
+  showValue: boolean;
+  motionToken: string | null;
+  slideOffset: number | undefined;
+  onMotionBarRef: ((token: string, element: HTMLDivElement | null) => void) | null;
+  completionScanDelay: number | undefined;
+  completionScanDuration: number | undefined;
+};
+
+// Dense rows routinely contain 256 bars while only one or two values change
+// in a normal algorithm step. Keep those untouched bar subtrees out of React's
+// commit work. This is especially important in WebKit, where reapplying inline
+// styles to every narrow bar can cost more than the algorithm itself.
+const SortingBarSlot = memo(function SortingBarSlot({
+  value,
+  isGap,
+  height,
+  barClassName,
+  showValue,
+  motionToken,
+  slideOffset,
+  onMotionBarRef,
+  completionScanDelay,
+  completionScanDuration,
+}: SortingBarSlotProps) {
+  const slotStyle =
+    slideOffset === undefined
+      ? undefined
+      : ({ transform: "translateX(" + slideOffset + "px)" } as CSSProperties);
+  const completionScanActive =
+    completionScanDelay !== undefined && completionScanDuration !== undefined;
+  const barStyle = completionScanActive
+    ? ({
+        height: String(height) + "%",
+        "--completion-scan-delay": String(completionScanDelay) + "ms",
+        "--completion-scan-duration": String(completionScanDuration) + "ms",
+      } as CSSProperties)
+    : { height: String(height) + "%" };
+
+  return (
+    <div
+      className="bar-slot"
+      ref={
+        motionToken !== null && onMotionBarRef !== null
+          ? (element) => onMotionBarRef(motionToken, element)
+          : undefined
+      }
+      style={slotStyle}
+    >
+      <div
+        className={"bar " + barClassName + (completionScanActive ? " bar--completion-scan" : "")}
+        style={barStyle}
+      >
+        {showValue && <span className="bar__value">{isGap ? "gap" : value}</span>}
+      </div>
+    </div>
+  );
+});
 
 function getPhaseLabel(phase: StepPhase) {
   const labels: Record<StepPhase, string> = {
@@ -2315,10 +2386,19 @@ export default function Home() {
   const completionSweepScheduleTimerRef = useRef<number | null>(null);
   const completionSweepRunRef = useRef(0);
   const completionSweepSourcesRef = useRef(new Set<OscillatorNode>());
+  const completionSweepOutputRef = useRef<GainNode | null>(null);
   const liveToneSourcesRef = useRef(new Set<OscillatorNode>());
   const motionBarElementsRef = useRef(new Map<string, HTMLDivElement>());
   const motionBarPositionsRef = useRef(new Map<string, number>());
   const motionBarTokensRef = useRef<string[]>([]);
+  const motionBarInterpolationEnabledRef = useRef(false);
+  const setMotionBarRef = useCallback((token: string, element: HTMLDivElement | null) => {
+    if (element) {
+      motionBarElementsRef.current.set(token, element);
+      return;
+    }
+    motionBarElementsRef.current.delete(token);
+  }, []);
   const practiceBoardRef = useRef<HTMLDivElement | null>(null);
   const practiceBlockElementsRef = useRef(new Map<string, HTMLButtonElement>());
   const practiceBlockPositionsRef = useRef(new Map<string, { left: number; top: number }>());
@@ -2600,10 +2680,22 @@ export default function Home() {
         : steps[stepIndex] ?? createInitialStep(values, algorithm),
     [algorithm, bogoLiveStep, isBogo, stepIndex, steps, values],
   );
+  const settledBarIndices = useMemo(() => {
+    const settled = currentStep.settled ?? [];
+    const visuallySettled = currentStep.visualSettled ?? [];
+    if (settled.length === 0 && visuallySettled.length === 0) return null;
+    return new Set([...settled, ...visuallySettled]);
+  }, [currentStep.settled, currentStep.visualSettled]);
   const renderedBarItems = getRenderedBarItems(currentStep);
   const completionSweepDuration = getCompletionSweepDuration(renderedBarItems.length);
   const completionSweepStepDuration = completionSweepDuration / Math.max(renderedBarItems.length, 1);
-  const previousVisualStep = !isBogo && stepIndex > 0 ? steps[stepIndex - 1] : null;
+  const motionSlideDuration = Math.round(Math.max(170, 880 - interpolationSpeed * 9.4));
+  const shouldInterpolateMoves =
+    !isBogo &&
+    !prefersReducedMotion &&
+    interpolationSpeed <= MOVE_INTERPOLATION_MAX_SPEED;
+  const previousVisualStep =
+    shouldInterpolateMoves && stepIndex > 0 ? steps[stepIndex - 1] : null;
   const previousRenderedBarItems = previousVisualStep
     ? getRenderedBarItems(previousVisualStep)
     : [];
@@ -2617,11 +2709,6 @@ export default function Home() {
       return counts;
     }, new Map<number, number>());
   }, [algorithm, steps]);
-  const motionSlideDuration = Math.round(Math.max(170, 880 - interpolationSpeed * 9.4));
-  const shouldInterpolateMoves =
-    !isBogo &&
-    !prefersReducedMotion &&
-    interpolationSpeed <= MOVE_INTERPOLATION_MAX_SPEED;
   const isSafeVisualMove =
     shouldInterpolateMoves &&
     previousVisualStep !== null &&
@@ -2765,10 +2852,15 @@ export default function Home() {
       return positions;
     };
 
-    const nextTokens = renderedBarItems.map((item) => item.token);
     if (!shouldInterpolateMoves) {
-      motionBarPositionsRef.current = captureMotionBarPositions();
-      motionBarTokensRef.current = nextTokens;
+      // Geometry is only needed for the optional low-speed FLIP animation.
+      // Calling getBoundingClientRect for every bar here forces a layout pass
+      // on each Bogo snapshot and dense high-speed frame, even though no
+      // interpolation can be painted. Reset the cache instead; the first
+      // eligible slow-motion frame below establishes a fresh baseline.
+      motionBarInterpolationEnabledRef.current = false;
+      motionBarPositionsRef.current.clear();
+      motionBarTokensRef.current = [];
       // This layout effect must synchronously clear the FLIP paint when its
       // interpolation policy changes; deferring it produces a stale frame.
       // eslint-disable-next-line react-hooks/set-state-in-effect -- Layout synchronization requires the reset before paint.
@@ -2777,13 +2869,20 @@ export default function Home() {
       return;
     }
 
+    const nextTokens = renderedBarItems.map((item) => item.token);
     const nextPositions = captureMotionBarPositions();
     const previousTokens = motionBarTokensRef.current;
     const hasSameTokens =
       previousTokens.length === nextTokens.length &&
       previousTokens.every((token) => nextTokens.includes(token));
 
-    if (!isSafeVisualMove || !hasSameTokens) {
+    // Do not interpolate from stale geometry after the user enters the
+    // low-speed range. This one baseline capture replaces thousands of
+    // unnecessary high-speed layout reads while keeping later FLIP moves
+    // exactly as before.
+    const wasInterpolating = motionBarInterpolationEnabledRef.current;
+    motionBarInterpolationEnabledRef.current = true;
+    if (!wasInterpolating || !isSafeVisualMove || !hasSameTokens) {
       motionBarPositionsRef.current = nextPositions;
       motionBarTokensRef.current = nextTokens;
       return;
@@ -3092,14 +3191,29 @@ export default function Home() {
       window.clearTimeout(completionSweepScheduleTimerRef.current);
       completionSweepScheduleTimerRef.current = null;
     }
-    completionSweepSourcesRef.current.forEach((source) => {
-      source.onended = null;
+    // A dense sweep may have a short look-ahead queue when a WebView misses a
+    // frame. Muting its shared output before disconnecting avoids stopping an
+    // oscillator at an arbitrary waveform position, which is audible as a
+    // pop. The sources already have their own bounded release/stop times.
+    const output = completionSweepOutputRef.current;
+    completionSweepOutputRef.current = null;
+    if (output) {
+      const context = audioContextRef.current;
+      const now = context?.currentTime ?? 0;
       try {
-        source.stop();
+        output.gain.cancelScheduledValues(now);
+        output.gain.setValueAtTime(Math.max(0.0001, output.gain.value), now);
+        output.gain.exponentialRampToValueAtTime(
+          0.0001,
+          now + COMPLETION_SWEEP_OUTPUT_RELEASE_SECONDS,
+        );
+        window.setTimeout(() => output.disconnect(),
+          Math.ceil(COMPLETION_SWEEP_OUTPUT_RELEASE_SECONDS * 1_000) + 8,
+        );
       } catch {
-        // A source that already ended does not need any further cleanup.
+        // The owning AudioContext may already be closed during unmount.
       }
-    });
+    }
     completionSweepSourcesRef.current.clear();
   }
 
@@ -3200,6 +3314,7 @@ export default function Home() {
     targetDuration: number,
     peakGain: number,
     trackedSources?: Set<OscillatorNode>,
+    output: AudioNode = context.destination,
   ) {
     // Keep even the shortest voice long enough to read as a note, with an
     // octave reinforcement that stays clear on laptop speakers.
@@ -3241,7 +3356,7 @@ export default function Home() {
     octaveLevel.connect(rumbleFilter);
     rumbleFilter.connect(toneFilter);
     toneFilter.connect(envelope);
-    envelope.connect(context.destination);
+    envelope.connect(output);
 
     if (trackedSources) {
       trackedSources.add(fundamental);
@@ -3289,6 +3404,16 @@ export default function Home() {
     const basePeakGain = isImpact ? 0.2 : 0.14;
     const peakGain = basePeakGain * (volume / 100) ** 2.5;
     const frequency = getSortingToneFrequency(activeValue);
+    // Preserve the immediate, musical response for the 4–25 note piano
+    // mapping. Dense continuous-tone rows receive a tiny scheduling lead so
+    // a lagged render cannot start an oscillator before its attack is ready.
+    const startTime = originalValues.length > PIANO_TONE_MAX_ARRAY_SIZE
+      ? getSafeScheduledAudioTime(
+          now,
+          context.currentTime,
+          DENSE_TONE_SCHEDULE_LEAD_SECONDS,
+        )
+      : now;
 
     // Two oscillators make up each full musical voice. A hard cap keeps a
     // delayed Web Audio backend from accumulating work faster than it can
@@ -3296,7 +3421,7 @@ export default function Home() {
     if (liveToneSourcesRef.current.size + 2 > MAX_LIVE_TONE_SOURCES) return;
     playMusicalVoice(
       context,
-      now,
+      startTime,
       frequency,
       targetDuration,
       peakGain,
@@ -3310,6 +3435,7 @@ export default function Home() {
     frequency: number,
     targetDuration: number,
     peakGain: number,
+    output: AudioNode = context.destination,
   ) {
     // Dense (26+ value) arrays use a single voiced oscillator per red bar.
     // The bar-to-note mapping remains one-to-one, but this avoids creating the
@@ -3325,7 +3451,7 @@ export default function Home() {
     envelope.gain.exponentialRampToValueAtTime(peakGain, startTime + attack);
     envelope.gain.exponentialRampToValueAtTime(0.0001, startTime + duration);
     oscillator.connect(envelope);
-    envelope.connect(context.destination);
+    envelope.connect(output);
     completionSweepSourcesRef.current.add(oscillator);
     oscillator.addEventListener("ended", () => {
       completionSweepSourcesRef.current.delete(oscillator);
@@ -3353,7 +3479,17 @@ export default function Home() {
     const startTime = context.currentTime + COMPLETION_SWEEP_AUDIO_VISUAL_LEAD / 1_000;
     const liveImpactPeak = 0.2 * (volume / 100) ** 2.5;
     const useCompactVoice = valuesToScan.length > PIANO_TONE_MAX_ARRAY_SIZE;
+    // Give a sweep its own output bus. It lets the end/reset path release a
+    // late look-ahead queue smoothly instead of stopping active oscillators.
+    const output = context.createGain();
+    output.gain.setValueAtTime(1, context.currentTime);
+    output.connect(context.destination);
+    completionSweepOutputRef.current = output;
     let nextIndex = 0;
+    // In the normal case this remains identical to the visual timing. If a
+    // dense sweep callback arrives late, it spaces overdue tones back out
+    // instead of launching a burst of past-due oscillators in one quantum.
+    let nextDenseVoiceStartTime = startTime;
 
     const scheduleNextWindow = () => {
       if (
@@ -3370,6 +3506,24 @@ export default function Home() {
         const noteTime = startTime + (nextIndex + 0.5) * spacing;
         if (noteTime > scheduleThrough) break;
 
+        const voiceStartTime = useCompactVoice
+          ? Math.max(
+              getSafeScheduledAudioTime(
+                noteTime,
+                context.currentTime,
+                DENSE_TONE_SCHEDULE_LEAD_SECONDS,
+              ),
+              nextDenseVoiceStartTime,
+            )
+          : noteTime;
+        // Do not turn one late renderer frame into dozens of oscillator
+        // allocations scheduled far beyond this window. The next short
+        // look-ahead turn continues the sequence without a timing burst.
+        if (useCompactVoice && voiceStartTime > scheduleThrough) break;
+        if (useCompactVoice) {
+          nextDenseVoiceStartTime = voiceStartTime + spacing;
+        }
+
         const value = valuesToScan[nextIndex] ?? 1;
         const frequency = getSortingToneFrequency(value);
         const requestedDuration = useCompactVoice
@@ -3382,15 +3536,23 @@ export default function Home() {
         const peakGain = liveImpactPeak / Math.sqrt(overlap);
 
         if (useCompactVoice) {
-          playCompactSweepVoice(context, noteTime, frequency, requestedDuration, peakGain);
+          playCompactSweepVoice(
+            context,
+            voiceStartTime,
+            frequency,
+            requestedDuration,
+            peakGain,
+            output,
+          );
         } else {
           playMusicalVoice(
             context,
-            noteTime,
+            voiceStartTime,
             frequency,
             requestedDuration,
             peakGain,
             completionSweepSourcesRef.current,
+            output,
           );
         }
         nextIndex += 1;
@@ -3796,14 +3958,6 @@ export default function Home() {
       activateAudioOutput();
     }
     setSoundVolume(nextVolume);
-  }
-
-  function setMotionBarRef(token: string, element: HTMLDivElement | null) {
-    if (element) {
-      motionBarElementsRef.current.set(token, element);
-      return;
-    }
-    motionBarElementsRef.current.delete(token);
   }
 
   function clearPracticeUndo() {
@@ -6054,50 +6208,32 @@ export default function Home() {
                   const slideOffset = shouldInterpolateMoves
                     ? motionSlideOffsets[item.token]
                     : undefined;
-                  const slotStyle =
-                    slideOffset === undefined
-                      ? undefined
-                      : ({ transform: "translateX(" + slideOffset + "px)" } as CSSProperties);
-                  const completionScanStyle =
-                    completionSweepActive && !prefersReducedMotion
-                      ? ({
-                          height: String(height) + "%",
-                          "--completion-scan-delay": String(
-                            COMPLETION_SWEEP_AUDIO_VISUAL_LEAD + index * completionSweepStepDuration,
-                          ) + "ms",
-                          "--completion-scan-duration": String(completionSweepStepDuration) + "ms",
-                        } as CSSProperties)
-                      : { height: String(height) + "%" };
                   return (
-                    <div
-                      className="bar-slot"
+                    <SortingBarSlot
                       key={
                         shouldInterpolateMoves
                           ? "motion-" + item.token
                           : String(index) + "-" + String(originalValues.length)
                       }
-                      ref={
-                        shouldInterpolateMoves
-                          ? (element) => setMotionBarRef(item.token, element)
+                      value={item.value}
+                      isGap={item.isGap}
+                      height={height}
+                      barClassName={getBarClass(index, currentStep, algorithm, settledBarIndices)}
+                      showValue={arraySize <= 24}
+                      motionToken={shouldInterpolateMoves ? item.token : null}
+                      slideOffset={slideOffset}
+                      onMotionBarRef={shouldInterpolateMoves ? setMotionBarRef : null}
+                      completionScanDelay={
+                        completionSweepActive && !prefersReducedMotion
+                          ? COMPLETION_SWEEP_AUDIO_VISUAL_LEAD + index * completionSweepStepDuration
                           : undefined
                       }
-                      style={slotStyle}
-                    >
-                      <div
-                        className={
-                          "bar " +
-                          getBarClass(index, currentStep, algorithm) +
-                          (completionSweepActive && !prefersReducedMotion
-                            ? " bar--completion-scan"
-                            : "")
-                        }
-                        style={completionScanStyle}
-                      >
-                        {arraySize <= 24 && (
-                          <span className="bar__value">{item.isGap ? "gap" : item.value}</span>
-                        )}
-                      </div>
-                    </div>
+                      completionScanDuration={
+                        completionSweepActive && !prefersReducedMotion
+                          ? completionSweepStepDuration
+                          : undefined
+                      }
+                    />
                   );
                 })}
               </div>

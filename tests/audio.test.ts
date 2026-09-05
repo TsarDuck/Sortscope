@@ -7,6 +7,7 @@ import {
   createSmallArrayPianoToneMap,
   decodePcmWav,
   getContinuousToneFrequency,
+  getSafeScheduledAudioTime,
 } from "../app/lib/audio";
 
 function createPcmWav({
@@ -93,6 +94,12 @@ test("short rows preserve a pitch for duplicate values and dense rows stay conti
   assert.ok(first > PIANO_TONE_LOW_FREQUENCY);
   assert.ok(second > first);
   assert.notEqual(Math.log2(first / PIANO_TONE_LOW_FREQUENCY) * 12, Math.round(Math.log2(first / PIANO_TONE_LOW_FREQUENCY) * 12));
+});
+
+test("dense tone scheduling never starts in the current or a past audio quantum", () => {
+  assert.equal(getSafeScheduledAudioTime(1.25, 1, 0.008), 1.25);
+  assert.equal(getSafeScheduledAudioTime(0.95, 1, 0.008), 1.008);
+  assert.equal(getSafeScheduledAudioTime(1, 1, 0), 1);
 });
 
 test("casino PCM WAV decoding creates normalized Web Audio channels", () => {

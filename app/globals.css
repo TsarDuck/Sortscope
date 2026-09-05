@@ -1483,7 +1483,12 @@ input:focus-visible {
 .bars--dense .bar {
   border-radius: 2px 2px 0 0;
   box-shadow: none;
-  transition: background 80ms ease;
+  /* At 25–256 values, background interpolation means WebKit can keep dozens
+     of gradient paints alive between dense playback frames. The fast path
+     already advances in coalesced frames, so show each visual state directly.
+     Low-speed `.bars--smooth` below deliberately restores the gentle motion
+     used for careful walkthroughs. */
+  transition: none;
   transform: none;
 }
 
@@ -1499,7 +1504,7 @@ input:focus-visible {
   transition: height var(--bar-transition-duration, 160ms) cubic-bezier(.23, 1, .32, 1);
 }
 
-.bars--merge.bars--dense .bar--sorted {
+.bars--merge.bars--dense.bars--smooth .bar--sorted {
   transition: background 360ms ease-out;
 }
 

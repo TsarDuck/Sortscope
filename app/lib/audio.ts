@@ -133,6 +133,20 @@ export function getContinuousToneFrequency(value: number, largestValue: number) 
 }
 
 /**
+ * Web Audio automation scheduled at or before the current render quantum can
+ * begin with an unresolved gain value after a busy frame. Keep dense visual
+ * tones a few milliseconds ahead of the audio clock so their fade-in is
+ * always applied before the oscillator becomes audible.
+ */
+export function getSafeScheduledAudioTime(
+  requestedTime: number,
+  currentTime: number,
+  minimumLeadSeconds: number,
+) {
+  return Math.max(requestedTime, currentTime + Math.max(0, minimumLeadSeconds));
+}
+
+/**
  * Return a distinct, ascending piano pitch for each distinct value in a
  * short row. Values are ranked numerically instead of assumed to be 1..N, so
  * the same helper still behaves predictably for a custom input in the future.
