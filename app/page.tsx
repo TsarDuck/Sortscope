@@ -158,7 +158,11 @@ type BenchmarkAlgorithm = (typeof BENCHMARK_ALGORITHMS)[number]["key"];
 type BenchmarkWork = Record<BenchmarkAlgorithm, number>;
 const BOGO_MIN_ATTEMPTS = 1;
 const BOGO_STANDARD_MAX_ATTEMPTS = 999_999_999;
-const BOGO_ESTIMATED_SHUFFLES_PER_SECOND = 100_000;
+// At the top end, the live runner works in short CPU batches. This is a
+// deliberately conservative pre-run model; the page replaces it with the
+// browser's measured rate once a Bogo session has run long enough to sample.
+const BOGO_FAST_ESTIMATED_SHUFFLES_PER_SECOND = 2_500_000;
+const BOGO_RATE_SAMPLE_INTERVAL = 250;
 const INITIAL_VALUES = [
   17, 5, 22, 8, 19, 3, 14, 24, 1, 12, 7, 20, 10, 23, 4, 16, 9, 21, 2, 18,
   6, 15, 11, 13,
@@ -219,6 +223,22 @@ function getBogoExpectedShuffles(size: number) {
   return possibilities;
 }
 
+function getBogoSlowMotionDelay(speed: number) {
+  return Math.round(440 * (1 - (speed - 1) / 99) ** 3);
+}
+
+function getBogoEstimatedShuffleRate(speed: number) {
+  const slowMotionDelay = getBogoSlowMotionDelay(speed);
+
+  if (slowMotionDelay > 0) {
+    // Browsers commonly clamp nested timers to a few milliseconds, so do not
+    // promise a faster rate than the scheduler can actually provide.
+    return 1_000 / Math.max(slowMotionDelay, 4);
+  }
+
+  return BOGO_FAST_ESTIMATED_SHUFFLES_PER_SECOND;
+}
+
 function formatBogoShuffleEstimate(shuffles: number) {
   if (shuffles < 1_000_000) return Math.round(shuffles).toLocaleString("en-US");
 
@@ -228,8 +248,17 @@ function formatBogoShuffleEstimate(shuffles: number) {
   return "≈ " + leading.toFixed(digits) + " × 10^" + exponent;
 }
 
-function formatBogoExpectedTime(shuffles: number) {
-  const seconds = shuffles / BOGO_ESTIMATED_SHUFFLES_PER_SECOND;
+function formatBogoShuffleRate(shufflesPerSecond: number) {
+  if (shufflesPerSecond >= 1_000_000) {
+    const millions = shufflesPerSecond / 1_000_000;
+    return (millions >= 10 ? Math.round(millions) : Math.round(millions * 10) / 10) + " million shuffles/second";
+  }
+
+  return Math.max(1, Math.round(shufflesPerSecond)).toLocaleString("en-US") + " shuffles/second";
+}
+
+function formatBogoExpectedTime(shuffles: number, shufflesPerSecond: number) {
+  const seconds = shuffles / Math.max(shufflesPerSecond, 1);
   if (seconds < 1) return "under a second";
 
   const units = [
@@ -809,12 +838,12 @@ const ALGORITHM_DETAILS: Record<AlgorithmId, AlgorithmDetails> = {
       { values: "mean scout → fence → ejection → mean scout", detail: "The two new lanes are independent, so the algorithm repeats the same idea inside each one before a tiny local polish." },
     ],
     benefits: [
-      { title: "Means remain in charge", copy: "Every large region is measured and routed again after it is split, so average-based grouping is the main rhythm instead of a decorative first step." },
-      { title: "Outliers get an explicit rescue route", copy: "A crossed fence turns hidden trouble into a visible ejection, sending lower values left and higher values right with a proven boundary." },
+      { title: "Visually striking progress", copy: "Whole lanes slide into a broad order, then the few values that do not belong make a dramatic trip across a fence. You can see both the rough plan and the correction instead of watching one opaque cleanup." },
+      { title: "Respects useful groups", copy: "When neighboring lanes already fit together, their fence locks and the algorithm can leave that boundary alone. Rows with natural clusters stay readable while the remaining trouble is handled locally." },
     ],
     tradeoffs: [
-      { title: "Means can still be skewed", copy: "A single extreme value can make a lopsided split, so this version keeps a depth guardrail and locally polishes only a stubborn lane when needed." },
-      { title: "More storytelling, more setup", copy: "The mean scans and fence checks make its moves easier to understand, but Merge and Heap Sort can still be simpler or faster for some data." },
+      { title: "More moving parts", copy: "Measuring averages, checking fences, and relocating outliers takes more coordination than a straightforward sort. That extra structure makes the animation richer, but it also adds work." },
+      { title: "Not the fastest general-purpose pick", copy: "On a very mixed row, many fences can cross and the extra checks add up. Choose it for its clear grouping-and-rescue story; choose Merge or Heap when predictable speed matters most." },
     ],
     practice: [
       {
@@ -1247,6 +1276,7 @@ export default function Home() {
   const [stepIndex, setStepIndex] = useState(0);
   const [runState, setRunState] = useState<RunState>("ready");
   const [bogoLiveStep, setBogoLiveStep] = useState<SortStep | null>(null);
+  const [bogoMeasuredShuffleRate, setBogoMeasuredShuffleRate] = useState<number | null>(null);
   const [bogoCelebration, setBogoCelebration] = useState(false);
   const [completionSweepActive, setCompletionSweepActive] = useState(false);
   const [soundVolume, setSoundVolume] = useState(50);
@@ -1288,6 +1318,11 @@ export default function Home() {
   const suppressPracticeClickRef = useRef(false);
   const practiceUndoTimerRef = useRef<number | null>(null);
   const bogoSessionRef = useRef<BogoSession | null>(null);
+  const bogoRateSampleRef = useRef<{
+    startedAt: number;
+    startingAttempts: number;
+    lastReportedAt: number;
+  } | null>(null);
   const [meanSlideOffsets, setMeanSlideOffsets] = useState<Record<number, number>>({});
   const [meanSlideStage, setMeanSlideStage] = useState<"idle" | "prepare" | "animate">("idle");
   const [motionSlideOffsets, setMotionSlideOffsets] = useState<Record<string, number>>({});
@@ -1299,7 +1334,11 @@ export default function Home() {
   const bogoAttemptMaximum = BOGO_STANDARD_MAX_ATTEMPTS;
   const bogoSliderStep = 1;
   const bogoExpectedShuffles = isBogo ? getBogoExpectedShuffles(arraySize) : 0;
-  const bogoExpectedTime = isBogo ? formatBogoExpectedTime(bogoExpectedShuffles) : "";
+  const bogoModeledShuffleRate = isBogo ? getBogoEstimatedShuffleRate(speed) : 0;
+  const bogoShuffleRate = bogoMeasuredShuffleRate ?? bogoModeledShuffleRate;
+  const bogoExpectedTime = isBogo
+    ? formatBogoExpectedTime(bogoExpectedShuffles, bogoShuffleRate)
+    : "";
   const soundEnabled = soundVolume > 0;
   const algorithmDetails = ALGORITHM_DETAILS[algorithm];
   const practiceSteps = algorithmDetails.practice;
@@ -1667,7 +1706,7 @@ export default function Home() {
   const minimumFrameDelay = isLargeArray && !isBogo ? 16 : 7;
   const bogoSlowMotionDelay =
     isBogo && originalValues.length <= DEFAULT_ARRAY_SIZE
-      ? Math.round(440 * (1 - (speed - 1) / 99) ** 3)
+      ? getBogoSlowMotionDelay(speed)
       : 0;
   const usesEvenMergePacing =
     algorithm === "merge" &&
@@ -1854,10 +1893,13 @@ export default function Home() {
     const targetDuration = isImpact ? 0.052 : 0.034;
     const basePeakGain = isImpact ? 0.2 : 0.14;
     const peakGain = basePeakGain * (soundVolume / 100) ** 2.5;
-    // Values span C2 through C4. The shared voice layers C3 over C2, so the
-    // low end stays musical and audible instead of being raised out of range.
-    const semitone = Math.round(normalizedValue * 24);
-    const frequency = 65.41 * 2 ** (semitone / 12);
+    // Keep the live sorter brighter than the completion flourish: C4 is the
+    // floor, while the cap at G5 stays comfortably clear on a 256-bar run.
+    // The gentle curve compresses the crowded high end rather than letting it
+    // climb into piercing territory as values increase.
+    const compressedValue = Math.sqrt(normalizedValue);
+    const semitone = Math.round(compressedValue * 19);
+    const frequency = 261.63 * 2 ** (semitone / 12);
 
     playMusicalVoice(context, now, frequency, targetDuration, peakGain);
   }
@@ -2007,6 +2049,21 @@ export default function Home() {
         } while (!session.done && performance.now() < deadline);
       }
 
+      const rateSample = bogoRateSampleRef.current;
+      const now = performance.now();
+      if (
+        rateSample &&
+        (session.done || now - rateSample.lastReportedAt >= BOGO_RATE_SAMPLE_INTERVAL)
+      ) {
+        const elapsed = now - rateSample.startedAt;
+        const attempts = session.attempts - rateSample.startingAttempts;
+
+        if (elapsed >= BOGO_RATE_SAMPLE_INTERVAL && attempts > 0) {
+          rateSample.lastReportedAt = now;
+          setBogoMeasuredShuffleRate((attempts * 1_000) / elapsed);
+        }
+      }
+
       setBogoLiveStep(getBogoSessionStep(session));
       if (session.done) {
         setRunState("complete");
@@ -2047,7 +2104,9 @@ export default function Home() {
     const nextValues = makeRandomArray(size);
     setBogoCelebration(false);
     bogoSessionRef.current = null;
+    bogoRateSampleRef.current = null;
     setBogoLiveStep(null);
+    setBogoMeasuredShuffleRate(null);
     setOriginalValues(nextValues);
     setValues(nextValues);
     setSteps([]);
@@ -2059,7 +2118,9 @@ export default function Home() {
     resetCompletionSweep();
     setBogoCelebration(false);
     bogoSessionRef.current = null;
+    bogoRateSampleRef.current = null;
     setBogoLiveStep(null);
+    setBogoMeasuredShuffleRate(null);
     setValues([...originalValues]);
     setSteps([]);
     setStepIndex(0);
@@ -2394,7 +2455,9 @@ export default function Home() {
     resetCompletionSweep();
     setBogoCelebration(false);
     bogoSessionRef.current = null;
+    bogoRateSampleRef.current = null;
     setBogoLiveStep(null);
+    setBogoMeasuredShuffleRate(null);
     const nextMaximumArraySize =
       nextAlgorithm === "bogo" ? BOGO_MAX_ARRAY_SIZE : 256;
     const nextArraySize = Math.min(arraySize, nextMaximumArraySize);
@@ -2420,6 +2483,14 @@ export default function Home() {
     }
 
     if (runState === "paused") {
+      if (isBogo && bogoSessionRef.current) {
+        bogoRateSampleRef.current = {
+          startedAt: performance.now(),
+          startingAttempts: bogoSessionRef.current.attempts,
+          lastReportedAt: 0,
+        };
+        setBogoMeasuredShuffleRate(null);
+      }
       setRunState("running");
       return;
     }
@@ -2438,6 +2509,12 @@ export default function Home() {
         bogoRunsUntilSolved ? null : bogoAttemptLimit,
       );
       bogoSessionRef.current = session;
+      bogoRateSampleRef.current = {
+        startedAt: performance.now(),
+        startingAttempts: session.attempts,
+        lastReportedAt: 0,
+      };
+      setBogoMeasuredShuffleRate(null);
       setValues([...originalValues]);
       setSteps([]);
       setStepIndex(0);
@@ -2447,7 +2524,9 @@ export default function Home() {
     }
 
     bogoSessionRef.current = null;
+    bogoRateSampleRef.current = null;
     setBogoLiveStep(null);
+    setBogoMeasuredShuffleRate(null);
     const sequence =
       algorithm === "range-guard-mean"
         ? buildRangeGuardMeanSteps(originalValues)
@@ -2497,6 +2576,18 @@ export default function Home() {
 
   function handleSpeedChange(nextSpeed: number) {
     const clampedSpeed = Math.min(100, Math.max(1, Math.round(nextSpeed)));
+    if (isBogo && clampedSpeed !== speed) {
+      const session = bogoSessionRef.current;
+      bogoRateSampleRef.current =
+        session && runState === "running"
+          ? {
+              startedAt: performance.now(),
+              startingAttempts: session.attempts,
+              lastReportedAt: 0,
+            }
+          : null;
+      setBogoMeasuredShuffleRate(null);
+    }
     setSpeed(clampedSpeed);
     setSpeedInput(String(clampedSpeed));
   }
@@ -2621,7 +2712,7 @@ export default function Home() {
               <h2 id="visualizer-title">{algorithmDetails.controlTitle}</h2>
             </div>
 
-            <div className="controls" aria-label="Visualizer controls">
+            <div className={"controls " + (isBogo ? "controls--bogo" : "")} aria-label="Visualizer controls">
               <div className="algorithm-controls">
                 <label className="control-field control-field--algorithm">
                   <span className="control-label">Algorithm</span>
@@ -2697,23 +2788,39 @@ export default function Home() {
                       </span>
                     </label>
                     <aside className="bogo-runtime-estimate" aria-live="polite">
-                      <span>EXPECTED LUCK</span>
+                      <span>EXPECTED AVERAGE</span>
                       <strong>{bogoExpectedTime}</strong>
                       <small>
-                        One sorted order in {formatBogoShuffleEstimate(bogoExpectedShuffles)} shuffles on average,
-                        modeled at {BOGO_ESTIMATED_SHUFFLES_PER_SECOND.toLocaleString("en-US")} shuffles per second.
-                        Your browser can be slower or faster.
+                        One sorted order in {formatBogoShuffleEstimate(bogoExpectedShuffles)} shuffles on average. {" "}
+                        {bogoMeasuredShuffleRate !== null
+                          ? "This browser measured " + formatBogoShuffleRate(bogoShuffleRate) + " during this run."
+                          : "At " + speed + "% speed, the runner is modeled at " + formatBogoShuffleRate(bogoShuffleRate) + "."}{" "}
+                        Individual runs can be much luckier or unluckier.
                       </small>
+                      {runState === "complete" && currentStep.phase === "complete" && currentStep.pass > 0 && (
+                        <small className="bogo-runtime-estimate__result">
+                          This run found it after {currentStep.pass.toLocaleString("en-US")} shuffle
+                          {currentStep.pass === 1 ? "" : "s"}.
+                        </small>
+                      )}
                     </aside>
                   </>
                 )}
               </div>
 
-              <label className="control-field control-field--range">
+              <label
+                className={
+                  "control-field control-field--range control-field--array-size " +
+                  (isBogo ? "control-field--array-size-bogo" : "")
+                }
+              >
                 <span className="control-label">
-                  {isBogo ? "Array size · max 24" : "Array size"}
+                  <span className="control-label__name">
+                    Array size
+                    {isBogo && <small>Max 24</small>}
+                  </span>
                   <input
-                    className="control-number"
+                    className={"control-number " + (isBogo ? "control-number--bogo-array" : "")}
                     type="number"
                     min={minimumArraySize}
                     max={maximumArraySize}

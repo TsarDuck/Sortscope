@@ -254,6 +254,12 @@ button:disabled {
   gap: 17px;
 }
 
+/* Bogo exposes a few extra controls. Let them wrap before a compact field has
+   to squeeze its native number spinner into the label. */
+.controls--bogo {
+  flex-wrap: wrap;
+}
+
 .control-field {
   display: grid;
   gap: 8px;
@@ -285,6 +291,20 @@ button:disabled {
   text-transform: uppercase;
 }
 
+.control-label__name {
+  min-width: 0;
+}
+
+.control-label__name small {
+  display: block;
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 0.55rem;
+  font-weight: 800;
+  letter-spacing: 0.1em;
+  line-height: 1;
+}
+
 .control-label strong {
   color: var(--ink);
   font-size: 0.7rem;
@@ -311,6 +331,23 @@ button:disabled {
 
 .control-number--bogo {
   width: 172px;
+}
+
+/* Keep the two-digit Bogo cap and the native arrows in separate lanes. */
+.control-field--array-size-bogo {
+  flex: 0 0 220px;
+  min-width: 220px;
+}
+
+.control-field--array-size-bogo .control-label__name {
+  white-space: nowrap;
+}
+
+.control-number--bogo-array {
+  width: 96px;
+  min-width: 96px;
+  flex: 0 0 96px;
+  padding-right: 36px;
 }
 
 .bogo-unlimited-warning {
@@ -395,6 +432,11 @@ button:disabled {
   font-size: 0.61rem;
   font-weight: 650;
   line-height: 1.35;
+}
+
+.bogo-runtime-estimate__result {
+  color: #ffe9ad !important;
+  font-weight: 800 !important;
 }
 
 /* Give Chromium's built-in up/down controls a comfortably sized hit area. */
@@ -2261,6 +2303,11 @@ input:focus-visible {
 
   .control-field--range {
     flex: 1 1 42%;
+    min-width: 0;
+  }
+
+  .control-field--array-size-bogo {
+    flex-basis: 100%;
     min-width: 0;
   }
 
