@@ -1456,7 +1456,7 @@ input:focus-visible {
   display: inline-block;
   height: 0.78em;
   margin: 0 0.24em;
-  border-left: 0.055em solid rgba(183, 175, 255, 0.62);
+  border-left: 0.055em solid rgba(91, 222, 255, 0.82);
   transform: translateY(0.06em);
   vertical-align: 0.02em;
 }

@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   applyPracticeMove,
   getPracticeTargetScore,
+  isAdjacentInsertionKeyMove,
   isPracticeRowFinished,
   isPracticeMoveProgress,
   resolvePracticeDropTarget,
@@ -35,6 +36,26 @@ test("a between-block drop inserts and shifts values in both directions", () => 
 test("dropping back into the source gap leaves the row unchanged", () => {
   assert.deepEqual(applyPracticeMove([1, 2, 3, 4], 2, 2, "insert"), [1, 2, 3, 4]);
   assert.deepEqual(applyPracticeMove([1, 2, 3, 4], 2, 2, "swap"), [1, 2, 3, 4]);
+});
+
+test("an insertion lesson accepts only the highlighted key's next adjacent left shift", () => {
+  const start = [4, 5, 1, 2, 3, 6];
+  const onePlaceLeft = [4, 1, 5, 2, 3, 6];
+
+  // A direct neighboring swap is naturally direction-independent, so either
+  // block may be picked up. Both produce the key's same one-slot-left state.
+  assert.equal(isAdjacentInsertionKeyMove(start, onePlaceLeft, 1, 2, 1, "swap"), true);
+  assert.equal(isAdjacentInsertionKeyMove(start, onePlaceLeft, 1, 1, 2, "swap"), true);
+
+  // A gap move is an insertion operation, so the yellow key itself must be
+  // the item dropped into the immediately preceding gap.
+  assert.equal(isAdjacentInsertionKeyMove(start, onePlaceLeft, 1, 2, 1, "insert"), true);
+  assert.equal(isAdjacentInsertionKeyMove(start, onePlaceLeft, 1, 1, 3, "insert"), false);
+
+  const jumpedKey = applyPracticeMove(start, 2, 0, "insert");
+  const unrelatedSwap = applyPracticeMove(start, 0, 1, "swap");
+  assert.equal(isAdjacentInsertionKeyMove(start, jumpedKey, 1, 2, 0, "insert"), false);
+  assert.equal(isAdjacentInsertionKeyMove(start, unrelatedSwap, 1, 0, 1, "swap"), false);
 });
 
 test("a fully ordered practice row must still be the lesson's original permutation", () => {

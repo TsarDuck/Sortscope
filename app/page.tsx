@@ -28,6 +28,7 @@ import {
 } from "./lib/sorting";
 import {
   applyPracticeMove,
+  isAdjacentInsertionKeyMove,
   isPracticeRowFinished,
   isPracticeMoveProgress,
   resolvePracticeDropTarget,
@@ -487,45 +488,54 @@ const ALGORITHM_DETAILS: Record<AlgorithmId, AlgorithmDetails> = {
     ],
     practice: [
       {
-        prompt: "The yellow key is 1. Slide it left one place through 5 to open the insertion gap.",
-        start: [2, 5, 1, 4, 3],
-        target: [2, 1, 5, 4, 3],
+        prompt: "5 is already in place. The first moving yellow key is 1; slide it one place left through 5.",
+        start: [4, 5, 1, 2, 3, 6],
+        target: [4, 1, 5, 2, 3, 6],
         insertingKey: 1,
-        activeRange: [0, 2],
+        activeRange: [1, 2],
         validation: "exact",
-        hint: "Move 1 only one neighboring place left: drop it into the gap just before 5, or swap those two neighbors.",
+        hint: "Move the yellow 1 exactly one neighboring place left: drop it into the gap just before 5, or swap that neighboring pair.",
       },
       {
-        prompt: "Keep the same key, 1, moving one more place left through 2.",
-        start: [2, 1, 5, 4, 3],
-        target: [1, 2, 5, 4, 3],
+        prompt: "Keep the same yellow key, 1, moving one more place left through 4.",
+        start: [4, 1, 5, 2, 3, 6],
+        target: [1, 4, 5, 2, 3, 6],
         insertingKey: 1,
         activeRange: [0, 1],
         validation: "exact",
-        hint: "1 still belongs before its immediate left neighbor, 2. Move it one slot left—do not jump across the row.",
+        hint: "1 still belongs before its immediate left neighbor, 4. Move it one slot left—do not jump across the row.",
       },
       {
-        prompt: "The next yellow key is 4. Slide it one place left through 5.",
-        start: [1, 2, 5, 4, 3],
-        target: [1, 2, 4, 5, 3],
-        insertingKey: 4,
+        prompt: "Now the next yellow key is 2. Slide it one place left through 5.",
+        start: [1, 4, 5, 2, 3, 6],
+        target: [1, 4, 2, 5, 3, 6],
+        insertingKey: 2,
         activeRange: [2, 3],
         validation: "exact",
-        hint: "4 belongs immediately before 5, so make this one neighboring move.",
+        hint: "2 belongs immediately before 5, so make this one neighboring move.",
       },
       {
-        prompt: "Take the final yellow key, 3, one place left through 5.",
-        start: [1, 2, 4, 5, 3],
-        target: [1, 2, 4, 3, 5],
-        insertingKey: 3,
-        activeRange: [2, 4],
+        prompt: "Keep the same yellow key, 2, moving one more place left through 4.",
+        start: [1, 4, 2, 5, 3, 6],
+        target: [1, 2, 4, 5, 3, 6],
+        insertingKey: 2,
+        activeRange: [1, 2],
         validation: "exact",
-        hint: "The key advances one neighboring slot at a time. Move 3 only through 5 first.",
+        hint: "2 now belongs before its immediate left neighbor, 4. Move it one slot left—do not jump across the row.",
+      },
+      {
+        prompt: "The final moving yellow key is 3. Slide it one place left through 5.",
+        start: [1, 2, 4, 5, 3, 6],
+        target: [1, 2, 4, 3, 5, 6],
+        insertingKey: 3,
+        activeRange: [3, 4],
+        validation: "exact",
+        hint: "3 advances only one neighboring slot at a time. First move it through 5.",
       },
       {
         prompt: "Finish the insertion: slide 3 one last place left through 4.",
-        start: [1, 2, 4, 3, 5],
-        target: [1, 2, 3, 4, 5],
+        start: [1, 2, 4, 3, 5, 6],
+        target: [1, 2, 3, 4, 5, 6],
         insertingKey: 3,
         activeRange: [2, 3],
         validation: "exact",
@@ -3349,7 +3359,37 @@ export default function Home() {
     setPracticeDropMode((current) => (current === target?.mode ? current : target?.mode ?? null));
   }
 
-  function evaluatePracticeMove(nextValues: number[]): PracticeMoveResult {
+  function evaluatePracticeMove(
+    nextValues: number[],
+    fromIndex: number,
+    toIndex: number,
+    mode: PracticeDropMode,
+  ): PracticeMoveResult {
+    // Insertion Sort's lesson is intentionally stricter than a generic
+    // "closer to sorted" puzzle. The highlighted key must make the one
+    // neighboring leftward shift prescribed by this step. Check it before
+    // the global sorted-row shortcut so a lucky unrelated swap cannot skip a
+    // key or teach the wrong rule.
+    if (
+      isInsertionPractice &&
+      (insertionKey === null ||
+        !isAdjacentInsertionKeyMove(
+          practiceValues,
+          nextValues,
+          insertionKey,
+          fromIndex,
+          toIndex,
+          mode,
+        ))
+    ) {
+      setPracticeSolved(false);
+      setPracticeFeedback(
+        "Only the yellow key's next one-place left shift counts here, so that move will slide back. Hint: " +
+          currentPractice.hint,
+      );
+      return "wrong";
+    }
+
     // A lesson can sometimes reach the finished row by a legitimate shortcut
     // before its scripted final sub-step (Heap Sort is a clear example). The
     // global completion check comes first so a truly sorted permutation never
@@ -3424,7 +3464,7 @@ export default function Home() {
     const nextValues = applyPracticeMove(practiceValues, fromIndex, toIndex, mode);
     if (arraysMatch(nextValues, previousValues)) return;
     setPracticeValues(nextValues);
-    const result = evaluatePracticeMove(nextValues);
+    const result = evaluatePracticeMove(nextValues, fromIndex, toIndex, mode);
     if (result === "wrong") {
       schedulePracticeUndo(previousValues);
     } else if (result === "complete") {
@@ -4804,7 +4844,7 @@ export default function Home() {
                 : isQuickPractice
                 ? "The gold block is the parked pivot. Drop onto a block to swap it, or into a glowing gap to shift the row. Only the safe partition move stays, so the next pivot can never become stuck."
                 : isInsertionPractice
-                  ? "The gold block is the key being inserted. Move it only one neighboring slot left at a time; the next step appears as soon as that local insertion move is correct."
+                  ? "The yellow block is the key being inserted. Only its next neighboring move left can advance this step: swap that pair from either block, or drag the key into the adjacent gap."
                 : "Click two blocks or drop one directly onto another to swap them. Drop into any glowing gap to shift the row instead. The final arrangement—not which value you started with—decides whether the move stays."}
             </p>
             <div

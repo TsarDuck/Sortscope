@@ -85,6 +85,54 @@ export function applyPracticeMove(
 }
 
 /**
+ * Verify one literal insertion-sort shift for a hands-on lesson.
+ *
+ * The yellow key may move exactly one neighboring place to the left. A direct
+ * block drop may start on either member of that neighboring pair because a
+ * swap has no direction, but a gap drop must carry the key itself into the
+ * immediately preceding gap. This keeps the friendly shared drag controls
+ * while preventing a merely helpful-looking unrelated swap from advancing an
+ * insertion lesson.
+ */
+export function isAdjacentInsertionKeyMove(
+  previousValues: readonly number[],
+  nextValues: readonly number[],
+  key: number,
+  fromIndex: number,
+  toIndex: number,
+  mode: PracticeDropMode,
+) {
+  const keyIndex = previousValues.indexOf(key);
+  const leftIndex = keyIndex - 1;
+  if (
+    keyIndex <= 0 ||
+    nextValues.length !== previousValues.length ||
+    nextValues.indexOf(key) !== leftIndex
+  ) {
+    return false;
+  }
+
+  const expectedValues = [...previousValues];
+  [expectedValues[leftIndex], expectedValues[keyIndex]] = [
+    expectedValues[keyIndex]!,
+    expectedValues[leftIndex]!,
+  ];
+  const reachesExpectedNeighborShift = expectedValues.every(
+    (value, index) => value === nextValues[index],
+  );
+  if (!reachesExpectedNeighborShift) return false;
+
+  if (mode === "swap") {
+    return (
+      (fromIndex === keyIndex && toIndex === leftIndex) ||
+      (fromIndex === leftIndex && toIndex === keyIndex)
+    );
+  }
+
+  return fromIndex === keyIndex && toIndex === leftIndex;
+}
+
+/**
  * Return true only when a lesson row is genuinely complete.
  *
  * A row being numerically increasing alone is not enough for a generic
