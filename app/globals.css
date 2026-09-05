@@ -682,6 +682,10 @@ input:focus-visible {
   color: var(--ink);
 }
 
+.button--sort-new-array {
+  white-space: nowrap;
+}
+
 .button--primary {
   color: #111125;
   background: linear-gradient(120deg, #a99bff, #75ddf4);
@@ -1562,8 +1566,8 @@ input:focus-visible {
   background: rgba(7, 10, 27, 0.44);
 }
 
-/* A normal lesson accepts an item anywhere between its neighbors, not just
-   directly on top of another block. Quick Sort is intentionally swap-only. */
+/* Every lesson accepts an item anywhere between its neighbors as well as
+   directly on top of another block. */
 .practice-drop-slot {
   position: relative;
   align-self: stretch;

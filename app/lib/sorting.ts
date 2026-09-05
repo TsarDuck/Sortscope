@@ -128,6 +128,10 @@ export function buildInsertionSteps(
   for (let i = 1; i < values.length; i += 1) {
     const key = values[i];
     let j = i - 1;
+    // During a shift the in-place working array temporarily contains a
+    // duplicate while `key` is held aside. This visual-only index tells the
+    // renderer where that held key belongs until the write below resolves it.
+    let heldKeyGapIndex: number | null = null;
 
     steps.push({
       values: [...values],
@@ -155,7 +159,7 @@ export function buildInsertionSteps(
           comparing: j,
           shifting: null,
           inserting: null,
-          gapIndex: null,
+          gapIndex: heldKeyGapIndex,
           sortedCount: i,
           comparisons,
           writes,
@@ -167,6 +171,7 @@ export function buildInsertionSteps(
 
       values[j + 1] = values[j];
       writes += 1;
+      heldKeyGapIndex = j;
       if (!compactFrames) {
         steps.push({
           values: [...values],
@@ -176,7 +181,7 @@ export function buildInsertionSteps(
           comparing: j,
           shifting: j + 1,
           inserting: null,
-          gapIndex: j,
+          gapIndex: heldKeyGapIndex,
           sortedCount: i,
           comparisons,
           writes,

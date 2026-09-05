@@ -25,6 +25,11 @@ import {
   createBogoSession,
   getBogoSessionStep,
 } from "./lib/sorting";
+import {
+  applyPracticeMove,
+  isPracticeMoveProgress,
+  type PracticeDropMode,
+} from "./lib/practice";
 
 type AlgorithmId =
   | "insertion"
@@ -75,7 +80,7 @@ type BlockPracticeStep = {
 type PracticeStep = BlockPracticeStep;
 
 type PracticeMoveResult = "solved" | "progress" | "wrong";
-type PracticeDropMode = "swap" | "insert";
+type PracticeDropTarget = { index: number; mode: PracticeDropMode };
 
 type SortStep = {
   values: number[];
@@ -1099,30 +1104,6 @@ function normalizePracticeSteps(steps: PracticeStep[]): PracticeStep[] {
   });
 }
 
-function getPracticeTargetDistance(values: number[], target: number[]) {
-  if (values.length !== target.length) return Number.POSITIVE_INFINITY;
-
-  const targetRanks = new Map<number, number>();
-  for (let index = 0; index < target.length; index += 1) {
-    const value = target[index];
-    if (targetRanks.has(value)) return Number.POSITIVE_INFINITY;
-    targetRanks.set(value, index);
-  }
-
-  // Score only the finished arrangement, never which block was chosen first.
-  // A direct position distance is more forgiving than an inversion count for
-  // insertion-style moves: a useful swap can move both blocks toward their
-  // final slots even when the surrounding values are still being taught.
-  let distance = 0;
-  for (let index = 0; index < values.length; index += 1) {
-    const targetIndex = targetRanks.get(values[index]);
-    if (targetIndex === undefined) return Number.POSITIVE_INFINITY;
-    distance += Math.abs(index - targetIndex);
-  }
-
-  return distance;
-}
-
 function formatCount(value: number) {
   return Math.round(value).toLocaleString("en-US");
 }
@@ -1143,6 +1124,11 @@ function buildInsertionSteps(source: number[]): SortStep[] {
   for (let i = 1; i < values.length; i += 1) {
     const key = values[i];
     let j = i - 1;
+    // `values` intentionally keeps the copied value at the key's old slot
+    // while a real insertion pass shifts items right. Keep the visual hole
+    // alongside that working representation so a following compare frame can
+    // draw the held key there instead of momentarily showing a duplicate.
+    let heldKeyGapIndex: number | null = null;
 
     steps.push({
       values: [...values],
@@ -1170,7 +1156,7 @@ function buildInsertionSteps(source: number[]): SortStep[] {
           comparing: j,
           shifting: null,
           inserting: null,
-          gapIndex: null,
+          gapIndex: heldKeyGapIndex,
           sortedCount: i,
           comparisons,
           writes,
@@ -1182,6 +1168,7 @@ function buildInsertionSteps(source: number[]): SortStep[] {
 
       values[j + 1] = values[j];
       writes += 1;
+      heldKeyGapIndex = j;
       if (!useCompactFrames) {
         steps.push({
           values: [...values],
@@ -1191,7 +1178,7 @@ function buildInsertionSteps(source: number[]): SortStep[] {
           comparing: j,
           shifting: j + 1,
           inserting: null,
-          gapIndex: j,
+          gapIndex: heldKeyGapIndex,
           sortedCount: i,
           comparisons,
           writes,
@@ -1429,6 +1416,11 @@ export default function Home() {
   const [arraySizeInput, setArraySizeInput] = useState(String(DEFAULT_ARRAY_SIZE));
   const [speed, setSpeed] = useState(DEFAULT_SPEED);
   const [speedInput, setSpeedInput] = useState(String(DEFAULT_SPEED));
+  // The runner should react to every speed input immediately, but the FLIP
+  // animation must not repeatedly switch its DOM/keying strategy while a
+  // range thumb is crossing the interpolation threshold.
+  const [isAdjustingSpeedControl, setIsAdjustingSpeedControl] = useState(false);
+  const [settledVisualSpeed, setSettledVisualSpeed] = useState(DEFAULT_SPEED);
   const [bogoAttemptLimit, setBogoAttemptLimit] = useState(BOGO_MAX_ATTEMPTS);
   const [bogoAttemptInput, setBogoAttemptInput] = useState(String(BOGO_MAX_ATTEMPTS));
   const [bogoRunsUntilSolved, setBogoRunsUntilSolved] = useState(false);
@@ -1467,6 +1459,7 @@ export default function Home() {
   const [practiceFeedback, setPracticeFeedback] = useState<string | null>(null);
   const [practiceUndoPending, setPracticeUndoPending] = useState(false);
   const audioContextRef = useRef<AudioContext | null>(null);
+  const speedRef = useRef(speed);
   const soundVolumeRef = useRef(soundVolume);
   const lastToneTimeRef = useRef(0);
   const lastBogoTextureTimeRef = useRef(0);
@@ -1491,6 +1484,9 @@ export default function Home() {
     anchorY: number;
     moved: boolean;
   } | null>(null);
+  // State paints the highlighted target, while this ref preserves the latest
+  // pointer location for a quick drag-and-release in the same event turn.
+  const practiceDropTargetRef = useRef<PracticeDropTarget | null>(null);
   const suppressPracticeClickRef = useRef(false);
   const practiceUndoTimerRef = useRef<number | null>(null);
   const practiceAdvanceTimerRef = useRef<number | null>(null);
@@ -1517,10 +1513,15 @@ export default function Home() {
   } | null>(null);
   const [motionSlideOffsets, setMotionSlideOffsets] = useState<Record<string, number>>({});
   const [motionSlideStage, setMotionSlideStage] = useState<"idle" | "prepare" | "animate">("idle");
+  speedRef.current = speed;
   soundVolumeRef.current = soundVolume;
   const prefersReducedMotion = usePrefersReducedMotion();
   const isBogo = algorithm === "bogo";
   const playbackSpeed = isBogo ? speed : getPlaybackSpeed(speed);
+  // While a control is being adjusted, keep the visual interpolation policy
+  // at the last settled speed. Playback timing continues to use `speed`, so
+  // the sort still reacts live without remounting bars at the 75% boundary.
+  const interpolationSpeed = isAdjustingSpeedControl ? settledVisualSpeed : speed;
   const bogoAttemptMaximum = BOGO_STANDARD_MAX_ATTEMPTS;
   const bogoSliderStep = 1;
   const bogoExpectedShuffles = isBogo ? getBogoExpectedShuffles(arraySize) : 0;
@@ -1666,9 +1667,9 @@ export default function Home() {
       return counts;
     }, new Map<number, number>());
   }, [algorithm, steps]);
-  const motionSlideDuration = Math.round(Math.max(170, 880 - speed * 9.4));
+  const motionSlideDuration = Math.round(Math.max(170, 880 - interpolationSpeed * 9.4));
   const shouldInterpolateMoves =
-    !isBogo && !prefersReducedMotion && speed < 75;
+    !isBogo && !prefersReducedMotion && interpolationSpeed < 75;
   const isSafeVisualMove =
     shouldInterpolateMoves &&
     previousVisualStep !== null &&
@@ -1865,11 +1866,14 @@ export default function Home() {
     ? 18
     : usesEvenMergePacing
       ? Math.max(minimumFrameDelay, mergePassDuration / mergeFramesInCurrentPass)
-      : isSafeVisualMove
+      // Keep the settled visual mode stable while the slider is held, but do
+      // not let that temporary mode pin the runner to a slow FLIP duration.
+      // The value itself must still change speed on every live slider input.
+      : isSafeVisualMove && !isAdjustingSpeedControl
         ? motionSlideDuration + 100
       : Math.max(minimumFrameDelay, speedDelay / playbackDensity);
   const shouldInterpolateDenseBars =
-    isLargeArray && !isBogo && !prefersReducedMotion && speed <= 50;
+    isLargeArray && !isBogo && !prefersReducedMotion && interpolationSpeed <= 50;
   const denseBarTransitionStyle = shouldInterpolateDenseBars
     ? ({
         "--bar-transition-duration": String(Math.min(260, Math.max(90, delay * 0.75))) + "ms",
@@ -2462,6 +2466,7 @@ export default function Home() {
     setPracticeDropIndex(null);
     setPracticeDropMode(null);
     practicePointerRef.current = null;
+    practiceDropTargetRef.current = null;
     setPracticeSolved(false);
     setPracticeFeedback(null);
     setPracticeValues([...firstStep.start]);
@@ -2482,6 +2487,12 @@ export default function Home() {
       return;
     }
     practiceBlockElementsRef.current.delete(id);
+  }
+
+  function setPracticeDropTarget(target: PracticeDropTarget | null) {
+    practiceDropTargetRef.current = target;
+    setPracticeDropIndex((current) => (current === target?.index ? current : target?.index ?? null));
+    setPracticeDropMode((current) => (current === target?.mode ? current : target?.mode ?? null));
   }
 
   function evaluatePracticeMove(nextValues: number[]): PracticeMoveResult {
@@ -2505,9 +2516,14 @@ export default function Home() {
       return "wrong";
     }
 
-    const previousDistance = getPracticeTargetDistance(practiceValues, currentPractice.target);
-    const nextDistance = getPracticeTargetDistance(nextValues, currentPractice.target);
-    const madeProgress = nextDistance < previousDistance;
+    // Prefer moves that put more pairs in their final relative order. A
+    // position-distance tie-break keeps the lesson moving forward without
+    // rejecting a legitimate swap whose two values trade equally distant slots.
+    const madeProgress = isPracticeMoveProgress(
+      practiceValues,
+      nextValues,
+      currentPractice.target,
+    );
     setPracticeSolved(false);
     setPracticeFeedback(
       madeProgress
@@ -2534,23 +2550,13 @@ export default function Home() {
     mode: "swap" | "insert" = "swap",
   ) {
     if (practiceFinished || practiceUndoPending) return;
-    const insertionIndex = mode === "insert" && toIndex > fromIndex ? toIndex - 1 : toIndex;
-    if ((mode === "swap" && fromIndex === toIndex) || (mode === "insert" && insertionIndex === fromIndex)) {
-      return;
-    }
     if (capturePosition) {
       practiceBlockPositionsRef.current = capturePracticeBlockPositions();
     }
 
     const previousValues = [...practiceValues];
-    const nextValues = [...practiceValues];
-    if (mode === "insert") {
-      const movedValue = nextValues.splice(fromIndex, 1)[0];
-      if (movedValue === undefined) return;
-      nextValues.splice(insertionIndex, 0, movedValue);
-    } else {
-      [nextValues[fromIndex], nextValues[toIndex]] = [nextValues[toIndex], nextValues[fromIndex]];
-    }
+    const nextValues = applyPracticeMove(practiceValues, fromIndex, toIndex, mode);
+    if (arraysMatch(nextValues, previousValues)) return;
     setPracticeValues(nextValues);
     const result = evaluatePracticeMove(nextValues);
     if (result === "wrong") {
@@ -2581,7 +2587,7 @@ export default function Home() {
     movePracticeItem(practiceSelectedIndex, index);
   }
 
-  function getPracticeDropTarget(clientX: number, clientY: number): { index: number; mode: PracticeDropMode } | null {
+  function getPracticeDropTarget(clientX: number, clientY: number): PracticeDropTarget | null {
     const board = practiceBoardRef.current;
     if (!board) return null;
 
@@ -2589,19 +2595,15 @@ export default function Home() {
     const blocks = Array.from(board.querySelectorAll<HTMLElement>("[data-practice-index]")).filter(
       (block) => Number(block.dataset.practiceIndex) !== sourceIndex,
     );
-    if (!isQuickPractice) {
-      const directBlock = blocks.find((block) => {
-        const rect = block.getBoundingClientRect();
-        return clientX >= rect.left && clientX <= rect.right && clientY >= rect.top && clientY <= rect.bottom;
-      });
-      if (directBlock) {
-        return { index: Number(directBlock.dataset.practiceIndex), mode: "swap" };
-      }
+    const directBlock = blocks.find((block) => {
+      const rect = block.getBoundingClientRect();
+      return clientX >= rect.left && clientX <= rect.right && clientY >= rect.top && clientY <= rect.bottom;
+    });
+    if (directBlock) {
+      return { index: Number(directBlock.dataset.practiceIndex), mode: "swap" };
     }
 
-    const candidates = isQuickPractice
-      ? blocks
-      : Array.from(board.querySelectorAll<HTMLElement>("[data-practice-drop-index]"));
+    const candidates = Array.from(board.querySelectorAll<HTMLElement>("[data-practice-drop-index]"));
     let nearestIndex: number | null = null;
     let nearestDistance = Infinity;
 
@@ -2612,37 +2614,40 @@ export default function Home() {
       const distance = (clientX - centerX) ** 2 + (clientY - centerY) ** 2;
       if (distance < nearestDistance) {
         nearestDistance = distance;
-        nearestIndex = Number(
-          isQuickPractice
-            ? candidate.dataset.practiceIndex
-            : candidate.dataset.practiceDropIndex,
-        );
+        nearestIndex = Number(candidate.dataset.practiceDropIndex);
       }
     });
 
     if (nearestIndex === null) return null;
-    return { index: nearestIndex, mode: isQuickPractice ? "swap" : "insert" };
+    return { index: nearestIndex, mode: "insert" };
   }
 
-  function finishPracticeDrag(cancelled = false) {
+  function finishPracticeDrag(
+    event?: ReactPointerEvent<HTMLButtonElement>,
+    cancelled = false,
+  ) {
     const drag = practicePointerRef.current;
     if (!drag) return;
 
-    const destination = practiceDropIndex;
-    const moveMode = isQuickPractice ? "swap" : practiceDropMode ?? "insert";
-    const insertionIndex =
+    // Pointer-up may happen before React has committed the final pointer-move
+    // state. Resolve it at release time and keep the last target in a ref, so
+    // all lessons get the same reliable pickup-and-drop behavior.
+    const target = cancelled
+      ? null
+      : event
+        ? getPracticeDropTarget(event.clientX, event.clientY) ?? practiceDropTargetRef.current
+        : practiceDropTargetRef.current;
+    const destination = target?.index ?? null;
+    const moveMode = target?.mode ?? "insert";
+    const nextValues =
       destination === null
-        ? null
-        : destination > drag.fromIndex
-          ? destination - 1
-          : destination;
+        ? practiceValues
+        : applyPracticeMove(practiceValues, drag.fromIndex, destination, moveMode);
     const shouldMove =
       !cancelled &&
       drag.moved &&
       destination !== null &&
-      (moveMode === "swap"
-        ? destination !== drag.fromIndex
-        : insertionIndex !== null && insertionIndex !== drag.fromIndex);
+      !arraysMatch(nextValues, practiceValues);
     if (shouldMove) {
       practiceBlockPositionsRef.current = capturePracticeBlockPositions();
       suppressPracticeClickRef.current = true;
@@ -2658,8 +2663,7 @@ export default function Home() {
     setPracticeDragIndex(null);
     setPracticeDraggingId(null);
     setPracticeDragOffset({ x: 0, y: 0 });
-    setPracticeDropIndex(null);
-    setPracticeDropMode(null);
+    setPracticeDropTarget(null);
   }
 
   function handlePracticePointerDown(
@@ -2686,8 +2690,7 @@ export default function Home() {
     setPracticeDragIndex(index);
     setPracticeDraggingId(id);
     setPracticeDragOffset({ x: 0, y: 0 });
-    setPracticeDropIndex(index);
-    setPracticeDropMode(isQuickPractice ? "swap" : "insert");
+    setPracticeDropTarget({ index, mode: "insert" });
   }
 
   function handlePracticePointerMove(event: ReactPointerEvent<HTMLButtonElement>) {
@@ -2702,9 +2705,7 @@ export default function Home() {
     event.preventDefault();
     setPracticeDragOffset({ x: deltaX + drag.anchorX, y: deltaY + drag.anchorY });
     const target = getPracticeDropTarget(event.clientX, event.clientY);
-    const destination = target?.index ?? null;
-    setPracticeDropIndex((current) => (current === destination ? current : destination));
-    setPracticeDropMode((current) => (current === target?.mode ? current : target?.mode ?? null));
+    setPracticeDropTarget(target);
   }
 
   function advancePracticeStep() {
@@ -2720,6 +2721,7 @@ export default function Home() {
       setPracticeDropIndex(null);
       setPracticeDropMode(null);
       practicePointerRef.current = null;
+      practiceDropTargetRef.current = null;
       setPracticeSolved(false);
       return;
     }
@@ -2733,6 +2735,7 @@ export default function Home() {
     setPracticeDropIndex(null);
     setPracticeDropMode(null);
     practicePointerRef.current = null;
+    practiceDropTargetRef.current = null;
     setPracticeSolved(false);
     setPracticeFeedback(null);
     setPracticeValues([...nextStep.start]);
@@ -2904,6 +2907,27 @@ export default function Home() {
     setArraySizeInput(String(clampedSize));
   }
 
+  function beginSpeedVisualAdjustment() {
+    // Bogo does not use the move interpolation path, so there is nothing to
+    // freeze there. For every other algorithm, retain the current visual mode
+    // until the person finishes changing the control.
+    if (isBogo) return;
+    setSettledVisualSpeed(speedRef.current);
+    setIsAdjustingSpeedControl(true);
+  }
+
+  function finishSpeedVisualAdjustment() {
+    if (isBogo) return;
+    // `speedRef` is updated synchronously by handleSpeedChange, which also
+    // covers a final native range input that arrives just before pointer-up.
+    setSettledVisualSpeed(speedRef.current);
+    setIsAdjustingSpeedControl(false);
+  }
+
+  function isSpeedAdjustmentKey(key: string) {
+    return ["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End", "PageUp", "PageDown"].includes(key);
+  }
+
   function handleSpeedChange(nextSpeed: number) {
     const clampedSpeed = Math.min(maximumSpeed, Math.max(1, Math.round(nextSpeed)));
     if (isBogo && clampedSpeed !== speed) {
@@ -2918,6 +2942,7 @@ export default function Home() {
           : null;
       restartBogoExpectedRateCalibration(session, getBogoEstimatedShuffleRate(clampedSpeed));
     }
+    speedRef.current = clampedSpeed;
     setSpeed(clampedSpeed);
     setSpeedInput(String(clampedSpeed));
   }
@@ -3225,7 +3250,11 @@ export default function Home() {
                       step="1"
                       value={speedInput}
                       onChange={(event) => handleSpeedInputChange(event.target.value)}
-                      onBlur={normalizeSpeedInput}
+                      onFocus={beginSpeedVisualAdjustment}
+                      onBlur={() => {
+                        normalizeSpeedInput();
+                        finishSpeedVisualAdjustment();
+                      }}
                       onKeyDown={(event) => {
                         if (event.key === "Enter") event.currentTarget.blur();
                       }}
@@ -3239,6 +3268,27 @@ export default function Home() {
                   max={maximumSpeed}
                   value={speed}
                   onChange={(event) => handleSpeedChange(Number(event.target.value))}
+                  onPointerDown={(event) => {
+                    // Pointer Events cover mouse, touch, and pen. Capturing
+                    // the pointer guarantees release is observed even if the
+                    // thumb is dragged outside the narrow range control.
+                    event.currentTarget.setPointerCapture(event.pointerId);
+                    beginSpeedVisualAdjustment();
+                  }}
+                  onPointerUp={(event) => {
+                    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+                      event.currentTarget.releasePointerCapture(event.pointerId);
+                    }
+                    finishSpeedVisualAdjustment();
+                  }}
+                  onPointerCancel={finishSpeedVisualAdjustment}
+                  onBlur={finishSpeedVisualAdjustment}
+                  onKeyDown={(event) => {
+                    if (isSpeedAdjustmentKey(event.key)) beginSpeedVisualAdjustment();
+                  }}
+                  onKeyUp={(event) => {
+                    if (isSpeedAdjustmentKey(event.key)) finishSpeedVisualAdjustment();
+                  }}
                   aria-label="Animation speed"
                 />
               </label>
@@ -3249,7 +3299,7 @@ export default function Home() {
                   {primaryLabel}
                 </button>
                 {runState === "paused" && (
-                  <button className="text-button" type="button" onClick={() => handlePrimaryAction(true)}>
+                  <button className="button button--secondary button--sort-new-array" type="button" onClick={() => handlePrimaryAction(true)}>
                     Sort new array
                   </button>
                 )}
@@ -3566,7 +3616,7 @@ export default function Home() {
             )}
             <p className="practice-lab__help">
               {isQuickPractice
-                ? "The gold block is the parked pivot. Make the one safe swap for this partition; a different move slides back immediately, so the next pivot can never become stuck. You can start the swap from either block."
+                ? "The gold block is the parked pivot. Drop onto a block to swap it, or into a glowing gap to shift the row. Only the safe partition move stays, so the next pivot can never become stuck."
                 : "Click two blocks or drop one directly onto another to swap them. Drop into any glowing gap to shift the row instead. The final arrangement—not which value you started with—decides whether the move stays."}
             </p>
             <div
@@ -3595,18 +3645,16 @@ export default function Home() {
                             : "";
                       return (
                         <Fragment key={practiceItemId}>
-                          {!isQuickPractice && (
-                            <span
-                              className={
-                                "practice-drop-slot " +
-                                (practiceDropMode === "insert" && practiceDropIndex === index && practiceDraggingId
-                                  ? "practice-drop-slot--target"
-                                  : "")
-                              }
-                              data-practice-drop-index={index}
-                              aria-hidden="true"
-                            />
-                          )}
+                          <span
+                            className={
+                              "practice-drop-slot " +
+                              (practiceDropMode === "insert" && practiceDropIndex === index && practiceDraggingId
+                                ? "practice-drop-slot--target"
+                                : "")
+                            }
+                            data-practice-drop-index={index}
+                            aria-hidden="true"
+                          />
                         <button
                           className={
                             "practice-block " +
@@ -3616,7 +3664,7 @@ export default function Home() {
                             (isQuickPractice && !isQuickWalkthroughComplete && !isInQuickRange ? "practice-block--quick-waiting " : "") +
                             (practiceSelectedIndex === index ? "practice-block--selected " : "") +
                             (isDragging ? "practice-block--dragging " : "") +
-                            ((isQuickPractice || practiceDropMode === "swap") && practiceDropIndex === index && practiceDragIndex !== index
+                            (practiceDropMode === "swap" && practiceDropIndex === index && practiceDragIndex !== index
                               ? "practice-block--drop-target"
                               : "")
                           }
@@ -3626,8 +3674,8 @@ export default function Home() {
                           data-practice-index={index}
                           onPointerDown={(event) => handlePracticePointerDown(event, index, practiceItemId)}
                           onPointerMove={handlePracticePointerMove}
-                          onPointerUp={() => finishPracticeDrag()}
-                          onPointerCancel={() => finishPracticeDrag(true)}
+                          onPointerUp={(event) => finishPracticeDrag(event)}
+                          onPointerCancel={(event) => finishPracticeDrag(event, true)}
                           onClick={() => handlePracticeBlockClick(index)}
                           disabled={practiceUndoPending || practiceSolved}
                           aria-pressed={practiceSelectedIndex === index}
@@ -3653,18 +3701,16 @@ export default function Home() {
                         </Fragment>
                       );
                     })}
-              {!isQuickPractice && (
-                <span
-                  className={
-                    "practice-drop-slot " +
-                    (practiceDropMode === "insert" && practiceDropIndex === practiceValues.length && practiceDraggingId
-                      ? "practice-drop-slot--target"
-                      : "")
-                  }
-                  data-practice-drop-index={practiceValues.length}
-                  aria-hidden="true"
-                />
-              )}
+              <span
+                className={
+                  "practice-drop-slot " +
+                  (practiceDropMode === "insert" && practiceDropIndex === practiceValues.length && practiceDraggingId
+                    ? "practice-drop-slot--target"
+                    : "")
+                }
+                data-practice-drop-index={practiceValues.length}
+                aria-hidden="true"
+              />
             </div>
             <div className="practice-lab__actions">
               {practiceFinished ? (

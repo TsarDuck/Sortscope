@@ -41,6 +41,24 @@ test("insertion sort finishes in numeric order without mutating its source", () 
   assert.equal(steps.at(-1)?.writes, 4);
 });
 
+test("insertion sort keeps every visual frame a permutation while its key is held", () => {
+  const source = [1, 4, 3, 2];
+  const expectedValues = [...source].sort((left, right) => left - right);
+  const steps = buildInsertionSteps(source);
+
+  // The second comparison in this pass happens after 4 was copied right, so
+  // the raw in-place array is intentionally [1, 4, 4, 2]. The visual gap
+  // metadata must keep the held 3 visible in its proper temporary position.
+  assert.ok(steps.some((step) => step.phase === "compare" && step.gapIndex !== null));
+
+  for (const step of steps) {
+    const renderedValues = step.values.map((value, index) =>
+      index === step.gapIndex && step.key !== null ? step.key : value,
+    );
+    assert.deepEqual([...renderedValues].sort((left, right) => left - right), expectedValues);
+  }
+});
+
 test("bubble, cocktail, selection, heap, quick, PDQ, merge, and Powersort finish in numeric order without mutating the source", () => {
   const builders = [
     buildBubbleSteps,
