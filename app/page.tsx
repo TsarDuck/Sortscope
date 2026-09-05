@@ -90,15 +90,6 @@ type PracticeGroup = {
   active?: boolean;
 };
 
-type PracticeRunBoundaryMarker = {
-  /** Stable key for one board-level bracket edge. */
-  id: string;
-  /** Pixel position inside the practice board's containing block. */
-  left: number;
-  top: number;
-  height: number;
-};
-
 type BlockPracticeStep = {
   prompt: string;
   start: number[];
@@ -1793,9 +1784,6 @@ export default function Home() {
   const [practiceDragOffset, setPracticeDragOffset] = useState({ x: 0, y: 0 });
   const [practiceDropIndex, setPracticeDropIndex] = useState<number | null>(null);
   const [practiceDropMode, setPracticeDropMode] = useState<PracticeDropMode | null>(null);
-  const [practiceRunBoundaryMarkers, setPracticeRunBoundaryMarkers] = useState<
-    PracticeRunBoundaryMarker[]
-  >([]);
   const [practiceSolved, setPracticeSolved] = useState(false);
   const [practiceFeedback, setPracticeFeedback] = useState<string | null>(null);
   const [practiceUndoPending, setPracticeUndoPending] = useState(false);
@@ -1927,16 +1915,17 @@ export default function Home() {
   // Merge-family lessons use these position-based ranges to make the already
   // ordered runs visually explicit without changing the board's drag geometry.
   const practiceGroups = practiceFinished ? [] : currentPractice.groups ?? [];
-  const activePracticeRunGroups = useMemo(
-    () =>
-      (algorithm === "powersort" || algorithm === "merge") && !practiceFinished
-        ? practiceGroups.filter((group) => group.active)
-        : [],
-    [algorithm, practiceFinished, practiceGroups],
-  );
-  const activePracticeRunGroupKey = activePracticeRunGroups
-    .map((group, index) => index + ":" + group.label + ":" + group.range.join("-"))
-    .join("|");
+  const activePracticeRunBoundarySlots = useMemo(() => {
+    if ((algorithm !== "powersort" && algorithm !== "merge") || practiceFinished) {
+      return new Set<number>();
+    }
+
+    return new Set(
+      practiceGroups.flatMap((group) =>
+        group.active ? [group.range[0], group.range[1] + 1] : [],
+      ),
+    );
+  }, [algorithm, practiceFinished, practiceGroups]);
   const algorithmLabel = algorithmDetails.label;
   const stageLabel = algorithmDetails.stageLabel;
   const totalStages = isBogo
@@ -2150,106 +2139,6 @@ export default function Home() {
       if (releaseTimer !== undefined) window.clearTimeout(releaseTimer);
     };
   }, [currentStep, isSafeVisualMove, motionSlideDuration, shouldInterpolateMoves]);
-
-  useLayoutEffect(() => {
-    // The blue merge brackets deliberately belong to the board rather than to
-    // the boundary blocks. A dragged button receives a visual transform, while
-    // these markers keep the last settled board coordinates until that drag is
-    // finished. That makes the active run stay visually anchored in place.
-    if (practiceDraggingId) {
-      return;
-    }
-
-    if (activePracticeRunGroups.length === 0) {
-      setPracticeRunBoundaryMarkers((current) => (current.length === 0 ? current : []));
-      return;
-    }
-
-    const updatePracticeRunBoundaryMarkers = () => {
-      const board = practiceBoardRef.current;
-      if (!board) {
-        setPracticeRunBoundaryMarkers((current) => (current.length === 0 ? current : []));
-        return;
-      }
-
-      const boardRect = board.getBoundingClientRect();
-      const nextMarkers: PracticeRunBoundaryMarker[] = [];
-
-      activePracticeRunGroups.forEach((group, groupIndex) => {
-        const startValue = practiceValues[group.range[0]];
-        const endValue = practiceValues[group.range[1]];
-        const startBlock = practiceBlockElementsRef.current.get("value-" + startValue);
-        const endBlock = practiceBlockElementsRef.current.get("value-" + endValue);
-
-        if (!startBlock || !endBlock) return;
-
-        const startRect = startBlock.getBoundingClientRect();
-        const endRect = endBlock.getBoundingClientRect();
-        const markerBaseId = groupIndex + "-" + group.range.join("-") + "-" + group.label;
-
-        nextMarkers.push(
-          {
-            id: markerBaseId + "-start",
-            left: startRect.left - boardRect.left - 9,
-            top: startRect.top - boardRect.top - 8,
-            height: startRect.height + 16,
-          },
-          {
-            id: markerBaseId + "-end",
-            left: endRect.right - boardRect.left + 5,
-            top: endRect.top - boardRect.top - 8,
-            height: endRect.height + 16,
-          },
-        );
-      });
-
-      setPracticeRunBoundaryMarkers((current) => {
-        const hasSameMarkers =
-          current.length === nextMarkers.length &&
-          current.every((marker, index) => {
-            const nextMarker = nextMarkers[index];
-            return (
-              marker.id === nextMarker.id &&
-              Math.abs(marker.left - nextMarker.left) < 0.5 &&
-              Math.abs(marker.top - nextMarker.top) < 0.5 &&
-              Math.abs(marker.height - nextMarker.height) < 0.5
-            );
-          });
-
-        return hasSameMarkers ? current : nextMarkers;
-      });
-    };
-
-    updatePracticeRunBoundaryMarkers();
-
-    const board = practiceBoardRef.current;
-    if (!board) return;
-
-    // Watching the board plus its active edge blocks keeps brackets aligned
-    // when a responsive layout wraps the row or changes a block's dimensions.
-    const resizeObserver = new ResizeObserver(updatePracticeRunBoundaryMarkers);
-    resizeObserver.observe(board);
-    activePracticeRunGroups.forEach((group) => {
-      const startValue = practiceValues[group.range[0]];
-      const endValue = practiceValues[group.range[1]];
-      const startBlock = practiceBlockElementsRef.current.get("value-" + startValue);
-      const endBlock = practiceBlockElementsRef.current.get("value-" + endValue);
-      if (startBlock) resizeObserver.observe(startBlock);
-      if (endBlock && endBlock !== startBlock) resizeObserver.observe(endBlock);
-    });
-
-    window.addEventListener("resize", updatePracticeRunBoundaryMarkers);
-    return () => {
-      resizeObserver.disconnect();
-      window.removeEventListener("resize", updatePracticeRunBoundaryMarkers);
-    };
-  }, [
-    activePracticeRunGroupKey,
-    activePracticeRunGroups,
-    practiceDraggingId,
-    practiceFinished,
-    practiceValues,
-  ]);
 
   useLayoutEffect(() => {
     const previousPositions = practiceBlockPositionsRef.current;
@@ -4348,18 +4237,6 @@ export default function Home() {
               role="group"
               aria-label={algorithmLabel + " interactive practice blocks"}
             >
-              {practiceRunBoundaryMarkers.map((marker) => (
-                <span
-                  className="practice-run-boundary"
-                  key={marker.id}
-                  aria-hidden="true"
-                  style={{
-                    left: marker.left,
-                    top: marker.top,
-                    height: marker.height,
-                  }}
-                />
-              ))}
               {practiceValues.map((value, index) => {
                       const practiceItemId = "value-" + value;
                       const isDragging = practiceDraggingId === practiceItemId;
@@ -4401,6 +4278,9 @@ export default function Home() {
                           <span
                             className={
                               "practice-drop-slot " +
+                              (activePracticeRunBoundarySlots.has(index)
+                                ? "practice-drop-slot--active-run-boundary "
+                                : "") +
                               (practiceDropMode === "insert" && practiceDropIndex === index && practiceDraggingId
                                 ? "practice-drop-slot--target"
                                 : "")
@@ -4465,6 +4345,9 @@ export default function Home() {
               <span
                 className={
                   "practice-drop-slot " +
+                  (activePracticeRunBoundarySlots.has(practiceValues.length)
+                    ? "practice-drop-slot--active-run-boundary "
+                    : "") +
                   (practiceDropMode === "insert" && practiceDropIndex === practiceValues.length && practiceDraggingId
                     ? "practice-drop-slot--target"
                     : "")

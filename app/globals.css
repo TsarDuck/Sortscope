@@ -1687,7 +1687,6 @@ input:focus-visible {
 }
 
 .practice-board {
-  position: relative;
   display: flex;
   grid-column: 1 / -1;
   flex-wrap: wrap;
@@ -1793,16 +1792,15 @@ input:focus-visible {
   box-shadow: inset -2px 0 0 var(--practice-run-color), 0 6px 16px rgba(4, 6, 24, 0.24);
 }
 
-/* These sit in a board-level overlay rather than inside draggable blocks, so
-   an active-run boundary stays behind when someone picks up its neighbor. */
-.practice-run-boundary {
-  position: absolute;
-  z-index: 3;
+/* The active-run brackets live on the fixed gap slots around a group. They
+   therefore stay in place while a neighboring block follows the pointer. */
+.practice-drop-slot--active-run-boundary::before {
+  top: -8px;
+  bottom: -8px;
   width: 4px;
   border-radius: 999px;
-  background: #69e8ff;
-  box-shadow: 0 0 0 1px rgba(168, 247, 255, 0.6), 0 0 14px rgba(69, 218, 255, 0.9);
-  pointer-events: none;
+  background: #69e8ff !important;
+  box-shadow: 0 0 0 1px rgba(168, 247, 255, 0.6), 0 0 14px rgba(69, 218, 255, 0.9) !important;
 }
 
 .practice-block:hover,
