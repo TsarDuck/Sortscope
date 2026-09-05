@@ -75,6 +75,7 @@ type StepPhase =
 
 type BenchmarkPattern = "random" | "reverse" | "nearly-sorted";
 type BenchmarkTab = "table" | "bars";
+type BogoPracticeCasinoSound = "entry" | "shuffle" | "fail" | "success";
 
 type PracticeGroupTone = "cyan" | "violet" | "mint" | "gold";
 
@@ -221,6 +222,20 @@ const BOGO_STANDARD_MAX_ATTEMPTS = 999_999_999;
 // all 4! possible orders an equal chance, so a lucky completion is possible
 // without borrowing the Control Room's potentially enormous input.
 const BOGO_PRACTICE_INITIAL_VALUES = [4, 2, 1, 3];
+const BOGO_PRACTICE_ROLL_INTERVAL = 52;
+// These fallbacks deliberately run a little past the bundled clip lengths.
+// `ended` normally resolves the interaction first; the timeout only prevents
+// a missing or stalled media event from trapping the lesson behind a disabled
+// button.
+const BOGO_PRACTICE_CASINO_SOUNDS: Record<
+  BogoPracticeCasinoSound,
+  { source: string; fallbackDuration: number }
+> = {
+  entry: { source: "/audio/bogo-casino-gambling.wav", fallbackDuration: 1_800 },
+  shuffle: { source: "/audio/bogo-casino-shuffle.wav", fallbackDuration: 700 },
+  fail: { source: "/audio/bogo-casino-fail.wav", fallbackDuration: 1_500 },
+  success: { source: "/audio/bogo-casino-success.wav", fallbackDuration: 2_200 },
+};
 // At the top end, the live runner works in short CPU batches. This is a
 // deliberately conservative pre-run model; the page replaces it with the
 // browser's measured rate once a Bogo session has run long enough to sample.
@@ -1784,6 +1799,9 @@ export default function Home() {
   const [practiceDropIndex, setPracticeDropIndex] = useState<number | null>(null);
   const [practiceDropMode, setPracticeDropMode] = useState<PracticeDropMode | null>(null);
   const [practiceSolved, setPracticeSolved] = useState(false);
+  const [bogoPracticeEntered, setBogoPracticeEntered] = useState(false);
+  const [bogoPracticeBusy, setBogoPracticeBusy] = useState(false);
+  const [bogoPracticeRolling, setBogoPracticeRolling] = useState(false);
   const [bogoPracticeAttempts, setBogoPracticeAttempts] = useState(0);
   const [practiceFeedback, setPracticeFeedback] = useState<string | null>(null);
   const [practiceUndoPending, setPracticeUndoPending] = useState(false);
@@ -1824,6 +1842,11 @@ export default function Home() {
   const practiceAdvanceTimerRef = useRef<number | null>(null);
   const practiceCelebrationFadeTimerRef = useRef<number | null>(null);
   const practiceCelebrationUnmountTimerRef = useRef<number | null>(null);
+  const bogoPracticeAudioRef = useRef<HTMLAudioElement | null>(null);
+  const bogoPracticeAudioFallbackTimerRef = useRef<number | null>(null);
+  const bogoPracticeAudioRunRef = useRef(0);
+  const bogoPracticeRollIntervalRef = useRef<number | null>(null);
+  const bogoPracticeRollRunRef = useRef(0);
   // Completion can be reached by a final scripted move or the global sorted
   // row check. This guard makes those paths share one celebration and one
   // victory tone instead of occasionally firing twice in the same gesture.
@@ -2573,6 +2596,7 @@ export default function Home() {
       if (practiceCelebrationUnmountTimerRef.current !== null) {
         window.clearTimeout(practiceCelebrationUnmountTimerRef.current);
       }
+      clearBogoPracticeInteraction(false);
       practiceCelebrationRunRef.current += 1;
       if (practiceClickSuppressionTimerRef.current !== null) {
         window.clearTimeout(practiceClickSuppressionTimerRef.current);
@@ -2588,6 +2612,14 @@ export default function Home() {
       void audioContextRef.current?.close();
     };
   }, []);
+
+  // The casino clips use native media playback rather than the synthesized
+  // sorting voices, so keep the one currently playing clip in step with the
+  // shared volume control as it changes.
+  useEffect(() => {
+    const audio = bogoPracticeAudioRef.current;
+    if (audio) audio.volume = Math.max(0, Math.min(1, soundVolume / 100));
+  }, [soundVolume]);
 
   useEffect(() => {
     if (
@@ -2812,6 +2844,87 @@ export default function Home() {
     }
   }
 
+  function clearBogoPracticeAudio() {
+    bogoPracticeAudioRunRef.current += 1;
+    if (bogoPracticeAudioFallbackTimerRef.current !== null) {
+      window.clearTimeout(bogoPracticeAudioFallbackTimerRef.current);
+      bogoPracticeAudioFallbackTimerRef.current = null;
+    }
+
+    const audio = bogoPracticeAudioRef.current;
+    bogoPracticeAudioRef.current = null;
+    if (!audio) return;
+
+    audio.onended = null;
+    audio.onerror = null;
+    audio.pause();
+    audio.removeAttribute("src");
+    audio.load();
+  }
+
+  function clearBogoPracticeRoll(updateState = true) {
+    bogoPracticeRollRunRef.current += 1;
+    if (bogoPracticeRollIntervalRef.current !== null) {
+      window.clearInterval(bogoPracticeRollIntervalRef.current);
+      bogoPracticeRollIntervalRef.current = null;
+    }
+    if (updateState) setBogoPracticeRolling(false);
+  }
+
+  function clearBogoPracticeInteraction(updateState = true) {
+    clearBogoPracticeRoll(updateState);
+    clearBogoPracticeAudio();
+    if (updateState) setBogoPracticeBusy(false);
+  }
+
+  function playBogoPracticeCasinoSound(
+    sound: BogoPracticeCasinoSound,
+    onSettled: () => void,
+  ) {
+    clearBogoPracticeAudio();
+    const soundRun = bogoPracticeAudioRunRef.current + 1;
+    bogoPracticeAudioRunRef.current = soundRun;
+    const { source, fallbackDuration } = BOGO_PRACTICE_CASINO_SOUNDS[sound];
+    let settled = false;
+
+    const settle = () => {
+      if (settled || bogoPracticeAudioRunRef.current !== soundRun) return;
+      settled = true;
+      if (bogoPracticeAudioFallbackTimerRef.current !== null) {
+        window.clearTimeout(bogoPracticeAudioFallbackTimerRef.current);
+        bogoPracticeAudioFallbackTimerRef.current = null;
+      }
+
+      const audio = bogoPracticeAudioRef.current;
+      if (audio) {
+        audio.onended = null;
+        audio.onerror = null;
+        bogoPracticeAudioRef.current = null;
+      }
+      onSettled();
+    };
+
+    // A silent volume still preserves the same paced visual lesson; it simply
+    // skips constructing a media player. The timer also acts as the watchdog
+    // when a browser never delivers an `ended` event for a failed clip.
+    if (soundVolumeRef.current > 0) {
+      const audio = new Audio(source);
+      audio.preload = "auto";
+      audio.volume = Math.max(0, Math.min(1, soundVolumeRef.current / 100));
+      audio.onended = settle;
+      // Let the watchdog retain the intended visual beat if a static asset
+      // fails to decode or a browser rejects late asynchronous playback.
+      audio.onerror = () => undefined;
+      bogoPracticeAudioRef.current = audio;
+      void audio.play().catch(() => undefined);
+    }
+
+    bogoPracticeAudioFallbackTimerRef.current = window.setTimeout(
+      settle,
+      fallbackDuration,
+    );
+  }
+
   function clearPracticeCelebration() {
     // Bump the generation even when there is no visible overlay. That makes a
     // delayed AudioContext resume from a just-reset lesson harmless.
@@ -2827,7 +2940,7 @@ export default function Home() {
     setPracticeCelebrationPhase("hidden");
   }
 
-  function startPracticeCelebration() {
+  function startPracticeCelebration({ playVictorySound = true } = {}) {
     if (practiceCompletionRef.current) return;
 
     practiceCompletionRef.current = true;
@@ -2835,7 +2948,7 @@ export default function Home() {
     const celebrationRun = practiceCelebrationRunRef.current;
     setPracticeCelebrationPhase("visible");
 
-    if (soundEnabled) {
+    if (soundEnabled && playVictorySound) {
       const context = ensureAudioContext();
       void context
         .resume()
@@ -2896,6 +3009,7 @@ export default function Home() {
 
   function completePracticeWalkthrough(
     completionFeedback = "Fully sorted—this completes the walkthrough.",
+    options: { playVictorySound?: boolean } = {},
   ) {
     clearPracticeUndo();
     clearPracticeAdvance();
@@ -2910,28 +3024,70 @@ export default function Home() {
     practiceDropTargetRef.current = null;
     setPracticeSolved(true);
     setPracticeFeedback(completionFeedback);
-    startPracticeCelebration();
+    startPracticeCelebration(options);
+  }
+
+  function beginBogoPracticeCasino() {
+    if (!isBogoPractice || bogoPracticeBusy) return;
+
+    resetPractice("bogo");
+    setBogoPracticeEntered(true);
+    setBogoPracticeBusy(true);
+    setPracticeFeedback("Welcome to the casino. The table opens as soon as the intro finishes.");
+    playBogoPracticeCasinoSound("entry", () => {
+      setBogoPracticeBusy(false);
+      setPracticeFeedback("The table is open. Gamble to shuffle all four blocks.");
+    });
   }
 
   function handleBogoPracticeGamble() {
-    if (!isBogoPractice || practiceFinished) return;
+    if (!isBogoPractice || !bogoPracticeEntered || practiceFinished || bogoPracticeBusy) return;
 
-    const nextValues = shufflePracticeValues(practiceValues);
+    const finalValues = shufflePracticeValues(practiceValues);
     const nextAttempts = bogoPracticeAttempts + 1;
+    const won = isPracticeRowFinished(finalValues, BOGO_PRACTICE_INITIAL_VALUES);
+    const rollRun = bogoPracticeRollRunRef.current + 1;
 
-    setPracticeValues(nextValues);
+    clearBogoPracticeRoll();
+    bogoPracticeRollRunRef.current = rollRun;
+    setBogoPracticeBusy(true);
+    setBogoPracticeRolling(true);
     setBogoPracticeAttempts(nextAttempts);
-    if (isPracticeRowFinished(nextValues, BOGO_PRACTICE_INITIAL_VALUES)) {
-      completePracticeWalkthrough(
-        "Lucky! Gamble " + String(nextAttempts) + " landed on the one sorted order.",
-      );
-      return;
-    }
+    setPracticeFeedback("Shuffling every possible order…");
 
-    setPracticeSolved(false);
-    setPracticeFeedback(
-      "Gamble " + String(nextAttempts) + " was not sorted. One order out of 24 wins—try again.",
+    const rollValues = () => {
+      if (bogoPracticeRollRunRef.current !== rollRun) return;
+      // Keep the four physical slots in place while their faces rapidly roll
+      // through fresh permutations. The real result is held until the clip
+      // finishes, so the final order has a clear landing moment.
+      setPracticeValues(shufflePracticeValues(BOGO_PRACTICE_INITIAL_VALUES));
+    };
+
+    rollValues();
+    bogoPracticeRollIntervalRef.current = window.setInterval(
+      rollValues,
+      BOGO_PRACTICE_ROLL_INTERVAL,
     );
+    playBogoPracticeCasinoSound("shuffle", () => {
+      if (bogoPracticeRollRunRef.current !== rollRun) return;
+      clearBogoPracticeRoll();
+      setPracticeValues(finalValues);
+
+      if (won) {
+        completePracticeWalkthrough(
+          "Lucky! Gamble " + String(nextAttempts) + " landed on the one sorted order.",
+          { playVictorySound: false },
+        );
+        playBogoPracticeCasinoSound("success", () => setBogoPracticeBusy(false));
+        return;
+      }
+
+      setPracticeSolved(false);
+      setPracticeFeedback(
+        "Gamble " + String(nextAttempts) + " was not sorted. One order out of 24 wins—try again.",
+      );
+      playBogoPracticeCasinoSound("fail", () => setBogoPracticeBusy(false));
+    });
   }
 
   function resetPractice(nextAlgorithm = algorithm) {
@@ -2939,6 +3095,7 @@ export default function Home() {
     clearPracticeAdvance();
     clearPracticeClickSuppression();
     clearPracticeCelebration();
+    clearBogoPracticeInteraction();
     practiceCompletionRef.current = false;
     const firstStep = normalizePracticeSteps(ALGORITHM_DETAILS[nextAlgorithm].practice)[0];
     const isResettingBogoPractice = nextAlgorithm === "bogo";
@@ -2952,6 +3109,7 @@ export default function Home() {
     practicePointerRef.current = null;
     practiceDropTargetRef.current = null;
     setPracticeSolved(false);
+    setBogoPracticeEntered(false);
     setBogoPracticeAttempts(0);
     setPracticeFeedback(null);
     setPracticeValues(
@@ -4183,32 +4341,50 @@ export default function Home() {
               <div>
                 <p className="eyebrow">TRY IT YOURSELF</p>
                 <h3 id="practice-title">
-                  {isBogoPractice ? "Take a chance and see the rule." : "Move the blocks and see the rule."}
+                  {isBogoPractice
+                    ? bogoPracticeEntered
+                      ? "Take a chance and see the rule."
+                      : "Enter the casino."
+                    : "Move the blocks and see the rule."}
                 </h3>
               </div>
               <span>
                 {practiceFinished
                   ? "complete"
                   : isBogoPractice
-                    ? String(bogoPracticeAttempts) + " gambles"
+                    ? bogoPracticeEntered
+                      ? bogoPracticeRolling
+                        ? "shuffling"
+                        : bogoPracticeBusy
+                          ? "checking"
+                          : String(bogoPracticeAttempts) + " gambles"
+                      : "casino closed"
                     : "step " + String(practiceStepIndex + 1) + " of " + String(practiceSteps.length)}
               </span>
             </div>
             <p className="practice-lab__prompt">
               {practiceFinished
                 ? isBogoPractice
-                  ? "Chance found the only sorted order. Reset it to take another tiny gamble."
+                  ? "Chance found the only sorted order. Gamble again to start a fresh casino run."
                   : "You completed this small walkthrough. Restart it any time to practice the moves again."
-                : currentPractice.prompt}
+                : isBogoPractice && !bogoPracticeEntered
+                  ? "Open the four-block table, then let chance decide whether every value lands in order."
+                  : currentPractice.prompt}
             </p>
-            {isBogoPractice && (
+            {isBogoPractice && bogoPracticeEntered && (
               <div className="practice-bogo-status" role="status" aria-live="polite">
                 <span>GAMBLES</span>
                 <strong>{bogoPracticeAttempts}</strong>
                 <small>
                   {practiceFinished
-                    ? "Lucky sorted order found"
-                    : "One sorted order out of 24 possible rows"}
+                    ? bogoPracticeBusy
+                      ? "Winning order found — success sound playing"
+                      : "Lucky sorted order found"
+                    : bogoPracticeRolling
+                      ? "Cards are rolling through fresh orders"
+                      : bogoPracticeBusy
+                        ? "Waiting for the casino sound to finish"
+                        : "One sorted order out of 24 possible rows"}
                 </small>
               </div>
             )}
@@ -4267,7 +4443,9 @@ export default function Home() {
             )}
             <p className="practice-lab__help">
               {isBogoPractice
-                ? "Gamble runs one completely fresh Fisher-Yates shuffle. No block is draggable because Bogo Sort does not make a strategic move—it only keeps rolling until the entire row happens to be ordered."
+                ? bogoPracticeEntered
+                  ? "Gamble runs one completely fresh Fisher-Yates shuffle. No block is draggable because Bogo Sort does not make a strategic move—it only keeps rolling until the entire row happens to be ordered."
+                  : "Enter the casino to begin this four-value chance experiment. The table will play its own sound effects, using the same volume setting as the visualizer."
                 : isPdqPractice
                 ? "Gold is PDQ's sampled pivot and cyan badges show the values it inspected. Only this step's safe outcome stays; this zoomed branch then uses a tiny-piece cleanup when it is small enough."
                 : isQuickPractice
@@ -4280,36 +4458,68 @@ export default function Home() {
               className={
                 "practice-board " +
                 (isBogoPractice ? "practice-board--bogo " : "") +
+                (isBogoPractice && !bogoPracticeEntered ? "practice-board--bogo-entry " : "") +
+                (bogoPracticeRolling ? "practice-board--bogo-rolling " : "") +
                 (practiceDraggingId ? "practice-board--dragging " : "") +
                 (practiceFinished ? "practice-board--complete" : "")
               }
               ref={isBogoPractice ? undefined : practiceBoardRef}
-              role={isBogoPractice ? "list" : "group"}
+              role={isBogoPractice && bogoPracticeEntered ? "list" : "group"}
+              aria-busy={isBogoPractice ? bogoPracticeBusy : undefined}
               aria-label={
                 isBogoPractice
-                  ? "Bogo sort four-value gamble row"
+                  ? bogoPracticeEntered
+                    ? "Bogo sort four-value gamble row"
+                    : "Bogo sort casino entry"
                   : algorithmLabel + " interactive practice blocks"
               }
             >
               {isBogoPractice ? (
-                practiceValues.map((value) => (
-                  <div
-                    className={
-                      "practice-block practice-block--bogo " +
-                      (practiceFinished ? "practice-block--completed" : "")
-                    }
-                    key={value}
-                    role="listitem"
-                    aria-label={
-                      "Value " + value + (practiceFinished ? ", fixed in its final position" : "")
-                    }
-                  >
-                    <span className="practice-block__value">{value}</span>
-                    {practiceFinished && (
-                      <span className="practice-block__badge practice-block__badge--fixed">fixed</span>
-                    )}
+                !bogoPracticeEntered ? (
+                  <div className="practice-bogo-entry">
+                    <span className="practice-bogo-entry__eyebrow">FOUR BLOCKS · 24 ORDERS</span>
+                    <strong>One order wins.</strong>
+                    <p>Enter to open the table and hear the casino intro.</p>
+                    <button
+                      className="button button--casino-enter"
+                      type="button"
+                      onClick={beginBogoPracticeCasino}
+                      disabled={bogoPracticeBusy}
+                      aria-describedby="bogo-practice-entry-help"
+                    >
+                      <span>Enter the casino</span>
+                      <small>open the four-block table</small>
+                    </button>
+                    <span className="sr-only" id="bogo-practice-entry-help">
+                      Opens the Bogo Sort practice table and plays its casino entry sound at the selected volume.
+                    </span>
                   </div>
-                ))
+                ) : (
+                  practiceValues.map((value, index) => (
+                    <div
+                      className={
+                        "practice-block practice-block--bogo " +
+                        (bogoPracticeRolling ? "practice-block--bogo-rolling " : "") +
+                        (practiceFinished ? "practice-block--completed" : "")
+                      }
+                      key={"bogo-slot-" + index}
+                      role="listitem"
+                      aria-label={
+                        "Value " + value +
+                        (bogoPracticeRolling
+                          ? ", rolling"
+                          : practiceFinished
+                            ? ", fixed in its final position"
+                            : "")
+                      }
+                    >
+                      <span className="practice-block__value">{value}</span>
+                      {practiceFinished && (
+                        <span className="practice-block__badge practice-block__badge--fixed">fixed</span>
+                      )}
+                    </div>
+                  ))
+                )
               ) : (
                 <>
               {practiceValues.map((value, index) => {
@@ -4435,29 +4645,52 @@ export default function Home() {
             </div>
             <div className="practice-lab__actions">
               {isBogoPractice ? (
-                <>
-                  {!practiceFinished && (
-                    <button
-                      className="button button--gamble"
-                      type="button"
-                      onClick={handleBogoPracticeGamble}
-                      aria-describedby="bogo-practice-gamble-help"
-                    >
-                      <span>Gamble</span>
-                      <small>shuffle all 4 blocks</small>
-                    </button>
-                  )}
-                  <button
-                    className={practiceFinished ? "button button--secondary" : "text-button"}
-                    type="button"
-                    onClick={() => resetPractice()}
-                  >
-                    {practiceFinished ? "Gamble again" : "Reset gamble"}
-                  </button>
-                  <span className="sr-only" id="bogo-practice-gamble-help">
-                    Each gamble makes one new random order. The lesson completes only when all four values are in ascending order.
-                  </span>
-                </>
+                bogoPracticeEntered ? (
+                  <>
+                    {!practiceFinished && (
+                      <button
+                        className="button button--gamble"
+                        type="button"
+                        onClick={handleBogoPracticeGamble}
+                        disabled={bogoPracticeBusy}
+                        aria-describedby="bogo-practice-gamble-help"
+                      >
+                        <span>{bogoPracticeRolling ? "Shuffling…" : bogoPracticeBusy ? "Checking…" : "Gamble"}</span>
+                        <small>
+                          {bogoPracticeRolling
+                            ? "the cards are rolling"
+                            : bogoPracticeBusy
+                              ? "wait for the casino sound"
+                              : "shuffle all 4 blocks"}
+                        </small>
+                      </button>
+                    )}
+                    {!practiceFinished && (
+                      <button
+                        className="text-button"
+                        type="button"
+                        onClick={() => resetPractice()}
+                        disabled={bogoPracticeBusy}
+                      >
+                        Leave casino
+                      </button>
+                    )}
+                    {practiceFinished && (
+                      <button
+                        className="button button--secondary"
+                        type="button"
+                        onClick={beginBogoPracticeCasino}
+                        disabled={bogoPracticeBusy}
+                        aria-describedby="bogo-practice-gamble-help"
+                      >
+                        Gamble again
+                      </button>
+                    )}
+                    <span className="sr-only" id="bogo-practice-gamble-help">
+                      Each gamble rolls during the shuffle sound, then plays a result sound. The button remains unavailable until both sounds have finished.
+                    </span>
+                  </>
+                ) : null
               ) : practiceFinished ? (
                 <button className="button button--secondary" type="button" onClick={() => resetPractice()}>
                   Restart walkthrough
