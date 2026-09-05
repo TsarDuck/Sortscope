@@ -13,16 +13,7 @@ import {
 import {
   BOGO_MAX_ATTEMPTS,
   type BogoSession,
-  analyzeBubbleSort,
   advanceBogoSession,
-  analyzeCocktailSort,
-  analyzeHeapSort,
-  analyzeInsertionSort,
-  analyzeMergeSort,
-  analyzePdqSort,
-  analyzePowerSort,
-  analyzeQuickSort,
-  analyzeSelectionSort,
   buildCocktailSteps,
   buildBubbleSteps,
   buildHeapSortSteps,
@@ -65,7 +56,6 @@ type StepPhase =
   | "complete";
 
 type BenchmarkPattern = "random" | "reverse" | "nearly-sorted";
-type BenchmarkView = "theory" | "measured";
 type BenchmarkTab = "table" | "lines";
 
 type BlockPracticeStep = {
@@ -133,7 +123,6 @@ const COMPLETION_SWEEP_REFERENCE_NOTE_COUNT = 22;
 const COMPLETION_SWEEP_AUDIO_VISUAL_LEAD = 24;
 const COMPLETION_SWEEP_RELEASE_TAIL = 70;
 const BOGO_COMPLETION_SWEEP_DELAY = 720;
-const BENCHMARK_SIZES = [16, 32, 64, 128, 256];
 const THEORY_BENCHMARK_SIZES = [256, 1_024, 4_096, 16_384, 65_536, 262_144, 1_048_576];
 const BENCHMARK_ALGORITHMS = [
   { key: "bubble", label: "Bubble sort", className: "bubble" },
@@ -1134,33 +1123,6 @@ function getPracticeTargetDistance(values: number[], target: number[]) {
   return distance;
 }
 
-function makeBenchmarkArray(length: number, pattern: BenchmarkPattern) {
-  const values = Array.from({ length }, (_, index) => index + 1);
-
-  if (pattern === "reverse") {
-    return values.reverse();
-  }
-
-  if (pattern === "nearly-sorted") {
-    const swapCount = Math.max(2, Math.floor(length * 0.08));
-    for (let index = 0; index < swapCount; index += 1) {
-      const left = (index * 17 + 3) % length;
-      const right = (index * 29 + 7) % length;
-      [values[left], values[right]] = [values[right], values[left]];
-    }
-    return values;
-  }
-
-  let seed = length * 7919 + 17;
-  for (let index = values.length - 1; index > 0; index -= 1) {
-    seed = (seed * 1664525 + 1013904223) >>> 0;
-    const swapIndex = seed % (index + 1);
-    [values[index], values[swapIndex]] = [values[swapIndex], values[index]];
-  }
-
-  return values;
-}
-
 function formatCount(value: number) {
   return Math.round(value).toLocaleString("en-US");
 }
@@ -1169,20 +1131,6 @@ function formatGrowthSize(value: number) {
   if (value >= 1_000_000) return (value / 1_000_000).toFixed(2).replace(/\.00$/, "") + "m";
   if (value >= 1_000) return Math.round(value / 1_000) + "k";
   return String(value);
-}
-
-function getWorkEstimate(metrics: {
-  comparisons: number;
-  rankComparisons: number;
-  writes: number;
-  schedulingOperations?: number;
-}) {
-  return (
-    metrics.comparisons +
-    metrics.rankComparisons +
-    metrics.writes +
-    (metrics.schedulingOperations ?? 0)
-  );
 }
 
 function buildInsertionSteps(source: number[]): SortStep[] {
@@ -1486,7 +1434,6 @@ export default function Home() {
   const [bogoRunsUntilSolved, setBogoRunsUntilSolved] = useState(false);
   const [benchmarkPattern, setBenchmarkPattern] =
     useState<BenchmarkPattern>("random");
-  const [benchmarkView, setBenchmarkView] = useState<BenchmarkView>("theory");
   const [benchmarkTab, setBenchmarkTab] = useState<BenchmarkTab>("table");
   const [visibleGrowthAlgorithms, setVisibleGrowthAlgorithms] = useState(
     () => ({ ...DEFAULT_GROWTH_ALGORITHM_VISIBILITY }),
@@ -1629,37 +1576,6 @@ export default function Home() {
   const minimumArraySize = 4;
   const maximumArraySize = isBogo ? BOGO_MAX_ARRAY_SIZE : 256;
   const maximumSpeed = DISPLAY_SPEED_MAX;
-  const benchmarkData = useMemo(
-    () =>
-      BENCHMARK_SIZES.map((size) => {
-        const benchmarkValues = makeBenchmarkArray(size, benchmarkPattern);
-        const bubble = analyzeBubbleSort(benchmarkValues);
-        const insertion = analyzeInsertionSort(benchmarkValues);
-        const cocktail = analyzeCocktailSort(benchmarkValues);
-        const selection = analyzeSelectionSort(benchmarkValues);
-        const heap = analyzeHeapSort(benchmarkValues);
-        const quick = analyzeQuickSort(benchmarkValues);
-        const pdq = analyzePdqSort(benchmarkValues);
-        const merge = analyzeMergeSort(benchmarkValues);
-        const powersort = analyzePowerSort(benchmarkValues);
-
-        return {
-          size,
-          work: {
-            bubble: getWorkEstimate(bubble),
-            insertion: getWorkEstimate(insertion),
-            cocktail: getWorkEstimate(cocktail),
-            selection: getWorkEstimate(selection),
-            heap: getWorkEstimate(heap),
-            quick: getWorkEstimate(quick),
-            pdq: getWorkEstimate(pdq),
-            merge: getWorkEstimate(merge),
-            powersort: getWorkEstimate(powersort),
-          } satisfies BenchmarkWork,
-        };
-      }),
-    [benchmarkPattern],
-  );
   const theoreticalBenchmarkData = useMemo(
     () =>
       THEORY_BENCHMARK_SIZES.map((size) => ({
@@ -1673,18 +1589,17 @@ export default function Home() {
       })),
     [benchmarkPattern],
   );
-  const displayedBenchmarkData = benchmarkView === "theory" ? theoreticalBenchmarkData : benchmarkData;
   const orderedBenchmarkAlgorithms = useMemo(() => {
-    const finalColumn = displayedBenchmarkData.at(-1)?.work;
+    const finalColumn = theoreticalBenchmarkData.at(-1)?.work;
 
     return [...BENCHMARK_ALGORITHMS].sort((left, right) => {
       const difference = (finalColumn?.[right.key] ?? 0) - (finalColumn?.[left.key] ?? 0);
       return difference || BENCHMARK_ALGORITHMS.indexOf(left) - BENCHMARK_ALGORITHMS.indexOf(right);
     });
-  }, [displayedBenchmarkData]);
+  }, [theoreticalBenchmarkData]);
   const benchmarkMatrixStyle = {
-    "--benchmark-columns": displayedBenchmarkData.length,
-    minWidth: String(180 + displayedBenchmarkData.length * 118) + "px",
+    "--benchmark-columns": theoreticalBenchmarkData.length,
+    minWidth: String(180 + theoreticalBenchmarkData.length * 118) + "px",
   } as CSSProperties;
   const growthGraphDomain = useMemo(() => {
     const modeledValues = theoreticalBenchmarkData.flatMap((entry) => Object.values(entry.work));
@@ -3774,26 +3689,12 @@ export default function Home() {
               <p className="eyebrow">EFFICIENCY LAB</p>
               <h2 id="comparison-title">Compare the work behind the motion.</h2>
               <p>
-                Every deterministic algorithm receives the same permutation of 1 through n for the
-                selected arrangement. Inspect counted work through 256 values, or trace illustrative
-                growth from n=256 to n=1,048,576. Bogo Sort stays out because its expected work grows
-                factorially.
+                The selected arrangement feeds the same illustrative workload model for every
+                deterministic algorithm, from n=256 to n=1,048,576. Bogo Sort stays out because its
+                expected work grows factorially.
               </p>
             </div>
             <div className="benchmark-controls">
-              {benchmarkTab === "table" && (
-                <label className="benchmark-select">
-                  <span>Table data</span>
-                  <select
-                    value={benchmarkView}
-                    onChange={(event) => setBenchmarkView(event.target.value as BenchmarkView)}
-                    aria-label="Efficiency table data"
-                  >
-                    <option value="theory">Illustrative growth to n=1,048,576</option>
-                    <option value="measured">Counted work through n=256</option>
-                  </select>
-                </label>
-              )}
               <label className="benchmark-select">
                 <span>Test arrangement</span>
                 <select
@@ -3839,26 +3740,22 @@ export default function Home() {
               <div
                 className="benchmark-chart"
                 role="img"
-                aria-label={
-                  benchmarkView === "theory"
-                    ? "Illustrative work growth, ordered from highest to lowest modeled work, for " + benchmarkPattern + " arrays from 256 through 1,048,576 values."
-                    : "Counted work, ordered from highest to lowest counted work, for " + benchmarkPattern + " arrays from 16 through 256 values."
-                }
+                aria-label={"Illustrative work growth, ordered from highest to lowest modeled work, for " + benchmarkPattern + " arrays from 256 through 1,048,576 values."}
               >
                 <p className="benchmark-chart__note">
-                  {benchmarkView === "theory"
-                    ? "This view illustrates each algorithm's growth shape for the selected arrangement. Meter length uses a log scale so O(n log n) curves remain visible next to quadratic ones; the rounded number is a relative model unit, not a timed result or an exact operation total."
-                    : "Each column applies this visualizer's counted-work model at that exact size: value comparisons and primary writes. Meter length uses a log scale so faster algorithms remain visible; the rounded number is not browser runtime."}
+                  This view illustrates each algorithm's growth shape for the selected arrangement.
+                  Meter length uses a log scale so O(n log n) curves remain visible next to quadratic
+                  ones; the rounded number is a relative model unit, not a timed result or an exact
+                  operation total.
                 </p>
                 <p className="benchmark-chart__order">
-                  {benchmarkView === "theory"
-                    ? "Rows run from most modeled work at the top to least at the bottom, based on the largest n."
-                    : "Rows run from highest counted work at the top to lowest at the bottom, based on the rightmost size."}
+                  Rows run from most modeled work at the top to least at the bottom, based on the
+                  largest n.
                 </p>
                 <div className="benchmark-matrix" style={benchmarkMatrixStyle}>
                   <div className="benchmark-matrix__header">
                     <span>Algorithm</span>
-                    {displayedBenchmarkData.map((entry) => <span key={entry.size}>n={formatCount(entry.size)}</span>)}
+                    {theoreticalBenchmarkData.map((entry) => <span key={entry.size}>n={formatCount(entry.size)}</span>)}
                   </div>
                   {orderedBenchmarkAlgorithms.map((benchmarkAlgorithm) => (
                     <div className="benchmark-matrix__row" key={benchmarkAlgorithm.key}>
@@ -3866,7 +3763,7 @@ export default function Home() {
                         <i className={"benchmark-legend__swatch benchmark-legend__swatch--" + benchmarkAlgorithm.className} />
                         {benchmarkAlgorithm.label}
                       </span>
-                      {displayedBenchmarkData.map((entry) => {
+                      {theoreticalBenchmarkData.map((entry) => {
                         const work = entry.work[benchmarkAlgorithm.key];
                         const columnMaximum = Math.max(1, ...Object.values(entry.work));
                         const ratio = Math.log1p(work) / Math.log1p(columnMaximum);
