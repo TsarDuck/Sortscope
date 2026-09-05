@@ -17,19 +17,20 @@ import {
   analyzeCocktailSort,
   analyzeHeapSort,
   analyzeInsertionSort,
-  analyzeRangeGuardMeanSort,
   analyzeMergeSort,
+  analyzePdqSort,
+  analyzePowerSort,
   analyzeQuickSort,
   analyzeSelectionSort,
   buildCocktailSteps,
   buildBubbleSteps,
   buildHeapSortSteps,
-  buildRangeGuardMeanSteps,
   buildMergeSortSteps,
+  buildPdqSortSteps,
+  buildPowerSortSteps,
   buildQuickSortSteps,
   buildSelectionSteps,
   createBogoSession,
-  formatMean,
   getBogoSessionStep,
 } from "./lib/sorting";
 
@@ -40,9 +41,10 @@ type AlgorithmId =
   | "selection"
   | "heap"
   | "quick"
+  | "pdq"
   | "merge"
-  | "bogo"
-  | "range-guard-mean";
+  | "powersort"
+  | "bogo";
 type RunState = "ready" | "running" | "paused" | "complete";
 type StepPhase =
   | "ready"
@@ -51,26 +53,15 @@ type StepPhase =
   | "shift"
   | "insert"
   | "split"
-  | "average"
-  | "reorder"
-  | "guard"
-  | "eject"
-  | "polish"
   | "swap"
   | "sweep"
   | "heapify"
   | "merge"
+  | "run"
+  | "power"
   | "shuffle"
   | "limited"
   | "complete";
-
-type MeanGroup = {
-  id: number;
-  start: number;
-  end: number;
-  mean: number;
-  rank: number;
-};
 
 type BenchmarkPattern = "random" | "reverse" | "nearly-sorted";
 type BenchmarkView = "theory" | "measured";
@@ -81,25 +72,15 @@ type BlockPracticeStep = {
   target: number[];
   hint: string;
   kind?: "blocks";
+  /** Quick Sort's currently parked pivot, when this is a pivot lesson step. */
+  pivot?: number;
+  /** Inclusive indices for the only sub-array the current pivot may affect. */
+  activeRange?: [number, number];
+  /** Values whose final positions are already proven by earlier pivots. */
+  settled?: number[];
 };
 
-type PartitionPracticeStep = {
-  prompt: string;
-  partitions: Array<{ id: string; values: number[]; mean: number }>;
-  targetOrder: string[];
-  hint: string;
-  kind: "partitions";
-};
-
-type MedianPracticeStep = {
-  prompt: string;
-  values: number[];
-  targetMedian: number;
-  hint: string;
-  kind: "median";
-};
-
-type PracticeStep = BlockPracticeStep | PartitionPracticeStep | MedianPracticeStep;
+type PracticeStep = BlockPracticeStep;
 
 type PracticeMoveResult = "solved" | "progress" | "wrong";
 
@@ -116,12 +97,11 @@ type SortStep = {
   comparisons: number;
   writes: number;
   message: string;
-  groups?: MeanGroup[];
-  outliers?: number[];
   settled?: number[];
   visualSettled?: number[];
   rangeStart?: number;
   rangeEnd?: number;
+  nodePower?: number;
 };
 
 const AUDIBLE_PHASES: StepPhase[] = [
@@ -133,16 +113,16 @@ const AUDIBLE_PHASES: StepPhase[] = [
   "heapify",
   "merge",
   "shuffle",
-  "reorder",
-  "eject",
-  "polish",
 ];
 
 const DEFAULT_ARRAY_SIZE = 24;
 const DEFAULT_SPEED = 62;
+const MAX_SPEED = 200;
 const BOGO_MAX_ARRAY_SIZE = 24;
-const COMPLETION_SWEEP_MIN_DURATION = 1_050;
-const COMPLETION_SWEEP_MILLISECONDS_PER_BAR = 18;
+// A dense, bar-only verification scan needs enough time for the eye to read
+// the order, but not so much that a 256-value finish becomes its own scene.
+const COMPLETION_SWEEP_MIN_DURATION = 850;
+const COMPLETION_SWEEP_MILLISECONDS_PER_BAR = 10;
 const COMPLETION_SWEEP_AUDIO_VISUAL_LEAD = 24;
 const COMPLETION_SWEEP_RELEASE_TAIL = 70;
 const BOGO_COMPLETION_SWEEP_DELAY = 720;
@@ -155,8 +135,9 @@ const BENCHMARK_ALGORITHMS = [
   { key: "selection", label: "Selection sort", className: "selection" },
   { key: "heap", label: "Heap sort", className: "heap" },
   { key: "quick", label: "Quick sort", className: "quick" },
+  { key: "pdq", label: "PDQ sort", className: "pdq" },
   { key: "merge", label: "Merge sort", className: "merge" },
-  { key: "rangeGuardMean", label: "Adaptive Mean sort", className: "range-guard" },
+  { key: "powersort", label: "Powersort", className: "powersort" },
 ] as const;
 type BenchmarkAlgorithm = (typeof BENCHMARK_ALGORITHMS)[number]["key"];
 type BenchmarkWork = Record<BenchmarkAlgorithm, number>;
@@ -208,13 +189,12 @@ function getTheoreticalWork(
         : pattern === "reverse"
           ? pairWork * 1.25
           : pairWork;
+    case "pdq":
+      return pattern === "nearly-sorted" ? 1.15 * n : 1.55 * n * logN;
     case "merge":
       return 2 * n * logN;
-    case "rangeGuardMean":
-      // Repeated mean scouts, range fences, and outlier ejections remain in
-      // the n log n family, but carry more teaching-oriented setup work than
-      // Merge or Heap. This is an illustrative growth shape, not a timing.
-      return 3.1 * n * logN + 2 * n;
+    case "powersort":
+      return pattern === "nearly-sorted" ? 1.15 * n : 2.05 * n * logN;
   }
 }
 
@@ -236,6 +216,10 @@ function getCompletionSweepDuration(valueCount: number) {
 }
 
 function getBogoSlowMotionDelay(speed: number) {
+  // Bogo already switches to its CPU-batched fast mode at 100. Speeds above
+  // that point should not make a bogus negative delay or promise more than
+  // the browser can actually shuffle.
+  if (speed >= 100) return 0;
   return Math.round(440 * (1 - (speed - 1) / 99) ** 3);
 }
 
@@ -292,19 +276,28 @@ function formatBogoElapsedTime(milliseconds: number) {
   const totalMilliseconds = Math.max(0, Math.round(milliseconds));
 
   if (totalMilliseconds < 60_000) {
-    const seconds = totalMilliseconds / 1_000;
-    return (seconds < 10 ? seconds.toFixed(1) : Math.round(seconds).toString()) + "s";
+    return (totalMilliseconds / 1_000).toFixed(3) + "s";
   }
 
   const totalSeconds = Math.floor(totalMilliseconds / 1_000);
+  const millisecondsRemainder = totalMilliseconds % 1_000;
   const days = Math.floor(totalSeconds / 86_400);
   const hours = Math.floor((totalSeconds % 86_400) / 3_600);
   const minutes = Math.floor((totalSeconds % 3_600) / 60);
   const seconds = totalSeconds % 60;
+  const secondsWithMilliseconds =
+    String(seconds).padStart(2, "0") + "." + String(millisecondsRemainder).padStart(3, "0") + "s";
 
-  if (days > 0) return days + "d " + hours + "h " + minutes + "m";
-  if (hours > 0) return hours + "h " + String(minutes).padStart(2, "0") + "m " + String(seconds).padStart(2, "0") + "s";
-  return minutes + "m " + String(seconds).padStart(2, "0") + "s";
+  if (days > 0) {
+    return (
+      days + "d " + String(hours).padStart(2, "0") + "h " +
+      String(minutes).padStart(2, "0") + "m " + secondsWithMilliseconds
+    );
+  }
+  if (hours > 0) {
+    return hours + "h " + String(minutes).padStart(2, "0") + "m " + secondsWithMilliseconds;
+  }
+  return minutes + "m " + secondsWithMilliseconds;
 }
 
 type AlgorithmInsight = {
@@ -686,34 +679,137 @@ const ALGORITHM_DETAILS: Record<AlgorithmId, AlgorithmDetails> = {
     ],
     practice: [
       {
-        prompt: "Use the rightmost pivot, 4, to partition this eight-value row.",
+        prompt: "Pivot 4 is parked on the right. Move the smaller value 1 into the first open spot on its left side.",
         start: [6, 1, 7, 3, 8, 2, 5, 4],
-        target: [1, 3, 2, 4, 8, 7, 5, 6],
-        hint: "Move 1, then 3, then 2 into the left area before placing pivot 4 after them.",
+        target: [1, 6, 7, 3, 8, 2, 5, 4],
+        pivot: 4,
+        activeRange: [0, 7],
+        settled: [],
+        hint: "1 is no larger than pivot 4, so trade it with the first value, 6. Leave the highlighted pivot parked for now.",
       },
       {
-        prompt: "Work only inside the left range [1, 3, 2] and place pivot 2.",
+        prompt: "Keep pivot 4 parked. Move 3 into the next open spot on its smaller-value side.",
+        start: [1, 6, 7, 3, 8, 2, 5, 4],
+        target: [1, 3, 7, 6, 8, 2, 5, 4],
+        pivot: 4,
+        activeRange: [0, 7],
+        settled: [],
+        hint: "3 also belongs before 4. Swap 3 with 6, the next value in the not-yet-partitioned area.",
+      },
+      {
+        prompt: "There is one more smaller value for pivot 4: move 2 into the final open spot on its left.",
+        start: [1, 3, 7, 6, 8, 2, 5, 4],
+        target: [1, 3, 2, 6, 8, 7, 5, 4],
+        pivot: 4,
+        activeRange: [0, 7],
+        settled: [],
+        hint: "2 belongs before 4. It trades with 7 to finish the smaller-value side [1, 3, 2].",
+      },
+      {
+        prompt: "Now place pivot 4 directly after its smaller-value side. Its position becomes permanent.",
+        start: [1, 3, 2, 6, 8, 7, 5, 4],
+        target: [1, 3, 2, 4, 8, 7, 5, 6],
+        pivot: 4,
+        activeRange: [0, 7],
+        settled: [],
+        hint: "Swap the highlighted pivot 4 with 6. Everything left of it is smaller; everything right is larger.",
+      },
+      {
+        prompt: "A new smaller range opens on the left. Its new pivot is 2—place it between 1 and 3.",
         start: [1, 3, 2, 4, 8, 7, 5, 6],
         target: [1, 2, 3, 4, 8, 7, 5, 6],
-        hint: "1 stays left of pivot 2; swap the pivot into the gap before 3.",
+        pivot: 2,
+        activeRange: [0, 2],
+        settled: [4],
+        hint: "1 is already on pivot 2's smaller side. Swap the highlighted 2 with 3 to lock it in place.",
       },
       {
-        prompt: "Now partition the right range with pivot 6.",
+        prompt: "The left side is finished. In the right range, pivot 6 is parked on the right—move 5 to its smaller side.",
         start: [1, 2, 3, 4, 8, 7, 5, 6],
-        target: [1, 2, 3, 4, 5, 6, 8, 7],
-        hint: "5 belongs on the pivot's left; then place 6 immediately after it.",
+        target: [1, 2, 3, 4, 5, 7, 8, 6],
+        pivot: 6,
+        activeRange: [4, 7],
+        settled: [1, 2, 3, 4],
+        hint: "Only 5 is no larger than pivot 6. Swap 5 with the first active value, 8.",
       },
       {
-        prompt: "Finish the final two-value right range.",
+        prompt: "Place pivot 6 immediately after 5. That locks the next pivot position.",
+        start: [1, 2, 3, 4, 5, 7, 8, 6],
+        target: [1, 2, 3, 4, 5, 6, 8, 7],
+        pivot: 6,
+        activeRange: [4, 7],
+        settled: [1, 2, 3, 4, 5],
+        hint: "Swap the highlighted pivot 6 with 7, the first value on its larger side.",
+      },
+      {
+        prompt: "Only two values remain. The new pivot is 7; swap it into its final spot to finish the row.",
         start: [1, 2, 3, 4, 5, 6, 8, 7],
         target: [1, 2, 3, 4, 5, 6, 7, 8],
-        hint: "The earlier pivots stay fixed while 7 and 8 swap.",
+        pivot: 7,
+        activeRange: [6, 7],
+        settled: [1, 2, 3, 4, 5, 6],
+        hint: "7 is the pivot for this final pair. Swap it with 8 to finish Quick Sort.",
+      },
+    ],
+  },
+  pdq: {
+    label: "PDQ sort",
+    number: "08",
+    heroCopy: "Use smarter pivots, spot easy patterns, and keep Quick Sort's speed without its nasty worst-case surprise.",
+    controlTitle: "Defeat awkward patterns",
+    stageLabel: "adaptive partition",
+    stageDescription: "pivot choice and safety check",
+    eyebrow: "THE BIG IDEA",
+    learnTitle: "Quick Sort with a better escape plan.",
+    learnCopy: [
+      "PDQ sort stands for pattern-defeating quicksort. Like Quick Sort, it divides a row around a pivot. The difference is that it watches for warning signs: a lopsided split, a row that is already almost ordered, or a repeating pattern that keeps tricking ordinary pivots.",
+      "When a partition looks healthy, PDQ sort keeps the fast Quick Sort rhythm. When it sees trouble, it changes a few positions to break the pattern, uses tiny insertion-sort cleanups for short pieces, and has a Heap Sort safety fallback. It is designed to be quick in everyday data without risking Quick Sort's familiar worst-case slowdown.",
+    ],
+    complexity: ["BEST O(n)", "AVERAGE O(n log n)", "WORST O(n log n)"],
+    cardTitle: "PDQ SORT",
+    cardTag: "adaptive · in-place",
+    steps: [
+      "Pick a safer pivot from a small sample instead of trusting one edge value.",
+      "Partition values smaller and larger than that pivot, watching whether the split is balanced.",
+      "Use a small-piece cleanup or a Heap Sort fallback only when the row needs it.",
+    ],
+    examples: [
+      { values: "[8, 1, 7, 3, 6, 2, 5, 4]", detail: "A small sample helps choose a pivot near the middle instead of blindly using an awkward edge value." },
+      { values: "[1, 3, 2 | 4 | 8, 7, 6, 5]", detail: "A healthy pivot makes two smaller jobs. PDQ sort keeps using fast partitions when that happens." },
+      { values: "bad split → pattern break / heap backup", detail: "If one side keeps swallowing nearly everything, it changes course instead of letting the slow case grow." },
+    ],
+    benefits: [
+      { title: "Fast on real-looking data", copy: "It is built to recognize ordered stretches and avoid doing the same work again when a row is already close to sorted." },
+      { title: "Quick Sort with a safety net", copy: "Its fallback prevents a few unlucky pivots from turning a large job into the painfully slow version of Quick Sort." },
+    ],
+    tradeoffs: [
+      { title: "More moving parts", copy: "The checks, pivot sampling, and backup plan make it harder to explain than basic Quick Sort even though the core partition idea is the same." },
+      { title: "Not stable", copy: "Values with the same height can trade places during partitions, so it is not the right pick when their original order matters too." },
+    ],
+    practice: [
+      {
+        prompt: "Use a middle-looking pivot strategy: begin by moving 1 into the small side of this eight-value row.",
+        start: [8, 1, 7, 3, 6, 2, 5, 4],
+        target: [1, 8, 7, 3, 6, 2, 5, 4],
+        hint: "A safe pivot still needs smaller values grouped on its left. Start with the obvious small value, 1.",
+      },
+      {
+        prompt: "Keep building a balanced smaller side by moving 2 beside 1.",
+        start: [1, 8, 7, 3, 6, 2, 5, 4],
+        target: [1, 2, 7, 3, 6, 8, 5, 4],
+        hint: "This is the same partition rule as Quick Sort: move a value only when it belongs on this side of the pivot.",
+      },
+      {
+        prompt: "Finish this miniature adaptive partition into a clean ordered row.",
+        start: [1, 2, 7, 3, 6, 8, 5, 4],
+        target: [1, 2, 3, 4, 5, 6, 7, 8],
+        hint: "Use helpful swaps only. PDQ sort lets small, nearly ordered pieces finish with a simple cleanup.",
       },
     ],
   },
   merge: {
     label: "Merge sort",
-    number: "08",
+    number: "09",
     heroCopy: "Build larger ordered runs by repeatedly merging pairs of smaller ordered runs.",
     controlTitle: "Merge ordered runs",
     stageLabel: "merge pass",
@@ -790,6 +886,61 @@ const ALGORITHM_DETAILS: Record<AlgorithmId, AlgorithmDetails> = {
       },
     ],
   },
+  powersort: {
+    label: "Powersort",
+    number: "10",
+    heroCopy: "Notice the stretches already in order, then merge them in a carefully chosen order that wastes less work.",
+    controlTitle: "Merge the runs that matter",
+    stageLabel: "run decision",
+    stageDescription: "natural runs and merge order",
+    eyebrow: "THE BIG IDEA",
+    learnTitle: "Build from the order that is already there.",
+    learnCopy: [
+      "Powersort begins by looking for natural runs: short stretches that are already rising, or falling stretches that can be turned around. Real data often contains these little pieces of order, even when the full row is not sorted.",
+      "Instead of merging runs in a fixed left-to-right schedule, Powersort calculates how important each boundary is in a balanced merge tree. That lets it combine nearby runs in an order that keeps the total amount of copying close to the best possible for the runs it found.",
+    ],
+    complexity: ["BEST O(n)", "WORST O(n log n)", "STABLE YES"],
+    cardTitle: "POWERSORT",
+    cardTag: "adaptive · stable",
+    steps: [
+      "Scan for rising runs and flip any strictly falling run into rising order.",
+      "Measure each boundary's merge priority, called its power.",
+      "Merge runs in that priority order until one stable sorted run remains.",
+    ],
+    examples: [
+      { values: "[1, 4, 7] [2, 5, 8] [3, 6, 9]", detail: "These are already three rising runs, so Powersort can reuse that work instead of starting from single values." },
+      { values: "run boundary → power", detail: "A boundary's power describes where its runs belong in a balanced merge plan." },
+      { values: "[1, 2, 3, 4, 5, 6, 7, 8, 9]", detail: "Stable merging preserves the order of tied values while the natural runs become one row." },
+    ],
+    benefits: [
+      { title: "Excellent at partly ordered data", copy: "It gets a real shortcut when the input already contains long rising or falling stretches, which is common outside textbook random data." },
+      { title: "Stable and carefully scheduled", copy: "Equal values stay in their original order, while its merge plan avoids many unnecessary extra moves." },
+    ],
+    tradeoffs: [
+      { title: "Uses extra workspace", copy: "Like other merge-based sorts, it needs temporary room while it combines two runs." },
+      { title: "The merge plan is abstract", copy: "The idea of a boundary power is less intuitive than a simple swap or pivot, so the visualizer exposes each run and merge decision." },
+    ],
+    practice: [
+      {
+        prompt: "Turn the first falling pair into the rising run [1, 5].",
+        start: [5, 1, 6, 2, 7, 3, 8, 4],
+        target: [1, 5, 6, 2, 7, 3, 8, 4],
+        hint: "Powersort begins by spotting a run that is already easy to make increasing.",
+      },
+      {
+        prompt: "Make the next two-value rising run [2, 6].",
+        start: [1, 5, 6, 2, 7, 3, 8, 4],
+        target: [1, 5, 2, 6, 7, 3, 8, 4],
+        hint: "Leave the run [1, 5] alone while you prepare the next run." ,
+      },
+      {
+        prompt: "Use the discovered runs to finish the stable merge.",
+        start: [1, 5, 2, 6, 7, 3, 8, 4],
+        target: [1, 2, 3, 4, 5, 6, 7, 8],
+        hint: "Bring the smallest available front value forward each time; the runs give you a head start.",
+      },
+    ],
+  },
   bogo: {
     label: "Bogo sort",
     number: "01",
@@ -839,62 +990,6 @@ const ALGORITHM_DETAILS: Record<AlgorithmId, AlgorithmDetails> = {
       },
     ],
   },
-  "range-guard-mean": {
-    label: "Adaptive Mean sort",
-    number: "09",
-    heroCopy: "Route lanes by average, lock safe range fences, and eject the outliers that cross them.",
-    controlTitle: "Route mean lanes and eject crossings",
-    stageLabel: "round",
-    stageDescription: "mean scouts + outlier fences",
-    eyebrow: "THE BIG IDEA",
-    learnTitle: "Averages place lanes; fences rescue the values that averages hide.",
-    learnCopy: [
-      "Adaptive Mean sort repeatedly opens two spatial lanes inside every still-messy region, measures both arithmetic means, and routes the lower-mean lane before the higher-mean lane. This is not a one-time prelude: the newly routed lanes become the starting point for the next mean scout.",
-      "An average is useful but never proof. After routing, a range fence checks whether the largest value on the left is no bigger than the smallest value on the right. If it is, that fence locks. If it crosses, the algorithm uses the parent region's weighted mean as a fence and stably ejects values at or below it left and higher values right.",
-      "Both a locked fence and an outlier ejection create a proven numeric boundary. Their child lanes repeat the same mean-scouter, fence, and ejection rhythm until only small independent lanes remain. Those tiny lanes get a local polish; the algorithm never relies on a whole-row merge.",
-    ],
-    complexity: ["BEST O(n)", "WORST O(n log n)", "SPACE O(n)"],
-    cardTitle: "ADAPTIVE MEAN SORT",
-    cardTag: "mean-led · outlier routing",
-    steps: [
-      "Split each active region into two spatial mean lanes.",
-      "Route the lower average lane before the higher average lane.",
-      "Lock a fence only when max(left) ≤ min(right).",
-      "Otherwise eject values around the weighted mean, then scout the child lanes again.",
-    ],
-    examples: [
-      { values: "[6, 1, 8, 2] | [7, 3, 5, 4]", detail: "First split the current region into two spatial lanes and measure their means. A lower mean lane routes left, but the values themselves stay together for now." },
-      { values: "max([6, 1, 8, 2]) = 8 > min([7, 3, 5, 4]) = 3", detail: "The range fence crosses, so mean order alone is not safe. The highlighted 8 and 3 show why the fence refuses to lock." },
-      { values: "μ = 4.5 → [1, 2, 3, 4] | [6, 8, 7, 5]", detail: "Eject every value at or below 4.5 left and every higher value right. That creates a real boundary, not a hopeful average." },
-      { values: "mean scout → fence → ejection → mean scout", detail: "The two new lanes are independent, so the algorithm repeats the same idea inside each one before a tiny local polish." },
-    ],
-    benefits: [
-      { title: "Visually striking progress", copy: "Whole lanes slide into a broad order, then the few values that do not belong make a dramatic trip across a fence. You can see both the rough plan and the correction instead of watching one opaque cleanup." },
-      { title: "Respects useful groups", copy: "When neighboring lanes already fit together, their fence locks and the algorithm can leave that boundary alone. Rows with natural clusters stay readable while the remaining trouble is handled locally." },
-    ],
-    tradeoffs: [
-      { title: "More moving parts", copy: "Measuring averages, checking fences, and relocating outliers takes more coordination than a straightforward sort. That extra structure makes the animation richer, but it also adds work." },
-      { title: "Not the fastest general-purpose pick", copy: "On a very mixed row, many fences can cross and the extra checks add up. Choose it for its clear grouping-and-rescue story; choose Merge or Heap when predictable speed matters most." },
-    ],
-    practice: [
-      {
-        kind: "partitions",
-        prompt: "Route these whole lanes by their averages. Keep the lower-mean lane before the higher-mean lane.",
-        partitions: [
-          { id: "high-range", values: [4, 5, 6], mean: 5 },
-          { id: "low-range", values: [1, 2, 3], mean: 2 },
-        ],
-        targetOrder: ["low-range", "high-range"],
-        hint: "This is the mean-routing move: whole lanes move together before the range fence checks their actual extremes.",
-      },
-      {
-        prompt: "This fence crosses: move the low outlier left and the high outlier right.",
-        start: [1, 2, 6, 3, 4, 5],
-        target: [1, 2, 3, 4, 5, 6],
-        hint: "The weighted mean is 3.5. Eject 3 left and 6 right; the resulting fence is certified.",
-      },
-    ],
-  },
 };
 
 function createInitialStep(
@@ -935,6 +1030,30 @@ function arraysMatch(left: number[], right: number[]) {
   return left.length === right.length && left.every((value, index) => value === right[index]);
 }
 
+// Every hands-on lesson uses a complete, consecutive set of values. Small
+// legacy examples are extended with already-visible trailing values so even a
+// first lesson has enough blocks to feel like a real little array, while the
+// more involved lessons remain comfortably below ten blocks.
+function normalizePracticeSteps(steps: PracticeStep[]): PracticeStep[] {
+  return steps.map((step) => {
+    const largestValue = Math.max(...step.start, ...step.target, 1);
+    const blockCount = Math.min(10, Math.max(6, largestValue));
+    const completeRow = (values: number[]) => {
+      const nextValues = [...values];
+      for (let value = 1; value <= blockCount; value += 1) {
+        if (!nextValues.includes(value)) nextValues.push(value);
+      }
+      return nextValues;
+    };
+
+    return {
+      ...step,
+      start: completeRow(step.start),
+      target: completeRow(step.target),
+    };
+  });
+}
+
 function getPracticeTargetDistance(values: number[], target: number[]) {
   if (values.length !== target.length) return Number.POSITIVE_INFINITY;
 
@@ -945,21 +1064,18 @@ function getPracticeTargetDistance(values: number[], target: number[]) {
     targetRanks.set(value, index);
   }
 
-  const ranks: number[] = [];
-  for (const value of values) {
-    const rank = targetRanks.get(value);
-    if (rank === undefined) return Number.POSITIVE_INFINITY;
-    ranks.push(rank);
+  // Score only the finished arrangement, never which block was chosen first.
+  // A direct position distance is more forgiving than an inversion count for
+  // insertion-style moves: a useful swap can move both blocks toward their
+  // final slots even when the surrounding values are still being taught.
+  let distance = 0;
+  for (let index = 0; index < values.length; index += 1) {
+    const targetIndex = targetRanks.get(values[index]);
+    if (targetIndex === undefined) return Number.POSITIVE_INFINITY;
+    distance += Math.abs(index - targetIndex);
   }
 
-  let inversions = 0;
-  for (let left = 0; left < ranks.length; left += 1) {
-    for (let right = left + 1; right < ranks.length; right += 1) {
-      if (ranks[left] > ranks[right]) inversions += 1;
-    }
-  }
-
-  return inversions;
+  return distance;
 }
 
 function makeBenchmarkArray(length: number, pattern: BenchmarkPattern) {
@@ -997,17 +1113,13 @@ function getWorkEstimate(metrics: {
   comparisons: number;
   rankComparisons: number;
   writes: number;
-  meanComputationOperations?: number;
-  meanRankingArithmeticOperations?: number;
-  refinementOperations?: number;
+  schedulingOperations?: number;
 }) {
   return (
     metrics.comparisons +
     metrics.rankComparisons +
     metrics.writes +
-    (metrics.meanComputationOperations ?? 0) +
-    (metrics.meanRankingArithmeticOperations ?? 0) +
-    (metrics.refinementOperations ?? 0)
+    (metrics.schedulingOperations ?? 0)
   );
 }
 
@@ -1135,21 +1247,6 @@ function getBarClass(
   step: SortStep,
   algorithm: AlgorithmId,
 ) {
-  if (algorithm === "range-guard-mean") {
-    if (step.phase === "complete") return "bar--sorted";
-    if (step.phase === "split") return "bar--partition";
-    if (step.phase === "average") return "bar--mean";
-    if (step.phase === "reorder") return "bar--rank";
-    if (step.phase === "guard") {
-      return step.outliers?.includes(index) ? "bar--outlier" : "bar--guard";
-    }
-    if (step.phase === "eject") {
-      return step.outliers?.includes(index) ? "bar--outlier" : "bar--eject";
-    }
-    if (step.phase === "polish") return "bar--polish";
-    return "bar--idle";
-  }
-
   if (algorithm === "bogo") {
     if (step.phase === "complete") return "bar--sorted";
     if (step.phase === "limited") return "bar--limited";
@@ -1157,7 +1254,7 @@ function getBarClass(
     return "bar--idle";
   }
 
-  if (algorithm === "quick") {
+  if (algorithm === "quick" || algorithm === "pdq") {
     if (step.phase === "complete") return "bar--sorted";
     // A settled pivot is in its final index. Keep that proof visible at every
     // array size while the active pivot and swaps show the current partition.
@@ -1165,6 +1262,16 @@ function getBarClass(
       return "bar--sorted";
     }
     if (step.phase === "select" && index === step.inserting) return "bar--key";
+    if (
+      algorithm === "pdq" &&
+      step.phase === "heapify" &&
+      step.rangeStart !== undefined &&
+      step.rangeEnd !== undefined &&
+      index >= step.rangeStart &&
+      index < step.rangeEnd
+    ) {
+      return "bar--heap";
+    }
     if (step.phase === "swap" && (index === step.comparing || index === step.shifting)) {
       return "bar--swap";
     }
@@ -1174,10 +1281,30 @@ function getBarClass(
     return "bar--idle";
   }
 
-  if (algorithm === "merge") {
+  if (algorithm === "merge" || algorithm === "powersort") {
     if (step.phase === "complete") return "bar--sorted";
     if (index === step.comparing || index === step.shifting) return "bar--compare";
     if (index === step.inserting) return "bar--insert";
+    if (
+      algorithm === "powersort" &&
+      step.phase === "run" &&
+      step.rangeStart !== undefined &&
+      step.rangeEnd !== undefined &&
+      index >= step.rangeStart &&
+      index < step.rangeEnd
+    ) {
+      return "bar--run";
+    }
+    if (
+      algorithm === "powersort" &&
+      step.phase === "power" &&
+      step.rangeStart !== undefined &&
+      step.rangeEnd !== undefined &&
+      index >= step.rangeStart &&
+      index < step.rangeEnd
+    ) {
+      return "bar--power";
+    }
     if (
       step.phase === "merge" &&
       step.rangeStart !== undefined &&
@@ -1271,16 +1398,13 @@ function getPhaseLabel(phase: StepPhase) {
     compare: "Compare",
     shift: "Shift right",
     insert: "Insert key",
-    split: "Split groups",
-    average: "Measure means",
-    reorder: "Rank groups",
-    guard: "Check fences",
-    eject: "Eject outliers",
-    polish: "Polish lanes",
+    split: "Start merge pass",
     swap: "Swap values",
     sweep: "Sweep",
     heapify: "Restore heap",
     merge: "Merge runs",
+    run: "Find a natural run",
+    power: "Schedule merge",
     shuffle: "Shuffle",
     limited: "Safety stop",
     complete: "Sorted",
@@ -1317,8 +1441,9 @@ export default function Home() {
   const [completionSweepActive, setCompletionSweepActive] = useState(false);
   const [soundVolume, setSoundVolume] = useState(50);
   const [practiceStepIndex, setPracticeStepIndex] = useState(0);
-  const [practiceValues, setPracticeValues] = useState([5, 3, 4, 1]);
-  const [practicePartitionOrder, setPracticePartitionOrder] = useState<string[]>([]);
+  const [practiceValues, setPracticeValues] = useState(
+    () => [...normalizePracticeSteps(ALGORITHM_DETAILS.insertion.practice)[0].start],
+  );
   const [practiceSelectedIndex, setPracticeSelectedIndex] = useState<number | null>(null);
   const [practiceDragIndex, setPracticeDragIndex] = useState<number | null>(null);
   const [practiceDraggingId, setPracticeDraggingId] = useState<string | null>(null);
@@ -1327,7 +1452,6 @@ export default function Home() {
   const [practiceSolved, setPracticeSolved] = useState(false);
   const [practiceFeedback, setPracticeFeedback] = useState<string | null>(null);
   const [practiceUndoPending, setPracticeUndoPending] = useState(false);
-  const [practiceMedianSelection, setPracticeMedianSelection] = useState<number | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const soundVolumeRef = useRef(soundVolume);
   const lastToneTimeRef = useRef(0);
@@ -1337,8 +1461,6 @@ export default function Home() {
   const completionSweepEndTimerRef = useRef<number | null>(null);
   const completionSweepRunRef = useRef(0);
   const completionSweepSourcesRef = useRef(new Set<OscillatorNode>());
-  const meanBarElementsRef = useRef(new Map<number, HTMLDivElement>());
-  const meanBarPositionsRef = useRef(new Map<number, number>());
   const motionBarElementsRef = useRef(new Map<string, HTMLDivElement>());
   const motionBarPositionsRef = useRef(new Map<string, number>());
   const motionBarTokensRef = useRef<string[]>([]);
@@ -1355,6 +1477,7 @@ export default function Home() {
   } | null>(null);
   const suppressPracticeClickRef = useRef(false);
   const practiceUndoTimerRef = useRef<number | null>(null);
+  const practiceAdvanceTimerRef = useRef<number | null>(null);
   const bogoSessionRef = useRef<BogoSession | null>(null);
   const bogoRateSampleRef = useRef<{
     startedAt: number;
@@ -1372,15 +1495,14 @@ export default function Home() {
   });
   const bogoExpectedRateSampleRef = useRef<{
     startingAttempts: number;
+    startingElapsedMilliseconds: number;
+    modeledShuffleRate: number;
     finalized: boolean;
   } | null>(null);
-  const [meanSlideOffsets, setMeanSlideOffsets] = useState<Record<number, number>>({});
-  const [meanSlideStage, setMeanSlideStage] = useState<"idle" | "prepare" | "animate">("idle");
   const [motionSlideOffsets, setMotionSlideOffsets] = useState<Record<string, number>>({});
   const [motionSlideStage, setMotionSlideStage] = useState<"idle" | "prepare" | "animate">("idle");
   soundVolumeRef.current = soundVolume;
   const prefersReducedMotion = usePrefersReducedMotion();
-  const usesRangeGroups = algorithm === "range-guard-mean";
   const isBogo = algorithm === "bogo";
   const bogoAttemptMaximum = BOGO_STANDARD_MAX_ATTEMPTS;
   const bogoSliderStep = 1;
@@ -1413,28 +1535,32 @@ export default function Home() {
         : bogoTimerRangeStatus;
   const soundEnabled = soundVolume > 0;
   const algorithmDetails = ALGORITHM_DETAILS[algorithm];
-  const practiceSteps = algorithmDetails.practice;
+  const practiceSteps = useMemo(
+    () => normalizePracticeSteps(algorithmDetails.practice),
+    [algorithmDetails.practice],
+  );
   const practiceFinished = practiceStepIndex >= practiceSteps.length;
   const currentPractice = practiceSteps[Math.min(practiceStepIndex, practiceSteps.length - 1)];
-  const isPartitionPractice = currentPractice.kind === "partitions";
-  const isMedianPractice = currentPractice.kind === "median";
+  const isQuickPractice = algorithm === "quick" && currentPractice.pivot !== undefined;
+  const quickPivot = isQuickPractice ? currentPractice.pivot ?? null : null;
+  const quickActiveRange = isQuickPractice ? currentPractice.activeRange : undefined;
+  const quickSettledValues = isQuickPractice ? currentPractice.settled ?? [] : [];
   const algorithmLabel = algorithmDetails.label;
   const stageLabel = algorithmDetails.stageLabel;
-  const totalStages = usesRangeGroups
-    ? steps.length > 1
-      ? Math.max(1, steps.at(-1)?.pass ?? 1)
-      : Math.max(1, Math.ceil(Math.log2(Math.max(originalValues.length, 1))) + 1)
-    : isBogo
-      ? bogoRunsUntilSolved
-        ? null
-        : bogoAttemptLimit
-      : algorithm === "merge"
-        ? Math.max(1, Math.ceil(Math.log2(Math.max(originalValues.length, 1))))
-        : algorithm === "heap"
-          ? Math.max(1, originalValues.length)
+  const totalStages = isBogo
+    ? bogoRunsUntilSolved
+      ? null
+      : bogoAttemptLimit
+    : algorithm === "merge"
+      ? Math.max(1, Math.ceil(Math.log2(Math.max(originalValues.length, 1))))
+      : algorithm === "heap"
+        ? Math.max(1, originalValues.length)
         : Math.max(originalValues.length - 1, 0);
   const minimumArraySize = 4;
   const maximumArraySize = isBogo ? BOGO_MAX_ARRAY_SIZE : 256;
+  // Bogo reaches its CPU-batched ceiling at 100; the extra visualizer range
+  // is useful only for deterministic animation playback.
+  const maximumSpeed = isBogo ? 100 : MAX_SPEED;
   const benchmarkData = useMemo(
     () =>
       BENCHMARK_SIZES.map((size) => {
@@ -1445,8 +1571,9 @@ export default function Home() {
         const selection = analyzeSelectionSort(benchmarkValues);
         const heap = analyzeHeapSort(benchmarkValues);
         const quick = analyzeQuickSort(benchmarkValues);
+        const pdq = analyzePdqSort(benchmarkValues);
         const merge = analyzeMergeSort(benchmarkValues);
-        const rangeGuardMean = analyzeRangeGuardMeanSort(benchmarkValues);
+        const powersort = analyzePowerSort(benchmarkValues);
 
         return {
           size,
@@ -1457,8 +1584,9 @@ export default function Home() {
             selection: getWorkEstimate(selection),
             heap: getWorkEstimate(heap),
             quick: getWorkEstimate(quick),
+            pdq: getWorkEstimate(pdq),
             merge: getWorkEstimate(merge),
-            rangeGuardMean: getWorkEstimate(rangeGuardMean),
+            powersort: getWorkEstimate(powersort),
           } satisfies BenchmarkWork,
         };
       }),
@@ -1472,8 +1600,9 @@ export default function Home() {
     const selection = analyzeSelectionSort(benchmarkValues);
     const heap = analyzeHeapSort(benchmarkValues);
     const quick = analyzeQuickSort(benchmarkValues);
+    const pdq = analyzePdqSort(benchmarkValues);
     const merge = analyzeMergeSort(benchmarkValues);
-    const rangeGuardMean = analyzeRangeGuardMeanSort(benchmarkValues);
+    const powersort = analyzePowerSort(benchmarkValues);
 
     return {
       bubble: getWorkEstimate(bubble),
@@ -1482,8 +1611,9 @@ export default function Home() {
       selection: getWorkEstimate(selection),
       heap: getWorkEstimate(heap),
       quick: getWorkEstimate(quick),
+      pdq: getWorkEstimate(pdq),
       merge: getWorkEstimate(merge),
-      rangeGuardMean: getWorkEstimate(rangeGuardMean),
+      powersort: getWorkEstimate(powersort),
     } satisfies BenchmarkWork;
   }, [arraySize, benchmarkPattern]);
   const theoreticalBenchmarkData = useMemo(
@@ -1552,7 +1682,7 @@ export default function Home() {
   }, [algorithm, steps]);
   const motionSlideDuration = Math.round(Math.max(170, 880 - speed * 9.4));
   const shouldInterpolateMoves =
-    !isBogo && !usesRangeGroups && !prefersReducedMotion && speed < 75;
+    !isBogo && !prefersReducedMotion && speed < 75;
   const isSafeVisualMove =
     shouldInterpolateMoves &&
     previousVisualStep !== null &&
@@ -1596,71 +1726,6 @@ export default function Home() {
 
     beginSweep();
   }, [completionSweepDuration, currentStep.phase, currentStep.values, isBogo, prefersReducedMotion, runState]);
-
-  useLayoutEffect(() => {
-    const captureMeanBarPositions = () => {
-      const positions = new Map<number, number>();
-
-      visibleValues.forEach((value) => {
-        const bar = meanBarElementsRef.current.get(value);
-        if (bar) positions.set(value, bar.getBoundingClientRect().left);
-      });
-
-      return positions;
-    };
-
-    if (!usesRangeGroups || prefersReducedMotion) {
-      meanBarPositionsRef.current = captureMeanBarPositions();
-      setMeanSlideOffsets({});
-      setMeanSlideStage("idle");
-      return;
-    }
-
-    const nextPositions = captureMeanBarPositions();
-    const shouldAnimateMeanMove =
-      currentStep.phase === "reorder" ||
-      currentStep.phase === "eject" ||
-      currentStep.phase === "polish";
-    if (!shouldAnimateMeanMove) {
-      meanBarPositionsRef.current = nextPositions;
-      return;
-    }
-
-    const offsets: Record<number, number> = {};
-    let hasMovement = false;
-
-    nextPositions.forEach((nextLeft, value) => {
-      const previousLeft = meanBarPositionsRef.current.get(value);
-      if (previousLeft === undefined) return;
-
-      const offset = previousLeft - nextLeft;
-      if (Math.abs(offset) < 1) return;
-      offsets[value] = offset;
-      hasMovement = true;
-    });
-
-    meanBarPositionsRef.current = nextPositions;
-    if (!hasMovement) return;
-
-    setMeanSlideOffsets(offsets);
-    setMeanSlideStage("prepare");
-
-    let settleFrame: number | undefined;
-    let releaseTimer: number | undefined;
-    const startFrame = window.requestAnimationFrame(() => {
-      settleFrame = window.requestAnimationFrame(() => {
-        setMeanSlideOffsets({});
-        setMeanSlideStage("animate");
-        releaseTimer = window.setTimeout(() => setMeanSlideStage("idle"), meanSlideDuration);
-      });
-    });
-
-    return () => {
-      window.cancelAnimationFrame(startFrame);
-      if (settleFrame !== undefined) window.cancelAnimationFrame(settleFrame);
-      if (releaseTimer !== undefined) window.clearTimeout(releaseTimer);
-    };
-  }, [currentStep.message, currentStep.pass, currentStep.phase, usesRangeGroups, prefersReducedMotion, visibleValues]);
 
   useLayoutEffect(() => {
     const captureMotionBarPositions = () => {
@@ -1758,16 +1823,29 @@ export default function Home() {
     }
 
     practiceBlockPositionsRef.current = nextPositions;
-  }, [practicePartitionOrder, practiceStepIndex, practiceValues, prefersReducedMotion]);
+  }, [practiceStepIndex, practiceValues, prefersReducedMotion]);
 
   const isRunning = runState === "running";
   const isLocked = isRunning || runState === "paused";
   const isLargeArray = originalValues.length > DEFAULT_ARRAY_SIZE;
   const playbackDensity = isBogo ? 48 : 1;
-  const speedDelay = 720 - speed * 7.13;
-  const meanSlideDuration = Math.round(Math.max(520, 1_050 - speed * 5.3));
-  const meanStaticDelay = Math.max(190, 620 - speed * 4);
-  const minimumFrameDelay = isLargeArray && !isBogo ? 16 : 7;
+  // Keep the low end readable, make the familiar 100 setting a little faster
+  // than it used to be, then reserve 101–200 for a controlled turbo range.
+  const speedDelay =
+    speed <= 100
+      ? Math.round(4 + 716 * (1 - (speed - 1) / 99) ** 1.3)
+      : Math.max(1, Math.round(4 * (1 - (speed - 100) / (MAX_SPEED - 100)) ** 2));
+  const minimumFrameDelay = isLargeArray && !isBogo
+    ? speed > 100
+      ? 8
+      : speed === 100
+        ? 10
+        : 16
+    : speed > 100
+      ? 2
+      : speed === 100
+        ? 3
+        : 7;
   const bogoSlowMotionDelay =
     isBogo && originalValues.length <= DEFAULT_ARRAY_SIZE
       ? getBogoSlowMotionDelay(speed)
@@ -1781,13 +1859,7 @@ export default function Home() {
   const mergeFramesInCurrentPass = mergePassFrameCounts.get(currentStep.pass) ?? 1;
   const delay = prefersReducedMotion
     ? 18
-    : usesRangeGroups
-      ? currentStep.phase === "reorder" ||
-          currentStep.phase === "eject" ||
-          currentStep.phase === "polish"
-        ? meanSlideDuration + 120
-        : meanStaticDelay
-      : usesEvenMergePacing
+    : usesEvenMergePacing
       ? Math.max(minimumFrameDelay, mergePassDuration / mergeFramesInCurrentPass)
       : isSafeVisualMove
         ? motionSlideDuration + 100
@@ -1799,31 +1871,13 @@ export default function Home() {
         "--bar-transition-duration": String(Math.min(260, Math.max(90, delay * 0.75))) + "ms",
       } as CSSProperties)
     : undefined;
-  const meanTransitionStyle = usesRangeGroups
-    ? ({ "--mean-slide-duration": String(meanSlideDuration) + "ms" } as CSSProperties)
-    : undefined;
-  const barTransitionStyle = usesRangeGroups
-    ? ({
-        ...(denseBarTransitionStyle ?? {}),
-        "--mean-slide-duration": String(meanSlideDuration) + "ms",
-      } as CSSProperties)
-    : shouldInterpolateMoves
+  const barTransitionStyle = shouldInterpolateMoves
       ? ({
           ...(denseBarTransitionStyle ?? {}),
           "--bar-slide-duration": String(motionSlideDuration) + "ms",
         } as CSSProperties)
       : denseBarTransitionStyle;
-  const completionSweepTimingStyle = {
-    "--completion-sweep-duration": String(completionSweepDuration) + "ms",
-    "--completion-sweep-lead": String(COMPLETION_SWEEP_AUDIO_VISUAL_LEAD) + "ms",
-  } as CSSProperties;
-  const activeBarTransitionStyle =
-    completionSweepActive && !prefersReducedMotion
-      ? ({
-          ...(barTransitionStyle ?? {}),
-          ...completionSweepTimingStyle,
-        } as CSSProperties)
-      : barTransitionStyle;
+  const activeBarTransitionStyle = barTransitionStyle;
   const progress =
     runState === "complete"
       ? 100
@@ -1840,9 +1894,7 @@ export default function Home() {
     currentStep.phase === "limited"
       ? "Bogo Sort stopped after the shuffle safety limit. Try a new array or another algorithm."
       : runState === "complete"
-        ? usesRangeGroups
-          ? "Sorting complete. " + currentStep.comparisons + " tracked checks and " + currentStep.writes + " tracked moves."
-          : "Sorting complete. " + currentStep.comparisons + " comparisons and " + currentStep.writes + " array writes."
+        ? "Sorting complete. " + currentStep.comparisons + " comparisons and " + currentStep.writes + " array writes."
       : runState === "paused"
         ? "Paused during " +
           stageLabel +
@@ -1867,6 +1919,39 @@ export default function Home() {
     setBogoFrozenExpectedShuffleRate(null);
     setBogoExpectedRateSource("calibrating");
     setBogoElapsedMilliseconds(0);
+  }
+
+  function getBogoActiveElapsedMilliseconds(now = performance.now()) {
+    const stopwatch = bogoElapsedTimerRef.current;
+    return (
+      stopwatch.accumulatedMilliseconds +
+      (stopwatch.startedAt === null ? 0 : Math.max(0, now - stopwatch.startedAt))
+    );
+  }
+
+  function restartBogoExpectedRateCalibration(
+    session: BogoSession | null,
+    modeledShuffleRate: number,
+  ) {
+    // A Bogo speed change changes the runner's real throughput. Start a fresh
+    // sample from this exact point so the estimate follows the new speed,
+    // while the stopwatch and shuffle count continue uninterrupted.
+    setBogoFrozenExpectedShuffleRate(null);
+    setBogoExpectedRateSource("calibrating");
+    setBogoMeasuredShuffleRate(null);
+
+    if (!session || session.done) {
+      bogoExpectedRateSampleRef.current = null;
+      return;
+    }
+
+    const now = performance.now();
+    bogoExpectedRateSampleRef.current = {
+      startingAttempts: session.attempts,
+      startingElapsedMilliseconds: getBogoActiveElapsedMilliseconds(now),
+      modeledShuffleRate,
+      finalized: false,
+    };
   }
 
   function resetCompletionSweep() {
@@ -1999,8 +2084,10 @@ export default function Home() {
       Math.max(0, (value - 1) / Math.max(largestValue - 1, 1)),
     );
     const compressedValue = Math.sqrt(normalizedValue);
-    const semitone = Math.round(compressedValue * 19);
-    return 261.63 * 2 ** (semitone / 12);
+    // Keep the C4-to-C6 range, but interpolate within it instead of rounding
+    // values to a piano semitone. This lets neighboring bars have neighboring
+    // frequencies, including during the completion scan.
+    return 261.63 * 2 ** ((compressedValue * 24) / 12);
   }
 
   function playSortingTone(step: SortStep) {
@@ -2021,10 +2108,7 @@ export default function Home() {
       step.phase === "swap" ||
       step.phase === "shift" ||
       step.phase === "insert" ||
-      step.phase === "merge" ||
-      step.phase === "reorder" ||
-      step.phase === "eject" ||
-      step.phase === "polish";
+      step.phase === "merge";
     const targetDuration = isImpact ? 0.052 : 0.034;
     const basePeakGain = isImpact ? 0.2 : 0.14;
     const peakGain = basePeakGain * (soundVolume / 100) ** 2.5;
@@ -2077,32 +2161,14 @@ export default function Home() {
     if (now - lastBogoTextureTimeRef.current < 0.13) return;
     lastBogoTextureTimeRef.current = now;
 
-    const oscillator = context.createOscillator();
-    const filter = context.createBiquadFilter();
-    const gain = context.createGain();
     const motion = ((attempt * 0.61803398875) % 1 + 1) % 1;
-    // Keep Bogo's synthetic shuffle texture out of the same muddy low range
-    // as the old smallest-value tone.
+    // Bogo is throttled independently, but its audible hit uses the same
+    // reinforced voice and impact level as a regular sorting move. The prior
+    // one-oscillator bandpass texture was being attenuated enough to sound
+    // markedly quieter than the rest of the visualizer.
     const frequency = 293.66 + motion * 340;
-    const peakGain = 0.17 * (soundVolume / 100) ** 2.15;
-
-    oscillator.type = "triangle";
-    oscillator.frequency.setValueAtTime(frequency, now);
-    oscillator.frequency.exponentialRampToValueAtTime(
-      Math.max(277.18, frequency * 0.8),
-      now + 0.07,
-    );
-    filter.type = "bandpass";
-    filter.frequency.setValueAtTime(900 + motion * 500, now);
-    filter.Q.value = 1.1;
-    gain.gain.setValueAtTime(0.0001, now);
-    gain.gain.exponentialRampToValueAtTime(peakGain, now + 0.004);
-    gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.075);
-    oscillator.connect(filter);
-    filter.connect(gain);
-    gain.connect(context.destination);
-    oscillator.start(now);
-    oscillator.stop(now + 0.09);
+    const peakGain = 0.2 * (soundVolume / 100) ** 2.5;
+    playMusicalVoice(context, now, frequency, 0.075, peakGain);
   }
 
   function playBogoVictorySound() {
@@ -2117,7 +2183,10 @@ export default function Home() {
       const gain = context.createGain();
       const startTime = now + index * 0.1;
       const duration = index === notes.length - 1 ? 0.38 : 0.14;
-      const peakGain = 0.16 * (soundVolume / 100) ** 2.5;
+      // A victory note is a single oscillator, whereas sorting notes have an
+      // octave reinforcement. Lift its envelope to the equivalent perceived
+      // range so a successful Bogo run does not fall behind the live texture.
+      const peakGain = 0.24 * (soundVolume / 100) ** 2.5;
 
       oscillator.type = index === notes.length - 1 ? "triangle" : "sine";
       oscillator.frequency.setValueAtTime(frequency, startTime);
@@ -2133,6 +2202,12 @@ export default function Home() {
 
   useEffect(() => {
     return () => {
+      if (practiceUndoTimerRef.current !== null) {
+        window.clearTimeout(practiceUndoTimerRef.current);
+      }
+      if (practiceAdvanceTimerRef.current !== null) {
+        window.clearTimeout(practiceAdvanceTimerRef.current);
+      }
       if (completionSweepStartTimerRef.current !== null) {
         window.clearTimeout(completionSweepStartTimerRef.current);
       }
@@ -2214,10 +2289,10 @@ export default function Home() {
 
       const expectedRateSample = bogoExpectedRateSampleRef.current;
       if (expectedRateSample && !expectedRateSample.finalized) {
-        const stopwatch = bogoElapsedTimerRef.current;
-        const elapsedMilliseconds =
-          stopwatch.accumulatedMilliseconds +
-          (stopwatch.startedAt === null ? 0 : Math.max(0, now - stopwatch.startedAt));
+        const elapsedMilliseconds = Math.max(
+          0,
+          getBogoActiveElapsedMilliseconds(now) - expectedRateSample.startingElapsedMilliseconds,
+        );
         const attempts = session.attempts - expectedRateSample.startingAttempts;
         const hasMeasuredOpeningRate =
           elapsedMilliseconds >= BOGO_EXPECTED_RATE_FREEZE_AFTER && attempts > 0;
@@ -2227,7 +2302,7 @@ export default function Home() {
           setBogoFrozenExpectedShuffleRate(
             hasMeasuredOpeningRate
               ? (attempts * 1_000) / elapsedMilliseconds
-              : bogoModeledShuffleRate,
+              : expectedRateSample.modeledShuffleRate,
           );
           setBogoExpectedRateSource(hasMeasuredOpeningRate ? "measured" : "modeled");
         }
@@ -2335,10 +2410,6 @@ export default function Home() {
     setSoundVolume(nextVolume);
   }
 
-  function setMeanBarRef(value: number, element: HTMLDivElement | null) {
-    if (element) meanBarElementsRef.current.set(value, element);
-  }
-
   function setMotionBarRef(token: string, element: HTMLDivElement | null) {
     if (element) {
       motionBarElementsRef.current.set(token, element);
@@ -2355,9 +2426,27 @@ export default function Home() {
     setPracticeUndoPending(false);
   }
 
+  function clearPracticeAdvance() {
+    if (practiceAdvanceTimerRef.current !== null) {
+      window.clearTimeout(practiceAdvanceTimerRef.current);
+      practiceAdvanceTimerRef.current = null;
+    }
+  }
+
+  function schedulePracticeAdvance() {
+    clearPracticeAdvance();
+    // Leave just enough time for the blocks to finish their smooth swap, then
+    // flow directly into the next rule without asking for a separate click.
+    practiceAdvanceTimerRef.current = window.setTimeout(() => {
+      practiceAdvanceTimerRef.current = null;
+      advancePracticeStep();
+    }, 520);
+  }
+
   function resetPractice(nextAlgorithm = algorithm) {
     clearPracticeUndo();
-    const firstStep = ALGORITHM_DETAILS[nextAlgorithm].practice[0];
+    clearPracticeAdvance();
+    const firstStep = normalizePracticeSteps(ALGORITHM_DETAILS[nextAlgorithm].practice)[0];
     setPracticeStepIndex(0);
     setPracticeSelectedIndex(null);
     setPracticeDragIndex(null);
@@ -2367,22 +2456,7 @@ export default function Home() {
     practicePointerRef.current = null;
     setPracticeSolved(false);
     setPracticeFeedback(null);
-    setPracticeMedianSelection(null);
-
-    if (firstStep.kind === "partitions") {
-      setPracticeValues([]);
-      setPracticePartitionOrder(firstStep.partitions.map((partition) => partition.id));
-      return;
-    }
-
-    if (firstStep.kind === "median") {
-      setPracticeValues([]);
-      setPracticePartitionOrder([]);
-      return;
-    }
-
     setPracticeValues([...firstStep.start]);
-    setPracticePartitionOrder([]);
   }
 
   function capturePracticeBlockPositions() {
@@ -2402,38 +2476,25 @@ export default function Home() {
     practiceBlockElementsRef.current.delete(id);
   }
 
-  function evaluatePracticeMove(
-    nextValues: number[],
-    nextPartitionOrder: string[],
-  ): PracticeMoveResult {
-    if (currentPractice.kind === "partitions") {
-      const isCorrect = currentPractice.targetOrder.every(
-        (partitionId, index) => nextPartitionOrder[index] === partitionId,
-      );
-      setPracticeSolved(isCorrect);
-      setPracticeFeedback(
-        isCorrect
-          ? practiceStepIndex === practiceSteps.length - 1
-            ? "Correct—this completes the walkthrough."
-            : "Correct. Your move follows the rule; continue to the next step."
-          : "Not quite. Hint: " + currentPractice.hint,
-      );
-      return isCorrect ? "solved" : "wrong";
-    }
-
-    if (currentPractice.kind === "median") {
-      setPracticeSolved(false);
-      return "wrong";
-    }
-
+  function evaluatePracticeMove(nextValues: number[]): PracticeMoveResult {
     if (arraysMatch(nextValues, currentPractice.target)) {
       setPracticeSolved(true);
       setPracticeFeedback(
         practiceStepIndex === practiceSteps.length - 1
           ? "Correct—this completes the walkthrough."
-          : "Correct. Your move follows the rule; continue to the next step.",
+          : "Correct. Your move follows the rule; the next step is loading.",
       );
       return "solved";
+    }
+
+    // Quick Sort's lesson is deliberately one safe partition move at a time.
+    // Letting a merely "closer" swap remain can strand the pivot between
+    // values with no legal next move, which is both confusing and unlike the
+    // intended partition sequence.
+    if (isQuickPractice) {
+      setPracticeSolved(false);
+      setPracticeFeedback("That does not complete this pivot's move, so it will slide back. Hint: " + currentPractice.hint);
+      return "wrong";
     }
 
     const previousDistance = getPracticeTargetDistance(practiceValues, currentPractice.target);
@@ -2448,38 +2509,10 @@ export default function Home() {
     return madeProgress ? "progress" : "wrong";
   }
 
-  function handleMedianPracticeChoice(value: number) {
-    if (practiceFinished || practiceUndoPending || currentPractice.kind !== "median") return;
-
-    setPracticeMedianSelection(value);
-    const isCorrect = value === currentPractice.targetMedian;
-    setPracticeSolved(isCorrect);
-    if (isCorrect) {
-      setPracticeFeedback(
-        practiceStepIndex === practiceSteps.length - 1
-          ? "Correct—this completes the walkthrough."
-          : "Correct. That lower median makes a balanced guard split; continue to the mean-ranking step.",
-      );
-      return;
-    }
-
-    setPracticeUndoPending(true);
-    setPracticeFeedback("Not quite. The choice will clear so you can try the median again. Hint: " + currentPractice.hint);
-    practiceUndoTimerRef.current = window.setTimeout(() => {
-      setPracticeMedianSelection(null);
-      setPracticeUndoPending(false);
-      practiceUndoTimerRef.current = null;
-    }, 560);
-  }
-
-  function schedulePracticeUndo(previousValues: number[], previousPartitionOrder: string[]) {
+  function schedulePracticeUndo(previousValues: number[]) {
     setPracticeUndoPending(true);
     practiceUndoTimerRef.current = window.setTimeout(() => {
-      if (isPartitionPractice) {
-        setPracticePartitionOrder(previousPartitionOrder);
-      } else {
-        setPracticeValues(previousValues);
-      }
+      setPracticeValues(previousValues);
       setPracticeFeedback("That move breaks this step's rule, so it slid back. Hint: " + currentPractice.hint);
       practiceUndoTimerRef.current = null;
       setPracticeUndoPending(false);
@@ -2492,23 +2525,15 @@ export default function Home() {
       practiceBlockPositionsRef.current = capturePracticeBlockPositions();
     }
 
-    if (isPartitionPractice) {
-      const previousOrder = [...practicePartitionOrder];
-      const nextOrder = [...practicePartitionOrder];
-      const [moved] = nextOrder.splice(fromIndex, 1);
-      nextOrder.splice(toIndex, 0, moved);
-      setPracticePartitionOrder(nextOrder);
-      if (evaluatePracticeMove(practiceValues, nextOrder) === "wrong") {
-        schedulePracticeUndo(practiceValues, previousOrder);
-      }
-    } else {
-      const previousValues = [...practiceValues];
-      const nextValues = [...practiceValues];
-      [nextValues[fromIndex], nextValues[toIndex]] = [nextValues[toIndex], nextValues[fromIndex]];
-      setPracticeValues(nextValues);
-      if (evaluatePracticeMove(nextValues, practicePartitionOrder) === "wrong") {
-        schedulePracticeUndo(previousValues, practicePartitionOrder);
-      }
+    const previousValues = [...practiceValues];
+    const nextValues = [...practiceValues];
+    [nextValues[fromIndex], nextValues[toIndex]] = [nextValues[toIndex], nextValues[fromIndex]];
+    setPracticeValues(nextValues);
+    const result = evaluatePracticeMove(nextValues);
+    if (result === "wrong") {
+      schedulePracticeUndo(previousValues);
+    } else if (result === "solved") {
+      schedulePracticeAdvance();
     }
 
     setPracticeSelectedIndex(null);
@@ -2612,6 +2637,7 @@ export default function Home() {
 
   function advancePracticeStep() {
     clearPracticeUndo();
+    clearPracticeAdvance();
     const nextStepIndex = practiceStepIndex + 1;
     if (nextStepIndex >= practiceSteps.length) {
       setPracticeStepIndex(practiceSteps.length);
@@ -2622,7 +2648,6 @@ export default function Home() {
       setPracticeDropIndex(null);
       practicePointerRef.current = null;
       setPracticeSolved(false);
-      setPracticeMedianSelection(null);
       return;
     }
 
@@ -2636,22 +2661,7 @@ export default function Home() {
     practicePointerRef.current = null;
     setPracticeSolved(false);
     setPracticeFeedback(null);
-    setPracticeMedianSelection(null);
-
-    if (nextStep.kind === "partitions") {
-      setPracticeValues([]);
-      setPracticePartitionOrder(nextStep.partitions.map((partition) => partition.id));
-      return;
-    }
-
-    if (nextStep.kind === "median") {
-      setPracticeValues([]);
-      setPracticePartitionOrder([]);
-      return;
-    }
-
     setPracticeValues([...nextStep.start]);
-    setPracticePartitionOrder([]);
   }
 
   function handleAlgorithmChange(nextAlgorithm: AlgorithmId) {
@@ -2668,6 +2678,10 @@ export default function Home() {
     const nextValues =
       nextArraySize === arraySize ? [...originalValues] : makeRandomArray(nextArraySize);
     setAlgorithm(nextAlgorithm);
+    if (nextAlgorithm === "bogo" && speed > 100) {
+      setSpeed(100);
+      setSpeedInput("100");
+    }
     if (nextArraySize !== arraySize) {
       setArraySize(nextArraySize);
       setArraySizeInput(String(nextArraySize));
@@ -2680,13 +2694,13 @@ export default function Home() {
     resetPractice(nextAlgorithm);
   }
 
-  function handlePrimaryAction() {
-    if (runState === "running") {
+  function handlePrimaryAction(startWithNewArray = false) {
+    if (!startWithNewArray && runState === "running") {
       setRunState("paused");
       return;
     }
 
-    if (runState === "paused") {
+    if (!startWithNewArray && runState === "paused") {
       if (isBogo && bogoSessionRef.current) {
         bogoRateSampleRef.current = {
           startedAt: performance.now(),
@@ -2697,6 +2711,17 @@ export default function Home() {
       }
       setRunState("running");
       return;
+    }
+
+    // Finishing a run turns the primary action into a quick way to see the
+    // selected algorithm on a genuinely new permutation, rather than replaying
+    // the exact same input. While the board is merely ready, preserve its
+    // current values so the initial and freshly resized examples can be sorted.
+    const sortValues = startWithNewArray || runState === "complete"
+      ? makeRandomArray(arraySize)
+      : originalValues;
+    if (startWithNewArray || runState === "complete") {
+      setOriginalValues(sortValues);
     }
 
     const audioContext = soundEnabled ? ensureAudioContext() : null;
@@ -2710,7 +2735,7 @@ export default function Home() {
         void audioContext.resume().then(() => playBogoShuffleTexture(0)).catch(() => undefined);
       }
       const session = createBogoSession(
-        originalValues,
+        sortValues,
         bogoRunsUntilSolved ? null : bogoAttemptLimit,
       );
       bogoSessionRef.current = session;
@@ -2721,6 +2746,8 @@ export default function Home() {
       };
       bogoExpectedRateSampleRef.current = {
         startingAttempts: session.attempts,
+        startingElapsedMilliseconds: 0,
+        modeledShuffleRate: bogoModeledShuffleRate,
         finalized: false,
       };
       if (session.done) {
@@ -2729,7 +2756,7 @@ export default function Home() {
         setBogoExpectedRateSource("modeled");
       }
       setBogoMeasuredShuffleRate(null);
-      setValues([...originalValues]);
+      setValues([...sortValues]);
       setSteps([]);
       setStepIndex(0);
       setBogoLiveStep(session.done ? getBogoSessionStep(session) : null);
@@ -2742,22 +2769,24 @@ export default function Home() {
     setBogoLiveStep(null);
     setBogoMeasuredShuffleRate(null);
     const sequence =
-      algorithm === "range-guard-mean"
-        ? buildRangeGuardMeanSteps(originalValues)
-        : algorithm === "bubble"
-          ? buildBubbleSteps(originalValues)
+      algorithm === "bubble"
+        ? buildBubbleSteps(sortValues)
         : algorithm === "cocktail"
-          ? buildCocktailSteps(originalValues)
+          ? buildCocktailSteps(sortValues)
           : algorithm === "selection"
-            ? buildSelectionSteps(originalValues)
+            ? buildSelectionSteps(sortValues)
             : algorithm === "heap"
-              ? buildHeapSortSteps(originalValues)
+              ? buildHeapSortSteps(sortValues)
               : algorithm === "quick"
-                ? buildQuickSortSteps(originalValues)
+                ? buildQuickSortSteps(sortValues)
+                : algorithm === "pdq"
+                  ? buildPdqSortSteps(sortValues)
                 : algorithm === "merge"
-                  ? buildMergeSortSteps(originalValues)
-                  : buildInsertionSteps(originalValues);
-    setValues([...originalValues]);
+                  ? buildMergeSortSteps(sortValues)
+                  : algorithm === "powersort"
+                    ? buildPowerSortSteps(sortValues)
+                  : buildInsertionSteps(sortValues);
+    setValues([...sortValues]);
     setSteps(sequence);
     setStepIndex(0);
     setRunState(sequence.length > 1 ? "running" : "complete");
@@ -2806,7 +2835,7 @@ export default function Home() {
   }
 
   function handleSpeedChange(nextSpeed: number) {
-    const clampedSpeed = Math.min(100, Math.max(1, Math.round(nextSpeed)));
+    const clampedSpeed = Math.min(maximumSpeed, Math.max(1, Math.round(nextSpeed)));
     if (isBogo && clampedSpeed !== speed) {
       const session = bogoSessionRef.current;
       bogoRateSampleRef.current =
@@ -2817,7 +2846,7 @@ export default function Home() {
               lastReportedAt: 0,
             }
           : null;
-      setBogoMeasuredShuffleRate(null);
+      restartBogoExpectedRateCalibration(session, getBogoEstimatedShuffleRate(clampedSpeed));
     }
     setSpeed(clampedSpeed);
     setSpeedInput(String(clampedSpeed));
@@ -2883,7 +2912,7 @@ export default function Home() {
       : runState === "paused"
         ? "Resume"
         : runState === "complete"
-          ? "Replay sort"
+          ? "Sort new array"
           : "Start sorting";
 
   return (
@@ -2987,8 +3016,9 @@ export default function Home() {
                     <option value="cocktail">Cocktail sort</option>
                     <option value="heap">Heap sort</option>
                     <option value="quick">Quick sort</option>
+                    <option value="pdq">PDQ sort</option>
                     <option value="merge">Merge sort</option>
-                    <option value="range-guard-mean">Adaptive Mean sort</option>
+                    <option value="powersort">Powersort</option>
                   </select>
                 </label>
 
@@ -3119,7 +3149,7 @@ export default function Home() {
                       className="control-number"
                       type="number"
                       min="1"
-                      max="100"
+                      max={maximumSpeed}
                       step="1"
                       value={speedInput}
                       onChange={(event) => handleSpeedInputChange(event.target.value)}
@@ -3134,7 +3164,7 @@ export default function Home() {
                 <input
                   type="range"
                   min="1"
-                  max="100"
+                  max={maximumSpeed}
                   value={speed}
                   onChange={(event) => handleSpeedChange(Number(event.target.value))}
                   aria-label="Animation speed"
@@ -3142,18 +3172,15 @@ export default function Home() {
               </label>
 
               <div className="button-row">
-                <button
-                  className="button button--secondary"
-                  type="button"
-                  onClick={() => createNewArray()}
-                  disabled={isRunning}
-                >
-                  New array
-                </button>
-                <button className="button button--primary" type="button" onClick={handlePrimaryAction}>
+                <button className="button button--primary" type="button" onClick={() => handlePrimaryAction()}>
                   <span className={"button-pulse " + (runState === "running" ? "button-pulse--active" : "")} aria-hidden="true" />
                   {primaryLabel}
                 </button>
+                {runState === "paused" && (
+                  <button className="text-button" type="button" onClick={() => handlePrimaryAction(true)}>
+                    Sort new array
+                  </button>
+                )}
                 <button className="text-button" type="button" onClick={resetArray}>
                   Reset
                 </button>
@@ -3188,42 +3215,6 @@ export default function Home() {
 
             <div className="chart-stage" role="img" aria-label={"Array values: " + displayValues + ". " + currentStep.message}>
               <div className="chart-grid" aria-hidden="true" />
-              {completionSweepActive && (
-                <div
-                  className={
-                    "completion-sweep " +
-                    (prefersReducedMotion ? "completion-sweep--reduced" : "")
-                  }
-                  style={completionSweepTimingStyle}
-                  aria-hidden="true"
-                >
-                  <span className="completion-sweep__line" />
-                </div>
-              )}
-              {usesRangeGroups && currentStep.groups && (
-                <div
-                  className={"mean-bands mean-bands--" + meanSlideStage}
-                  style={meanTransitionStyle}
-                  aria-hidden="true"
-                >
-                  {currentStep.groups.map((group) => {
-                    const left = (group.start / Math.max(visibleValues.length, 1)) * 100;
-                    const width =
-                      ((group.end - group.start) / Math.max(visibleValues.length, 1)) * 100;
-                    return (
-                      <div
-                        className="mean-band"
-                        key={String(group.id)}
-                        style={{ left: String(left) + "%", width: String(width) + "%" }}
-                      >
-                        {currentStep.groups && currentStep.groups.length <= 8 && (
-                          <span>μ {formatMean(group.mean)}</span>
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
               {algorithm === "insertion" && currentStep.phase === "shift" && currentStep.key !== null && (
                 <div className="held-key" aria-hidden="true">
                   <span>holding key</span>
@@ -3234,8 +3225,7 @@ export default function Home() {
                 className={
                   "bars " +
                   (isLargeArray ? "bars--dense " : "") +
-                  (algorithm === "merge" ? "bars--merge " : "") +
-                  (usesRangeGroups ? "bars--mean bars--mean-" + meanSlideStage + " " : "") +
+                  (algorithm === "merge" || algorithm === "powersort" ? "bars--merge " : "") +
                   (shouldInterpolateMoves ? "bars--flip bars--flip-" + motionSlideStage + " " : "") +
                   (completionSweepActive && !prefersReducedMotion ? "bars--completion-sweeping " : "") +
                   (shouldInterpolateDenseBars ? "bars--smooth" : "")
@@ -3244,21 +3234,10 @@ export default function Home() {
                 aria-hidden="true"
               >
                 {renderedBarItems.map((item, index) => {
-                  const group = usesRangeGroups
-                    ? currentStep.groups?.find(
-                        (candidate) => index >= candidate.start && index < candidate.end,
-                      )
-                    : undefined;
-                  const groupClass = group
-                    ? (index === group.start ? "bar-slot--group-start " : "") +
-                      (index === group.end - 1 ? "bar-slot--group-end" : "")
-                    : "";
                   const height = (item.value / largestValue) * 100;
-                  const slideOffset = usesRangeGroups
-                    ? meanSlideOffsets[item.value]
-                    : shouldInterpolateMoves
-                      ? motionSlideOffsets[item.token]
-                      : undefined;
+                  const slideOffset = shouldInterpolateMoves
+                    ? motionSlideOffsets[item.token]
+                    : undefined;
                   const slotStyle =
                     slideOffset === undefined
                       ? undefined
@@ -3275,20 +3254,16 @@ export default function Home() {
                       : { height: String(height) + "%" };
                   return (
                     <div
-                      className={"bar-slot " + groupClass}
+                      className="bar-slot"
                       key={
-                        usesRangeGroups
-                          ? "mean-" + String(item.value)
-                          : shouldInterpolateMoves
-                            ? "motion-" + item.token
-                            : String(index) + "-" + String(originalValues.length)
+                        shouldInterpolateMoves
+                          ? "motion-" + item.token
+                          : String(index) + "-" + String(originalValues.length)
                       }
                       ref={
-                        usesRangeGroups
-                          ? (element) => setMeanBarRef(item.value, element)
-                          : shouldInterpolateMoves
-                            ? (element) => setMotionBarRef(item.token, element)
-                            : undefined
+                        shouldInterpolateMoves
+                          ? (element) => setMotionBarRef(item.token, element)
+                          : undefined
                       }
                       style={slotStyle}
                     >
@@ -3318,17 +3293,7 @@ export default function Home() {
 
             <div className="workbench__footer">
               <div className="legend" aria-label="Color legend">
-                {usesRangeGroups ? (
-                  <>
-                    <span><i className="legend__swatch legend__swatch--idle" />current row</span>
-                    <span><i className="legend__swatch legend__swatch--partition" />mean lanes</span>
-                    <span><i className="legend__swatch legend__swatch--mean" />mean measured</span>
-                    <span><i className="legend__swatch legend__swatch--rank" />lanes routed</span>
-                    <span><i className="legend__swatch legend__swatch--guard" />range fence</span>
-                    <span><i className="legend__swatch legend__swatch--outlier" />ejected outlier</span>
-                    <span><i className="legend__swatch legend__swatch--polish" />local polish</span>
-                  </>
-                ) : isBogo ? (
+                {isBogo ? (
                   <>
                     <span><i className="legend__swatch legend__swatch--idle" />not ordered</span>
                     <span><i className="legend__swatch legend__swatch--shuffle" />random shuffle</span>
@@ -3340,12 +3305,19 @@ export default function Home() {
                     <span><i className="legend__swatch legend__swatch--compare" />run comparison</span>
                     <span><i className="legend__swatch legend__swatch--merge" />merged write</span>
                   </>
-                ) : algorithm === "quick" ? (
+                ) : algorithm === "powersort" ? (
+                  <>
+                    <span><i className="legend__swatch legend__swatch--run" />natural run</span>
+                    <span><i className="legend__swatch legend__swatch--power" />merge decision</span>
+                    <span><i className="legend__swatch legend__swatch--merge" />stable merge</span>
+                    <span><i className="legend__swatch legend__swatch--sorted" />finished row</span>
+                  </>
+                ) : algorithm === "quick" || algorithm === "pdq" ? (
                   <>
                     <span><i className="legend__swatch legend__swatch--idle" />active range</span>
                     <span><i className="legend__swatch legend__swatch--key" />pivot</span>
                     <span><i className="legend__swatch legend__swatch--swap" />partition swap</span>
-                    <span><i className="legend__swatch legend__swatch--sorted" />placed pivot</span>
+                    <span><i className="legend__swatch legend__swatch--sorted" />{algorithm === "pdq" ? "safe position" : "placed pivot"}</span>
                   </>
                 ) : algorithm === "bubble" ? (
                   <>
@@ -3400,14 +3372,14 @@ export default function Home() {
               <p>{algorithmDetails.stageDescription}</p>
             </div>
             <div className="stat-card">
-              <span>{usesRangeGroups ? "WORK CHECKS" : isBogo ? "ORDER CHECKS" : "COMPARISONS"}</span>
+              <span>{isBogo ? "ORDER CHECKS" : "COMPARISONS"}</span>
               <strong>{currentStep.comparisons}</strong>
-              <p>{usesRangeGroups ? "means + fences" : isBogo ? "values checked" : "values checked"}</p>
+              <p>values checked</p>
             </div>
             <div className="stat-card">
-              <span>{usesRangeGroups ? "TRACKED MOVES" : isBogo ? "SHUFFLE WRITES" : "ARRAY WRITES"}</span>
+              <span>{isBogo ? "SHUFFLE WRITES" : "ARRAY WRITES"}</span>
               <strong>{currentStep.writes}</strong>
-              <p>{usesRangeGroups ? "routes + ejections" : isBogo ? "random swaps" : "moves + writes"}</p>
+              <p>{isBogo ? "random swaps" : "moves + writes"}</p>
             </div>
             <div className="stat-card stat-card--progress">
               <span>{isBogo && bogoRunsUntilSolved && runState !== "complete" ? "OPEN ENDED" : "PROGRESS"}</span>
@@ -3510,12 +3482,20 @@ export default function Home() {
                 ? "You completed this small walkthrough. Restart it any time to practice the moves again."
                 : currentPractice.prompt}
             </p>
+            {isQuickPractice && !practiceFinished && quickPivot !== null && quickActiveRange && (
+              <div className="practice-quick-status" aria-label="Current Quick Sort partition">
+                <span><strong>Pivot</strong> {quickPivot}</span>
+                <span><strong>Working range</strong> slots {quickActiveRange[0] + 1}–{quickActiveRange[1] + 1}</span>
+                <span>
+                  <strong>Already fixed</strong>{" "}
+                  {quickSettledValues.length ? quickSettledValues.join(", ") : "none yet"}
+                </span>
+              </div>
+            )}
             <p className="practice-lab__help">
-              {isMedianPractice
-                ? "Choose the lower median to create two near-even outlier-guard halves. A wrong choice clears itself so you can try again."
-                : isPartitionPractice
-                  ? "Pick up a partition and drag it into its new position, or select one and then select its destination. Each arrangement is checked immediately."
-                  : "Select or drag either of the two values to swap them. The starting value does not matter: a swap stays when it puts the row closer to this step's target; otherwise it slides back."}
+              {isQuickPractice
+                ? "The gold block is the parked pivot. Make the one safe swap for this partition; a different move slides back immediately, so the next pivot can never become stuck. You can start the swap from either block."
+                : "Select or drag either of the two values to swap them. The starting value does not matter: a swap stays when it puts the row closer to this step's target; otherwise it slides back."}
             </p>
             <div
               className="practice-board"
@@ -3523,78 +3503,30 @@ export default function Home() {
               role="group"
               aria-label={algorithmLabel + " interactive practice blocks"}
             >
-              {isMedianPractice && currentPractice.kind === "median"
-                ? currentPractice.values.map((value) => (
-                    <button
-                      className={
-                        "practice-block practice-block--median " +
-                        (practiceMedianSelection === value ? "practice-block--selected" : "")
-                      }
-                      type="button"
-                      key={value}
-                      onClick={() => handleMedianPracticeChoice(value)}
-                      disabled={practiceUndoPending || practiceSolved}
-                      aria-pressed={practiceMedianSelection === value}
-                    >
-                      <span>{value}</span>
-                      <strong>median?</strong>
-                    </button>
-                  ))
-                : isPartitionPractice
-                ? practicePartitionOrder.map((partitionId, index) => {
-                    const partition = currentPractice.partitions.find(
-                      (candidate) => candidate.id === partitionId,
-                    );
-                    if (!partition) return null;
-                    const practiceItemId = "partition-" + partition.id;
-                    const isDragging = practiceDraggingId === practiceItemId;
-                    return (
-                      <button
-                        className={
-                          "practice-block practice-block--partition " +
-                          (practiceSelectedIndex === index ? "practice-block--selected " : "") +
-                          (isDragging ? "practice-block--dragging " : "") +
-                          (practiceDropIndex === index && practiceDragIndex !== index
-                            ? "practice-block--drop-target"
-                            : "")
-                        }
-                        type="button"
-                        key={partition.id}
-                        ref={(element) => setPracticeBlockRef(practiceItemId, element)}
-                        data-practice-index={index}
-                        onPointerDown={(event) => handlePracticePointerDown(event, index, practiceItemId)}
-                        onPointerMove={handlePracticePointerMove}
-                        onPointerUp={() => finishPracticeDrag()}
-                        onPointerCancel={() => finishPracticeDrag(true)}
-                        onClick={() => handlePracticeBlockClick(index)}
-                        disabled={practiceUndoPending || practiceSolved}
-                        aria-pressed={practiceSelectedIndex === index}
-                        aria-grabbed={isDragging}
-                        style={
-                          isDragging
-                            ? {
-                                transform:
-                                  "translate(" +
-                                  practiceDragOffset.x +
-                                  "px, " +
-                                  practiceDragOffset.y +
-                                  "px) scale(1.04)",
-                              }
-                            : undefined
-                        }
-                      >
-                        <span>[{partition.values.join(", ")}]</span>
-                        <strong>μ {formatMean(partition.mean)}</strong>
-                      </button>
-                    );
-                  })
-                : practiceValues.map((value, index) => {
+              {practiceValues.map((value, index) => {
                       const practiceItemId = "value-" + value;
                       const isDragging = practiceDraggingId === practiceItemId;
+                      const isQuickPivot = isQuickPractice && value === quickPivot;
+                      const isQuickSettled = !isQuickPivot && quickSettledValues.includes(value);
+                      const isInQuickRange =
+                        !isQuickPractice ||
+                        !quickActiveRange ||
+                        (index >= quickActiveRange[0] && index <= quickActiveRange[1]);
+                      const quickLabel = isQuickPivot
+                        ? ", current pivot"
+                        : isQuickSettled
+                          ? ", fixed in its final position"
+                          : isQuickPractice && !isInQuickRange
+                            ? ", outside the current partition"
+                            : "";
                       return (
                         <button
                           className={
                             "practice-block " +
+                            (isQuickPivot ? "practice-block--quick-pivot " : "") +
+                            (isQuickSettled ? "practice-block--quick-settled " : "") +
+                            (isQuickPractice && isInQuickRange ? "practice-block--quick-active " : "") +
+                            (isQuickPractice && !isInQuickRange ? "practice-block--quick-waiting " : "") +
                             (practiceSelectedIndex === index ? "practice-block--selected " : "") +
                             (isDragging ? "practice-block--dragging " : "") +
                             (practiceDropIndex === index && practiceDragIndex !== index
@@ -3613,6 +3545,7 @@ export default function Home() {
                           disabled={practiceUndoPending || practiceSolved}
                           aria-pressed={practiceSelectedIndex === index}
                           aria-grabbed={isDragging}
+                          aria-label={"Value " + value + quickLabel}
                           style={
                             isDragging
                               ? {
@@ -3626,7 +3559,9 @@ export default function Home() {
                               : undefined
                           }
                         >
-                          {value}
+                          <span className="practice-block__value">{value}</span>
+                          {isQuickPivot && <span className="practice-block__badge">pivot</span>}
+                          {isQuickSettled && <span className="practice-block__badge practice-block__badge--fixed">fixed</span>}
                         </button>
                       );
                     })}
@@ -3641,11 +3576,6 @@ export default function Home() {
                   <button className="text-button" type="button" onClick={() => resetPractice()}>
                     Reset walkthrough
                   </button>
-                  {practiceSolved && (
-                    <button className="button button--primary" type="button" onClick={advancePracticeStep}>
-                      {practiceStepIndex === practiceSteps.length - 1 ? "Finish walkthrough" : "Next step"}
-                    </button>
-                  )}
                 </>
               )}
             </div>
@@ -3706,7 +3636,7 @@ export default function Home() {
             <p className="benchmark-chart__note">
               {benchmarkView === "theory"
                 ? "This view illustrates each algorithm's growth shape for the selected arrangement. Meter length uses a log scale so O(n log n) curves remain visible next to quadratic ones; the rounded number is a relative model unit, not a timed result or an exact operation total."
-                : "Each column applies this visualizer's counted-work model at that exact size: value comparisons, primary writes, and Adaptive Mean's mean scans, fences, and ejections. Meter length uses a log scale so faster algorithms remain visible; the rounded number is not browser runtime."}
+                : "Each column applies this visualizer's counted-work model at that exact size: value comparisons and primary writes. Meter length uses a log scale so faster algorithms remain visible; the rounded number is not browser runtime."}
             </p>
             <p className="benchmark-chart__order">Rows run from highest counted work at the top to lowest at the bottom, based on the rightmost size.</p>
             <div className="benchmark-matrix" style={benchmarkMatrixStyle}>

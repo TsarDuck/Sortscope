@@ -7,8 +7,9 @@ import {
   analyzeCocktailSort,
   analyzeHeapSort,
   analyzeInsertionSort,
-  analyzeRangeGuardMeanSort,
   analyzeMergeSort,
+  analyzePdqSort,
+  analyzePowerSort,
   analyzeQuickSort,
   analyzeSelectionSort,
   buildBogoSteps,
@@ -16,61 +17,18 @@ import {
   buildCocktailSteps,
   buildHeapSortSteps,
   buildInsertionSteps,
-  buildRangeGuardMeanSteps,
   buildMergeSortSteps,
+  buildPdqSortSteps,
+  buildPowerSortSteps,
   buildQuickSortSteps,
   buildSelectionSteps,
   createBogoSession,
   getBogoSessionStep,
   isNonDecreasing,
-  partitionBalanced,
 } from "../app/lib/sorting";
 
 function finalValues(steps: Array<{ values: number[] }>) {
   return steps.at(-1)?.values ?? [];
-}
-
-function makeBenchmarkValues(length: number, pattern: "random" | "reverse" | "nearly-sorted") {
-  const values = Array.from({ length }, (_, index) => index + 1);
-
-  if (pattern === "reverse") return values.reverse();
-
-  if (pattern === "nearly-sorted") {
-    const swapCount = Math.max(2, Math.floor(length * 0.08));
-    for (let index = 0; index < swapCount; index += 1) {
-      const left = (index * 17 + 3) % length;
-      const right = (index * 29 + 7) % length;
-      [values[left], values[right]] = [values[right], values[left]];
-    }
-    return values;
-  }
-
-  let seed = length * 7919 + 17;
-  for (let index = values.length - 1; index > 0; index -= 1) {
-    seed = (seed * 1664525 + 1013904223) >>> 0;
-    const swapIndex = seed % (index + 1);
-    [values[index], values[swapIndex]] = [values[swapIndex], values[index]];
-  }
-
-  return values;
-}
-
-function totalWork(metrics: {
-  comparisons: number;
-  rankComparisons: number;
-  writes: number;
-  meanComputationOperations?: number;
-  meanRankingArithmeticOperations?: number;
-  refinementOperations?: number;
-}) {
-  return (
-    metrics.comparisons +
-    metrics.rankComparisons +
-    metrics.writes +
-    (metrics.meanComputationOperations ?? 0) +
-    (metrics.meanRankingArithmeticOperations ?? 0) +
-    (metrics.refinementOperations ?? 0)
-  );
 }
 
 test("insertion sort finishes in numeric order without mutating its source", () => {
@@ -83,114 +41,16 @@ test("insertion sort finishes in numeric order without mutating its source", () 
   assert.equal(steps.at(-1)?.writes, 4);
 });
 
-test("adaptive mean repeatedly scouts lanes, checks fences, and ejects crossings", () => {
-  const source = Array.from(
-    { length: 64 },
-    (_, index) => (index % 2 === 0 ? index / 2 + 1 : 64 - (index - 1) / 2),
-  );
-  const steps = buildRangeGuardMeanSteps(source);
-  const splitSteps = steps.filter((step) => step.phase === "split");
-
-  assert.deepEqual(
-    splitSteps.slice(0, 3).map((step) => step.groups?.length),
-    [2, 4, 8],
-  );
-  assert.match(splitSteps[0]?.message ?? "", /Mean scout 1/);
-  assert.ok(steps.some((step) => step.phase === "guard"));
-  assert.ok(steps.some((step) => step.phase === "eject"));
-  const firstEjection = steps.findIndex((step) => step.phase === "eject");
-  assert.ok(firstEjection >= 0);
-  assert.ok(
-    steps.slice(firstEjection + 1).some((step) => step.phase === "average"),
-    "Adaptive Mean should resume mean scouting after a fence ejection.",
-  );
-  assert.deepEqual(finalValues(steps), [...source].sort((left, right) => left - right));
-  const metrics = analyzeRangeGuardMeanSort(source);
-  assert.equal(metrics.comparisons, 0);
-  assert.ok(metrics.rankComparisons > 0);
-  assert.ok((metrics.meanComputationOperations ?? 0) > 0);
-  assert.ok((metrics.meanRankingArithmeticOperations ?? 0) > 0);
-  assert.ok((metrics.refinementOperations ?? 0) > 0);
-  assert.ok(steps.filter((step) => step.phase === "reorder").length >= 3);
-  assert.deepEqual(source, Array.from(
-    { length: 64 },
-    (_, index) => (index % 2 === 0 ? index / 2 + 1 : 64 - (index - 1) / 2),
-  ));
-});
-
-test("adaptive mean respects duplicate-safe locked range fences", () => {
-  const source = [
-    16, 1, 15, 2, 14, 3, 13, 4, 12, 5, 11, 6, 10, 7, 9, 8,
-    31, 16, 30, 17, 29, 18, 28, 19, 27, 20, 26, 21, 25, 22, 24, 23,
-  ];
-  const guarded = buildRangeGuardMeanSteps(source);
-  const rangeScan = guarded.find((step) => step.phase === "guard");
-
-  assert.match(rangeScan?.message ?? "", /locked boundar/);
-  assert.ok((rangeScan?.groups?.length ?? 0) >= 2);
-  assert.deepEqual(finalValues(guarded), [...source].sort((left, right) => left - right));
-});
-
-test("adaptive mean makes its outlier ejection visible before local polish", () => {
-  const source = [1, 16, 2, 15, 3, 14, 4, 13, 5, 12, 6, 11, 7, 10, 8, 9];
-  const steps = buildRangeGuardMeanSteps(source);
-  const ejection = steps.find((step) => step.phase === "eject");
-  const polish = steps.find((step) => step.phase === "polish");
-
-  assert.ok(ejection);
-  assert.ok((ejection?.outliers?.length ?? 0) > 0);
-  assert.ok(polish);
-  assert.ok(
-    (polish?.groups ?? []).every((group) => group.end - group.start <= 8),
-    "Only small independent lanes should reach the local polish.",
-  );
-  assert.deepEqual(finalValues(steps), [...source].sort((left, right) => left - right));
-});
-
-test("adaptive mean finishes generic values exactly without mutating its source", () => {
-  for (const source of [
-    [5, 5, 2, 2, 1, -3, 8, -1, 0, 8],
-    [3.5, -1.25, 3.5, 0, -8.75, 2.25, 2.25],
-    Array.from({ length: 33 }, (_, index) => (index * 11) % 29 - 14),
-    Array.from({ length: 255 }, (_, index) => ((index * 73) % 97) - 48),
-  ]) {
-    const before = [...source];
-    const expected = [...source].sort((left, right) => left - right);
-
-    assert.deepEqual(finalValues(buildRangeGuardMeanSteps(source)), expected);
-    assert.deepEqual(analyzeRangeGuardMeanSort(source).finalValues, expected);
-    assert.deepEqual(source, before);
-  }
-});
-
-test("balanced partitions cover every value without creating empty groups", () => {
-  assert.deepEqual(partitionBalanced([1, 2, 3, 4, 5], 4), [[1, 2], [3], [4], [5]]);
-  assert.deepEqual(partitionBalanced([1, 2, 3, 4, 5, 6], 4), [[1, 2], [3, 4], [5], [6]]);
-});
-
-test("adaptive mean stays below heap on the Efficiency Lab arrangements", () => {
-  for (const size of [16, 32, 64, 128, 256]) {
-    for (const pattern of ["random", "reverse", "nearly-sorted"] as const) {
-      const values = makeBenchmarkValues(size, pattern);
-      const guardedWork = totalWork(analyzeRangeGuardMeanSort(values));
-      const heapWork = totalWork(analyzeHeapSort(values));
-
-      assert.ok(
-        guardedWork < heapWork,
-        "Expected Adaptive Mean to beat Heap at n=" + size + " for " + pattern + ".",
-      );
-    }
-  }
-});
-
-test("bubble, cocktail, selection, heap, quick, and merge sort finish in numeric order without mutating the source", () => {
+test("bubble, cocktail, selection, heap, quick, PDQ, merge, and Powersort finish in numeric order without mutating the source", () => {
   const builders = [
     buildBubbleSteps,
     buildCocktailSteps,
     buildSelectionSteps,
     buildHeapSortSteps,
     buildQuickSortSteps,
+    buildPdqSortSteps,
     buildMergeSortSteps,
+    buildPowerSortSteps,
   ];
   const sources = [
     [5, 1, 4, 2, 3],
@@ -327,6 +187,34 @@ test("quick sort marks in-place values for rendering without changing its work t
   assert.equal(finalStep?.writes, metrics.writes);
 });
 
+test("PDQ sort keeps its visual hints separate from its counted work", () => {
+  const source = [8, 1, 7, 3, 6, 2, 5, 4];
+  const steps = buildPdqSortSteps(source);
+  const metrics = analyzePdqSort(source);
+
+  assert.deepEqual(finalValues(steps), [1, 2, 3, 4, 5, 6, 7, 8]);
+  assert.equal(steps.at(-1)?.comparisons, metrics.comparisons);
+  assert.equal(steps.at(-1)?.writes, metrics.writes);
+  assert.ok((steps[0]?.visualSettled?.length ?? 0) >= 0);
+  assert.deepEqual(source, [8, 1, 7, 3, 6, 2, 5, 4]);
+});
+
+test("Powersort detects natural runs and keeps builder metrics aligned with its analyzer", () => {
+  const source = [1, 4, 7, 10, 2, 5, 8, 11, 3, 6, 9, 12, 13, 14, 15, 16];
+  const steps = buildPowerSortSteps(source);
+  const metrics = analyzePowerSort(source);
+  const powerFrames = steps.filter((step) => step.phase === "power");
+
+  assert.deepEqual(finalValues(steps), [...source].sort((left, right) => left - right));
+  assert.equal(steps.at(-1)?.comparisons, metrics.comparisons);
+  assert.equal(steps.at(-1)?.writes, metrics.writes);
+  assert.ok(steps.some((step) => step.phase === "run"));
+  assert.ok(powerFrames.some((step) => (step.nodePower ?? 0) >= 1));
+
+  const alreadySorted = buildPowerSortSteps(Array.from({ length: 32 }, (_, index) => index + 1));
+  assert.equal(alreadySorted.filter((step) => step.phase === "merge").length, 0);
+});
+
 test("sorting metric analyzers preserve a clean 1 through 256 final line", () => {
   const source = Array.from({ length: 256 }, (_, index) => 256 - index);
   const expected = Array.from({ length: 256 }, (_, index) => index + 1);
@@ -337,7 +225,8 @@ test("sorting metric analyzers preserve a clean 1 through 256 final line", () =>
   assert.deepEqual(analyzeSelectionSort(source).finalValues, expected);
   assert.deepEqual(analyzeHeapSort(source).finalValues, expected);
   assert.deepEqual(analyzeQuickSort(source).finalValues, expected);
+  assert.deepEqual(analyzePdqSort(source).finalValues, expected);
   assert.deepEqual(analyzeMergeSort(source).finalValues, expected);
-  assert.deepEqual(analyzeRangeGuardMeanSort(source).finalValues, expected);
+  assert.deepEqual(analyzePowerSort(source).finalValues, expected);
   assert.deepEqual(source, Array.from({ length: 256 }, (_, index) => 256 - index));
 });
