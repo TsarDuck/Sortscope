@@ -6,7 +6,20 @@ import {
   isPracticeRowFinished,
   isPracticeMoveProgress,
   resolvePracticeDropTarget,
+  shufflePracticeValues,
 } from "../app/lib/practice";
+
+test("the Bogo practice shuffle uses an unbiased Fisher-Yates pass without mutating its row", () => {
+  const source = [1, 2, 3, 4];
+  const randomValues = [0, 0, 0];
+  let randomIndex = 0;
+
+  const shuffled = shufflePracticeValues(source, () => randomValues[randomIndex++] ?? 0);
+
+  assert.deepEqual(shuffled, [2, 3, 4, 1]);
+  assert.deepEqual(source, [1, 2, 3, 4]);
+  assert.deepEqual([...shuffled].sort((left, right) => left - right), source);
+});
 
 test("a direct block drop swaps values from either starting block", () => {
   assert.deepEqual(applyPracticeMove([1, 2, 3, 4], 0, 2, "swap"), [3, 2, 1, 4]);

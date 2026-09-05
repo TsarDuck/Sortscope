@@ -30,6 +30,7 @@ import {
   isPracticeRowFinished,
   isPracticeMoveProgress,
   resolvePracticeDropTarget,
+  shufflePracticeValues,
   type PracticeDropMode,
   type PracticeDropRegion,
   type PracticeDropTarget,
@@ -216,6 +217,10 @@ const DEFAULT_WORKLOAD_BAR_ALGORITHM_VISIBILITY: Record<BenchmarkAlgorithm, bool
 };
 const BOGO_MIN_ATTEMPTS = 1;
 const BOGO_STANDARD_MAX_ATTEMPTS = 999_999_999;
+// The hands-on Bogo experiment deliberately stays tiny: every click gives
+// all 4! possible orders an equal chance, so a lucky completion is possible
+// without borrowing the Control Room's potentially enormous input.
+const BOGO_PRACTICE_INITIAL_VALUES = [4, 2, 1, 3];
 // At the top end, the live runner works in short CPU batches. This is a
 // deliberately conservative pre-run model; the page replaces it with the
 // browser's measured rate once a Bogo session has run long enough to sample.
@@ -1348,16 +1353,10 @@ const ALGORITHM_DETAILS: Record<AlgorithmId, AlgorithmDetails> = {
     ],
     practice: [
       {
-        prompt: "For this tiny example, arrange the lucky sorted shuffle.",
-        start: [3, 1, 2],
-        target: [1, 2, 3],
-        hint: "Bogo has no smarter move—you are just modeling the lucky outcome one swap at a time.",
-      },
-      {
-        prompt: "Try a second tiny lucky outcome with four values.",
-        start: [2, 4, 1, 3],
+        prompt: "Press Gamble to shuffle this four-value row. Keep trying until chance lands on the one sorted order.",
+        start: BOGO_PRACTICE_INITIAL_VALUES,
         target: [1, 2, 3, 4],
-        hint: "There is only one successful order among all possible shuffles.",
+        hint: "Every click is a fresh, equally likely guess. There is no useful move to preserve.",
       },
     ],
   },
@@ -1785,6 +1784,7 @@ export default function Home() {
   const [practiceDropIndex, setPracticeDropIndex] = useState<number | null>(null);
   const [practiceDropMode, setPracticeDropMode] = useState<PracticeDropMode | null>(null);
   const [practiceSolved, setPracticeSolved] = useState(false);
+  const [bogoPracticeAttempts, setBogoPracticeAttempts] = useState(0);
   const [practiceFeedback, setPracticeFeedback] = useState<string | null>(null);
   const [practiceUndoPending, setPracticeUndoPending] = useState(false);
   const audioContextRef = useRef<AudioContext | null>(null);
@@ -1900,6 +1900,7 @@ export default function Home() {
     () => normalizePracticeSteps(algorithmDetails.practice),
     [algorithmDetails.practice],
   );
+  const isBogoPractice = algorithm === "bogo";
   const practiceFinished = practiceStepIndex >= practiceSteps.length;
   const currentPractice = practiceSteps[Math.min(practiceStepIndex, practiceSteps.length - 1)];
   const isQuickPractice = algorithm === "quick" && currentPractice.pivot !== undefined;
@@ -2893,7 +2894,9 @@ export default function Home() {
     }, 520);
   }
 
-  function completePracticeWalkthrough() {
+  function completePracticeWalkthrough(
+    completionFeedback = "Fully sorted—this completes the walkthrough.",
+  ) {
     clearPracticeUndo();
     clearPracticeAdvance();
     setPracticeStepIndex(practiceSteps.length);
@@ -2906,8 +2909,29 @@ export default function Home() {
     practicePointerRef.current = null;
     practiceDropTargetRef.current = null;
     setPracticeSolved(true);
-    setPracticeFeedback("Fully sorted—this completes the walkthrough.");
+    setPracticeFeedback(completionFeedback);
     startPracticeCelebration();
+  }
+
+  function handleBogoPracticeGamble() {
+    if (!isBogoPractice || practiceFinished) return;
+
+    const nextValues = shufflePracticeValues(practiceValues);
+    const nextAttempts = bogoPracticeAttempts + 1;
+
+    setPracticeValues(nextValues);
+    setBogoPracticeAttempts(nextAttempts);
+    if (isPracticeRowFinished(nextValues, BOGO_PRACTICE_INITIAL_VALUES)) {
+      completePracticeWalkthrough(
+        "Lucky! Gamble " + String(nextAttempts) + " landed on the one sorted order.",
+      );
+      return;
+    }
+
+    setPracticeSolved(false);
+    setPracticeFeedback(
+      "Gamble " + String(nextAttempts) + " was not sorted. One order out of 24 wins—try again.",
+    );
   }
 
   function resetPractice(nextAlgorithm = algorithm) {
@@ -2917,6 +2941,7 @@ export default function Home() {
     clearPracticeCelebration();
     practiceCompletionRef.current = false;
     const firstStep = normalizePracticeSteps(ALGORITHM_DETAILS[nextAlgorithm].practice)[0];
+    const isResettingBogoPractice = nextAlgorithm === "bogo";
     setPracticeStepIndex(0);
     setPracticeSelectedIndex(null);
     setPracticeDragIndex(null);
@@ -2927,8 +2952,13 @@ export default function Home() {
     practicePointerRef.current = null;
     practiceDropTargetRef.current = null;
     setPracticeSolved(false);
+    setBogoPracticeAttempts(0);
     setPracticeFeedback(null);
-    setPracticeValues([...firstStep.start]);
+    setPracticeValues(
+      isResettingBogoPractice
+        ? [...BOGO_PRACTICE_INITIAL_VALUES]
+        : [...firstStep.start],
+    );
   }
 
   function capturePracticeBlockPositions() {
@@ -4152,19 +4182,36 @@ export default function Home() {
             <div className="practice-lab__header">
               <div>
                 <p className="eyebrow">TRY IT YOURSELF</p>
-                <h3 id="practice-title">Move the blocks and see the rule.</h3>
+                <h3 id="practice-title">
+                  {isBogoPractice ? "Take a chance and see the rule." : "Move the blocks and see the rule."}
+                </h3>
               </div>
               <span>
                 {practiceFinished
                   ? "complete"
-                  : "step " + String(practiceStepIndex + 1) + " of " + String(practiceSteps.length)}
+                  : isBogoPractice
+                    ? String(bogoPracticeAttempts) + " gambles"
+                    : "step " + String(practiceStepIndex + 1) + " of " + String(practiceSteps.length)}
               </span>
             </div>
             <p className="practice-lab__prompt">
               {practiceFinished
-                ? "You completed this small walkthrough. Restart it any time to practice the moves again."
+                ? isBogoPractice
+                  ? "Chance found the only sorted order. Reset it to take another tiny gamble."
+                  : "You completed this small walkthrough. Restart it any time to practice the moves again."
                 : currentPractice.prompt}
             </p>
+            {isBogoPractice && (
+              <div className="practice-bogo-status" role="status" aria-live="polite">
+                <span>GAMBLES</span>
+                <strong>{bogoPracticeAttempts}</strong>
+                <small>
+                  {practiceFinished
+                    ? "Lucky sorted order found"
+                    : "One sorted order out of 24 possible rows"}
+                </small>
+              </div>
+            )}
             {isPartitionPractice && !practiceFinished && partitionPivot !== null && partitionActiveRange && (
               <div className="practice-quick-status practice-partition-status" aria-label={"Current " + algorithmLabel + " partition"}>
                 <span>
@@ -4219,7 +4266,9 @@ export default function Home() {
               </div>
             )}
             <p className="practice-lab__help">
-              {isPdqPractice
+              {isBogoPractice
+                ? "Gamble runs one completely fresh Fisher-Yates shuffle. No block is draggable because Bogo Sort does not make a strategic move—it only keeps rolling until the entire row happens to be ordered."
+                : isPdqPractice
                 ? "Gold is PDQ's sampled pivot and cyan badges show the values it inspected. Only this step's safe outcome stays; this zoomed branch then uses a tiny-piece cleanup when it is small enough."
                 : isQuickPractice
                 ? "The gold block is the parked pivot. Drop onto a block to swap it, or into a glowing gap to shift the row. Only the safe partition move stays, so the next pivot can never become stuck."
@@ -4230,13 +4279,39 @@ export default function Home() {
             <div
               className={
                 "practice-board " +
+                (isBogoPractice ? "practice-board--bogo " : "") +
                 (practiceDraggingId ? "practice-board--dragging " : "") +
                 (practiceFinished ? "practice-board--complete" : "")
               }
-              ref={practiceBoardRef}
-              role="group"
-              aria-label={algorithmLabel + " interactive practice blocks"}
+              ref={isBogoPractice ? undefined : practiceBoardRef}
+              role={isBogoPractice ? "list" : "group"}
+              aria-label={
+                isBogoPractice
+                  ? "Bogo sort four-value gamble row"
+                  : algorithmLabel + " interactive practice blocks"
+              }
             >
+              {isBogoPractice ? (
+                practiceValues.map((value) => (
+                  <div
+                    className={
+                      "practice-block practice-block--bogo " +
+                      (practiceFinished ? "practice-block--completed" : "")
+                    }
+                    key={value}
+                    role="listitem"
+                    aria-label={
+                      "Value " + value + (practiceFinished ? ", fixed in its final position" : "")
+                    }
+                  >
+                    <span className="practice-block__value">{value}</span>
+                    {practiceFinished && (
+                      <span className="practice-block__badge practice-block__badge--fixed">fixed</span>
+                    )}
+                  </div>
+                ))
+              ) : (
+                <>
               {practiceValues.map((value, index) => {
                       const practiceItemId = "value-" + value;
                       const isDragging = practiceDraggingId === practiceItemId;
@@ -4355,9 +4430,35 @@ export default function Home() {
                 data-practice-drop-index={practiceValues.length}
                 aria-hidden="true"
               />
+                </>
+              )}
             </div>
             <div className="practice-lab__actions">
-              {practiceFinished ? (
+              {isBogoPractice ? (
+                <>
+                  {!practiceFinished && (
+                    <button
+                      className="button button--gamble"
+                      type="button"
+                      onClick={handleBogoPracticeGamble}
+                      aria-describedby="bogo-practice-gamble-help"
+                    >
+                      <span>Gamble</span>
+                      <small>shuffle all 4 blocks</small>
+                    </button>
+                  )}
+                  <button
+                    className={practiceFinished ? "button button--secondary" : "text-button"}
+                    type="button"
+                    onClick={() => resetPractice()}
+                  >
+                    {practiceFinished ? "Gamble again" : "Reset gamble"}
+                  </button>
+                  <span className="sr-only" id="bogo-practice-gamble-help">
+                    Each gamble makes one new random order. The lesson completes only when all four values are in ascending order.
+                  </span>
+                </>
+              ) : practiceFinished ? (
                 <button className="button button--secondary" type="button" onClick={() => resetPractice()}>
                   Restart walkthrough
                 </button>

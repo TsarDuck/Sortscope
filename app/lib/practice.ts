@@ -24,6 +24,27 @@ export type PracticeTargetScore = {
 };
 
 /**
+ * Make one unbiased Fisher-Yates shuffle for the Bogo hands-on experiment.
+ *
+ * The random source is injectable so the interaction can be verified without
+ * relying on chance. The returned row is always a new array; the original
+ * lesson row remains available for reset and completion checks.
+ */
+export function shufflePracticeValues<T>(
+  values: readonly T[],
+  random: () => number = Math.random,
+) {
+  const nextValues = [...values];
+
+  for (let index = nextValues.length - 1; index > 0; index -= 1) {
+    const targetIndex = Math.floor(random() * (index + 1));
+    [nextValues[index], nextValues[targetIndex]] = [nextValues[targetIndex], nextValues[index]];
+  }
+
+  return nextValues;
+}
+
+/**
  * Apply the two kinds of move the hands-on lessons accept.
  *
  * A block dropped directly on another block trades places with it. A block

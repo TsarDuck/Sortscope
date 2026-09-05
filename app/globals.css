@@ -700,6 +700,33 @@ input:focus-visible {
   box-shadow: 0 10px 30px rgba(103, 115, 255, 0.39);
 }
 
+.button--gamble {
+  min-width: 174px;
+  min-height: 58px;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 24px;
+  border-color: rgba(255, 216, 109, 0.76);
+  color: #fff7d2;
+  background: linear-gradient(135deg, rgba(199, 110, 28, 0.94), rgba(120, 55, 145, 0.92));
+  box-shadow: 0 10px 26px rgba(144, 74, 33, 0.28), inset 0 1px rgba(255, 248, 207, 0.24);
+  font-size: 0.95rem;
+  letter-spacing: 0.045em;
+  text-transform: uppercase;
+}
+
+.button--gamble small {
+  color: rgba(255, 245, 205, 0.78);
+  font-size: 0.57rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+}
+
+.button--gamble:hover:not(:disabled) {
+  border-color: #fff0a7;
+  box-shadow: 0 13px 30px rgba(153, 79, 38, 0.38), inset 0 1px rgba(255, 248, 207, 0.3);
+}
+
 .button-pulse {
   width: 7px;
   height: 7px;
@@ -1528,6 +1555,38 @@ input:focus-visible {
   line-height: 1.5;
 }
 
+.practice-bogo-status {
+  display: flex;
+  grid-column: 1 / -1;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 11px;
+  border: 1px solid rgba(255, 211, 108, 0.38);
+  border-radius: 10px;
+  color: #c8d0eb;
+  background: linear-gradient(100deg, rgba(136, 72, 27, 0.2), rgba(79, 48, 130, 0.17));
+}
+
+.practice-bogo-status > span {
+  color: #f4cf75;
+  font-size: 0.61rem;
+  font-weight: 900;
+  letter-spacing: 0.1em;
+}
+
+.practice-bogo-status strong {
+  color: #fff1bd;
+  font-size: 1.15rem;
+  line-height: 1;
+}
+
+.practice-bogo-status small {
+  margin-left: 4px;
+  color: #adb9dd;
+  font-size: 0.69rem;
+  font-weight: 700;
+}
+
 .practice-quick-status {
   display: flex;
   grid-column: 1 / -1;
@@ -1699,6 +1758,17 @@ input:focus-visible {
   background: rgba(7, 10, 27, 0.44);
 }
 
+.practice-board--bogo {
+  justify-content: center;
+  gap: 14px;
+  min-height: 94px;
+  border-style: solid;
+  border-color: rgba(255, 208, 107, 0.3);
+  background:
+    radial-gradient(circle at 50% 0%, rgba(255, 187, 78, 0.12), transparent 58%),
+    rgba(7, 10, 27, 0.52);
+}
+
 /* Every lesson accepts an item anywhere between its neighbors as well as
    directly on top of another block. */
 .practice-drop-slot {
@@ -1762,6 +1832,26 @@ input:focus-visible {
   touch-action: none;
   user-select: none;
   transition: transform 150ms ease, border-color 150ms ease, box-shadow 150ms ease, background 150ms ease;
+}
+
+.practice-block--bogo {
+  display: grid;
+  min-width: 58px;
+  min-height: 58px;
+  place-items: center;
+  border-color: rgba(255, 205, 98, 0.65);
+  color: #fff7d4;
+  background: linear-gradient(145deg, rgba(205, 135, 46, 0.49), rgba(111, 61, 148, 0.58));
+  cursor: default;
+  font-size: 1.02rem;
+}
+
+.practice-board--bogo .practice-block--bogo:not(.practice-block--completed):hover,
+.practice-board--bogo .practice-block--bogo:not(.practice-block--completed):focus-visible {
+  border-color: rgba(255, 224, 141, 0.8);
+  box-shadow: 0 6px 16px rgba(4, 6, 24, 0.24);
+  outline: 0;
+  transform: none;
 }
 
 /* Run indicators are drawn inside each block, so they stay in the correct
