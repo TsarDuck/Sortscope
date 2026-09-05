@@ -180,6 +180,7 @@ const DEFAULT_SPEED = 62;
 // keep the wider playback range that makes the top end feel responsive.
 const MAX_SPEED = 200;
 const DISPLAY_SPEED_MAX = 100;
+const MOVE_INTERPOLATION_MAX_SPEED = 50;
 const BOGO_MAX_ARRAY_SIZE = 24;
 // A dense, bar-only verification scan needs enough time for the eye to read
 // the order, but not so much that a 256-value finish becomes its own scene.
@@ -1912,7 +1913,7 @@ export default function Home() {
   );
   // While a control is being adjusted, keep the visual interpolation policy
   // at the last settled speed. Playback timing continues to use `speed`, so
-  // the sort still reacts live without remounting bars at the 75% boundary.
+  // the sort still reacts live without remounting bars at the 50% boundary.
   const interpolationSpeed = isAdjustingSpeedControl ? settledVisualSpeed : speed;
   const bogoAttemptMaximum = BOGO_STANDARD_MAX_ATTEMPTS;
   const bogoSliderStep = 1;
@@ -2076,7 +2077,9 @@ export default function Home() {
   }, [algorithm, steps]);
   const motionSlideDuration = Math.round(Math.max(170, 880 - interpolationSpeed * 9.4));
   const shouldInterpolateMoves =
-    !isBogo && !prefersReducedMotion && interpolationSpeed < 75;
+    !isBogo &&
+    !prefersReducedMotion &&
+    interpolationSpeed <= MOVE_INTERPOLATION_MAX_SPEED;
   const isSafeVisualMove =
     shouldInterpolateMoves &&
     previousVisualStep !== null &&
@@ -2321,7 +2324,10 @@ export default function Home() {
         ? motionSlideDuration + 100
       : Math.max(minimumFrameDelay, speedDelay / playbackDensity);
   const shouldInterpolateDenseBars =
-    isLargeArray && !isBogo && !prefersReducedMotion && interpolationSpeed <= 50;
+    isLargeArray &&
+    !isBogo &&
+    !prefersReducedMotion &&
+    interpolationSpeed <= MOVE_INTERPOLATION_MAX_SPEED;
   const denseBarTransitionStyle = shouldInterpolateDenseBars
     ? ({
         "--bar-transition-duration": String(Math.min(260, Math.max(90, delay * 0.75))) + "ms",
