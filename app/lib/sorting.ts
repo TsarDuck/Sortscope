@@ -553,6 +553,27 @@ function shuffleInPlace(values: number[], random: () => number) {
   return writes;
 }
 
+// The live Bogo runner uses the browser's Math.random(), whose range is
+// already [0, 1). Keep the defensive, injectable shuffle above for tests and
+// callers that provide their own source, but skip its redundant clamping in
+// the hot default path. This remains the same unbiased Fisher-Yates shuffle.
+function shuffleInPlaceWithMathRandom(values: number[]) {
+  let writes = 0;
+
+  for (let index = values.length - 1; index > 0; index -= 1) {
+    const swapIndex = Math.floor(Math.random() * (index + 1));
+
+    if (swapIndex !== index) {
+      const value = values[index];
+      values[index] = values[swapIndex];
+      values[swapIndex] = value;
+      writes += 2;
+    }
+  }
+
+  return writes;
+}
+
 export function createBogoSession(
   source: number[],
   attemptLimit: number | null = BOGO_MAX_ATTEMPTS,
@@ -581,12 +602,14 @@ export function createBogoSession(
 
 export function advanceBogoSession(
   session: BogoSession,
-  random: () => number = Math.random,
+  random?: () => number,
 ) {
   if (session.done) return;
 
   session.attempts += 1;
-  session.writes += shuffleInPlace(session.values, random);
+  session.writes += random === undefined
+    ? shuffleInPlaceWithMathRandom(session.values)
+    : shuffleInPlace(session.values, random);
   const check = countSortedCheck(session.values);
   session.comparisons += check.comparisons;
 

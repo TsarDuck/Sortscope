@@ -168,6 +168,23 @@ test("bogo sessions can yield between attempts without losing their selected lim
   assert.equal(getBogoSessionStep(unlimited).phase, "complete");
 });
 
+test("the default Bogo session path keeps its Fisher-Yates result and write count", () => {
+  const originalRandom = Math.random;
+  Math.random = () => 0;
+
+  try {
+    const session = createBogoSession([2, 1], 4);
+    advanceBogoSession(session);
+
+    assert.deepEqual(session.values, [1, 2]);
+    assert.equal(session.writes, 2);
+    assert.equal(session.done, true);
+    assert.equal(session.limited, false);
+  } finally {
+    Math.random = originalRandom;
+  }
+});
+
 test("dense algorithms retain a bounded number of useful render snapshots", () => {
   const source = Array.from({ length: 256 }, (_, index) => 256 - index);
   const cocktail = buildCocktailSteps(source);

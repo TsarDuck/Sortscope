@@ -95,6 +95,7 @@ type StepPhase =
 type BenchmarkPattern = "random" | "reverse" | "nearly-sorted";
 type BenchmarkTab = "table" | "bars";
 type AlgorithmCardTab = "walkthrough" | "python";
+type IntroPhase = "visible" | "exiting" | "hidden";
 type BogoPracticeCasinoSound = "entry" | "shuffle" | "fail" | "success";
 
 type PracticeGroupTone = "cyan" | "violet" | "mint" | "gold";
@@ -184,7 +185,7 @@ const DEFAULT_SPEED = 62;
 const MAX_SPEED = 200;
 const DISPLAY_SPEED_MAX = 100;
 const MOVE_INTERPOLATION_MAX_SPEED = 50;
-const BOGO_MAX_ARRAY_SIZE = 24;
+const BOGO_MAX_ARRAY_SIZE = 25;
 // A dense, bar-only verification scan needs enough time for the eye to read
 // the order, but not so much that a 256-value finish becomes its own scene.
 const COMPLETION_SWEEP_MIN_DURATION = 425;
@@ -201,6 +202,8 @@ const BOGO_CELEBRATION_FADE_DURATION = 560;
 // never held up by its celebration.
 const PRACTICE_CELEBRATION_VISIBLE_DURATION = 1_350;
 const PRACTICE_CELEBRATION_FADE_DURATION = 560;
+const SORTSCOPE_INTRO_SESSION_KEY = "sortscope-intro-seen";
+const SORTSCOPE_INTRO_EXIT_DURATION = 360;
 const THEORY_BENCHMARK_SIZES = [256, 1_024, 4_096, 16_384, 65_536, 262_144, 1_048_576];
 const BENCHMARK_ALGORITHMS = [
   { key: "bubble", label: "Bubble sort", className: "bubble" },
@@ -245,9 +248,9 @@ const BOGO_STANDARD_MAX_ATTEMPTS = 999_999_999;
 const BOGO_PRACTICE_INITIAL_VALUES = [4, 2, 1, 3];
 const BOGO_PRACTICE_ROLL_INTERVAL = 52;
 // The supplied casino clips are mastered a little hotter than the synthesized
-// sort tones. Play them at 78% of the selected master volume at every slider
+// sort tones. Play them at 58% of the selected master volume at every slider
 // setting, while preserving the slider's full 0–100% behavior.
-const BOGO_PRACTICE_CASINO_GAIN = 0.78;
+const BOGO_PRACTICE_CASINO_GAIN = 0.58;
 // Native media can take a moment to begin under load. Once a clip has actually
 // started, it is always allowed to reach its own `ended` event; this watchdog
 // only gives a genuinely unavailable player a graceful, timed visual fallback.
@@ -2123,6 +2126,7 @@ function getPhaseLabel(phase: StepPhase) {
 }
 
 export default function Home() {
+  const [introPhase, setIntroPhase] = useState<IntroPhase>("visible");
   const [algorithm, setAlgorithm] = useState<AlgorithmId>("bogo");
   const [isAlgorithmPickerOpen, setIsAlgorithmPickerOpen] = useState(false);
   const [algorithmCardTab, setAlgorithmCardTab] = useState<AlgorithmCardTab>("walkthrough");
@@ -2185,6 +2189,8 @@ export default function Home() {
   const [bogoPracticeAttempts, setBogoPracticeAttempts] = useState(0);
   const [practiceFeedback, setPracticeFeedback] = useState<string | null>(null);
   const [practiceUndoPending, setPracticeUndoPending] = useState(false);
+  const introOverlayRef = useRef<HTMLDivElement | null>(null);
+  const introDismissTimerRef = useRef<number | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const speedRef = useRef(speed);
   const soundVolumeRef = useRef(soundVolume);
@@ -2237,6 +2243,10 @@ export default function Home() {
   const bogoPracticePreloadAudioRef = useRef<HTMLAudioElement[]>([]);
   const bogoPracticeAudioTimerRef = useRef<number | null>(null);
   const bogoPracticeAudioRunRef = useRef(0);
+  // A casino action can contain several cues (shuffle, then fail/success).
+  // Keeping its own generation separate from the individual media element
+  // makes a fresh Gamble cancel every stale cue and callback as one unit.
+  const bogoPracticeCasinoActionRef = useRef(0);
   const bogoPracticeRollIntervalRef = useRef<number | null>(null);
   const bogoPracticeRollRunRef = useRef(0);
   // Completion can be reached by a final scripted move or the global sorted
@@ -2467,6 +2477,34 @@ export default function Home() {
     previousVisualStep !== null &&
     haveSameBarTokens(previousRenderedBarItems, renderedBarItems) &&
     previousRenderedBarItems.some((item, index) => item.token !== renderedBarItems[index]?.token);
+
+  // Keep the welcome moment scoped to a browser session. useLayoutEffect
+  // prevents a returning visitor from seeing the overlay flash during reload.
+  useLayoutEffect(() => {
+    try {
+      if (window.sessionStorage.getItem(SORTSCOPE_INTRO_SESSION_KEY) === "seen") {
+        setIntroPhase("hidden");
+      }
+    } catch {
+      // Storage can be unavailable in private or embedded contexts. In that
+      // case the welcome screen still works for this page view.
+    }
+  }, []);
+
+  useEffect(() => {
+    if (introPhase !== "visible") return;
+
+    const frame = window.requestAnimationFrame(() => introOverlayRef.current?.focus());
+    return () => window.cancelAnimationFrame(frame);
+  }, [introPhase]);
+
+  useEffect(() => {
+    return () => {
+      if (introDismissTimerRef.current !== null) {
+        window.clearTimeout(introDismissTimerRef.current);
+      }
+    };
+  }, []);
 
   useEffect(() => {
     if (!isBogo || runState !== "complete" || currentStep.phase !== "complete") {
@@ -3365,6 +3403,15 @@ export default function Home() {
     releaseBogoPracticeAudio(audio);
   }
 
+  function beginBogoPracticeCasinoAction() {
+    bogoPracticeCasinoActionRef.current += 1;
+    // A new Gamble deliberately interrupts the prior failure sting. Clearing
+    // the native player here—not merely when the next shuffle eventually
+    // starts—keeps repeated clicks from leaving a delayed sound backlog.
+    clearBogoPracticeAudio();
+    return bogoPracticeCasinoActionRef.current;
+  }
+
   function clearBogoPracticeRoll(updateState = true) {
     bogoPracticeRollRunRef.current += 1;
     if (bogoPracticeRollIntervalRef.current !== null) {
@@ -3375,6 +3422,7 @@ export default function Home() {
   }
 
   function clearBogoPracticeInteraction(updateState = true) {
+    bogoPracticeCasinoActionRef.current += 1;
     clearBogoPracticeRoll(updateState);
     clearBogoPracticeAudio();
     if (updateState) setBogoPracticeBusy(false);
@@ -3384,7 +3432,9 @@ export default function Home() {
     sound: BogoPracticeCasinoSound,
     onSettled: () => void,
     onStarted: () => void = () => undefined,
+    casinoActionRun = bogoPracticeCasinoActionRef.current,
   ) {
+    if (bogoPracticeCasinoActionRef.current !== casinoActionRun) return;
     clearBogoPracticeAudio();
     const soundRun = bogoPracticeAudioRunRef.current + 1;
     bogoPracticeAudioRunRef.current = soundRun;
@@ -3395,6 +3445,10 @@ export default function Home() {
 
     let activeAudio: HTMLAudioElement | null = null;
 
+    const isCurrentCue = () =>
+      bogoPracticeCasinoActionRef.current === casinoActionRun &&
+      bogoPracticeAudioRunRef.current === soundRun;
+
     const clearAudioTimer = () => {
       if (bogoPracticeAudioTimerRef.current === null) return;
       window.clearTimeout(bogoPracticeAudioTimerRef.current);
@@ -3402,13 +3456,13 @@ export default function Home() {
     };
 
     const startSequence = () => {
-      if (settled || sequenceStarted || bogoPracticeAudioRunRef.current !== soundRun) return;
+      if (settled || sequenceStarted || !isCurrentCue()) return;
       sequenceStarted = true;
       onStarted();
     };
 
     const settle = () => {
-      if (settled || bogoPracticeAudioRunRef.current !== soundRun) return;
+      if (settled || !isCurrentCue()) return;
       settled = true;
       clearAudioTimer();
 
@@ -3432,7 +3486,7 @@ export default function Home() {
       if (
         settled ||
         playbackStarted ||
-        bogoPracticeAudioRunRef.current !== soundRun
+        !isCurrentCue()
       ) {
         return;
       }
@@ -3464,7 +3518,7 @@ export default function Home() {
       // watchdog below is cleared here, and no duration timer is allowed to
       // interrupt the cue after this point—even if it briefly buffers.
       audio.onplaying = () => {
-        if (bogoPracticeAudioRunRef.current !== soundRun || settled) return;
+        if (!isCurrentCue() || settled) return;
         playbackStarted = true;
         clearAudioTimer();
         startSequence();
@@ -3604,18 +3658,21 @@ export default function Home() {
     if (!isBogoPractice || bogoPracticeBusy) return;
 
     resetPractice("bogo");
+    const casinoActionRun = beginBogoPracticeCasinoAction();
     setBogoPracticeEntered(true);
     setBogoPracticeBusy(true);
     setPracticeFeedback("Welcome to the casino. The table opens as soon as the intro finishes.");
     playBogoPracticeCasinoSound("entry", () => {
+      if (bogoPracticeCasinoActionRef.current !== casinoActionRun) return;
       setBogoPracticeBusy(false);
       setPracticeFeedback("The table is open. Gamble to shuffle all four blocks.");
-    });
+    }, undefined, casinoActionRun);
   }
 
   function handleBogoPracticeGamble() {
     if (!isBogoPractice || !bogoPracticeEntered || practiceFinished || bogoPracticeBusy) return;
 
+    const casinoActionRun = beginBogoPracticeCasinoAction();
     const finalValues = shufflePracticeValues(practiceValues);
     const nextAttempts = bogoPracticeAttempts + 1;
     const won = isPracticeRowFinished(finalValues, BOGO_PRACTICE_INITIAL_VALUES);
@@ -3628,7 +3685,12 @@ export default function Home() {
     setPracticeFeedback("The casino is dealing the next shuffle…");
 
     const rollValues = () => {
-      if (bogoPracticeRollRunRef.current !== rollRun) return;
+      if (
+        bogoPracticeCasinoActionRef.current !== casinoActionRun ||
+        bogoPracticeRollRunRef.current !== rollRun
+      ) {
+        return;
+      }
       // Keep the four physical slots in place while their faces rapidly roll
       // through fresh permutations. The real result is held until the clip
       // finishes, so the final order has a clear landing moment.
@@ -3636,7 +3698,12 @@ export default function Home() {
     };
 
     playBogoPracticeCasinoSound("shuffle", () => {
-      if (bogoPracticeRollRunRef.current !== rollRun) return;
+      if (
+        bogoPracticeCasinoActionRef.current !== casinoActionRun ||
+        bogoPracticeRollRunRef.current !== rollRun
+      ) {
+        return;
+      }
       clearBogoPracticeRoll();
       setPracticeValues(finalValues);
 
@@ -3645,7 +3712,10 @@ export default function Home() {
           "Lucky! Gamble " + String(nextAttempts) + " landed on the one sorted order.",
           { playVictorySound: false },
         );
-        playBogoPracticeCasinoSound("success", () => setBogoPracticeBusy(false));
+        playBogoPracticeCasinoSound("success", () => {
+          if (bogoPracticeCasinoActionRef.current !== casinoActionRun) return;
+          setBogoPracticeBusy(false);
+        }, undefined, casinoActionRun);
         return;
       }
 
@@ -3657,9 +3727,14 @@ export default function Home() {
       // learner wait through its whole sting before trying again. A following
       // gamble clears this one-shot player before it starts the next shuffle.
       setBogoPracticeBusy(false);
-      playBogoPracticeCasinoSound("fail", () => undefined);
+      playBogoPracticeCasinoSound("fail", () => undefined, undefined, casinoActionRun);
     }, () => {
-      if (bogoPracticeRollRunRef.current !== rollRun) return;
+      if (
+        bogoPracticeCasinoActionRef.current !== casinoActionRun ||
+        bogoPracticeRollRunRef.current !== rollRun
+      ) {
+        return;
+      }
       setBogoPracticeRolling(true);
       setPracticeFeedback("Shuffling every possible order…");
       rollValues();
@@ -3667,7 +3742,7 @@ export default function Home() {
         rollValues,
         BOGO_PRACTICE_ROLL_INTERVAL,
       );
-    });
+    }, undefined, casinoActionRun);
   }
 
   function resetPractice(nextAlgorithm = algorithm) {
@@ -4617,6 +4692,36 @@ export default function Home() {
     }));
   }
 
+  function dismissIntro() {
+    if (introPhase !== "visible") return;
+
+    try {
+      window.sessionStorage.setItem(SORTSCOPE_INTRO_SESSION_KEY, "seen");
+    } catch {
+      // The interaction remains usable even when session storage is blocked.
+    }
+
+    const reduceMotionNow =
+      prefersReducedMotion || window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    if (reduceMotionNow) {
+      setIntroPhase("hidden");
+      return;
+    }
+
+    setIntroPhase("exiting");
+    introDismissTimerRef.current = window.setTimeout(() => {
+      introDismissTimerRef.current = null;
+      setIntroPhase("hidden");
+    }, SORTSCOPE_INTRO_EXIT_DURATION);
+  }
+
+  function handleIntroKeyDown(event: ReactKeyboardEvent<HTMLDivElement>) {
+    if (event.key === "Enter" || event.key === " " || event.key === "Spacebar" || event.key === "Escape") {
+      event.preventDefault();
+      dismissIntro();
+    }
+  }
+
   const primaryLabel =
     runState === "running"
       ? "Pause"
@@ -4628,6 +4733,35 @@ export default function Home() {
 
   return (
     <main className="sortlab-app">
+      {introPhase !== "hidden" && (
+        <div
+          ref={introOverlayRef}
+          className={
+            "sortscope-intro " +
+            (introPhase === "exiting" ? "sortscope-intro--exiting" : "")
+          }
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="sortscope-intro-title"
+          aria-describedby="sortscope-intro-description sortscope-intro-invitation"
+          tabIndex={-1}
+          onClick={dismissIntro}
+          onKeyDown={handleIntroKeyDown}
+        >
+          <div className="sortscope-intro__content">
+            <span className="brand-mark sortscope-intro__mark" aria-hidden="true" />
+            <p className="sortscope-intro__eyebrow">SORTING, MADE VISIBLE</p>
+            <h1 id="sortscope-intro-title">Sortscope</h1>
+            <p id="sortscope-intro-description" className="sortscope-intro__description">
+              Choose a sorting algorithm, watch each move, and try the rule for yourself.
+            </p>
+            <p id="sortscope-intro-invitation" className="sortscope-intro__invitation">
+              <span>Click or tap anywhere to enter</span>
+              <small>Press Enter or Space</small>
+            </p>
+          </div>
+        </div>
+      )}
       <div className="page-glow page-glow--one" aria-hidden="true" />
       <div className="page-glow page-glow--two" aria-hidden="true" />
       {bogoCelebrationPhase !== "hidden" && (
@@ -4826,21 +4960,23 @@ export default function Home() {
                 </aside>
               )}
 
-              <label className="control-field control-field--arrangement">
-                <span className="control-label">Starting arrangement</span>
-                <select
-                  value={arrayArrangement}
-                  onChange={(event) =>
-                    handleArrayArrangementChange(event.target.value as ArrayArrangement)
-                  }
-                  disabled={isRunning}
-                  aria-label="Starting array arrangement"
-                >
-                  <option value="random">Random shuffle</option>
-                  <option value="nearly-sorted">Nearly sorted</option>
-                  <option value="reverse">Reverse order</option>
-                </select>
-              </label>
+              {!isBogo && (
+                <label className="control-field control-field--arrangement">
+                  <span className="control-label">Starting arrangement</span>
+                  <select
+                    value={arrayArrangement}
+                    onChange={(event) =>
+                      handleArrayArrangementChange(event.target.value as ArrayArrangement)
+                    }
+                    disabled={isRunning}
+                    aria-label="Starting array arrangement"
+                  >
+                    <option value="random">Random shuffle</option>
+                    <option value="nearly-sorted">Nearly sorted</option>
+                    <option value="reverse">Reverse order</option>
+                  </select>
+                </label>
+              )}
 
               {isBogo && (
                 <>
@@ -4907,7 +5043,7 @@ export default function Home() {
                 <span className="control-label">
                   <span className="control-label__name">
                     Array size
-                    {isBogo && <small>Max 24</small>}
+                    {isBogo && <small>Max {BOGO_MAX_ARRAY_SIZE}</small>}
                   </span>
                   <input
                     className={"control-number " + (isBogo ? "control-number--bogo-array" : "")}
@@ -4994,7 +5130,7 @@ export default function Home() {
                 />
               </label>
 
-              <div className="button-row">
+              <div className={"button-row " + (isBogo ? "button-row--bogo" : "")}>
                 <button className="button button--primary" type="button" onClick={() => handlePrimaryAction()}>
                   <span className={"button-pulse " + (runState === "running" ? "button-pulse--active" : "")} aria-hidden="true" />
                   {primaryLabel}
@@ -5220,7 +5356,7 @@ export default function Home() {
             <p className="eyebrow">{algorithmDetails.eyebrow}</p>
             <h2 id="learn-title">
               <span className="learn-copy__algorithm-name">{algorithmLabel}</span>
-              {algorithmDetails.learnTitle}
+              <span className="learn-copy__flavor-title">{algorithmDetails.learnTitle}</span>
             </h2>
             <div className="learn-copy__explanation">
               {algorithmDetails.learnCopy.map((paragraph) => (
