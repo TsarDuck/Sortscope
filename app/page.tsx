@@ -1815,10 +1815,8 @@ export default function Home() {
     targetDuration: number,
     peakGain: number,
   ) {
-    // A C2 fundamental needs a few complete cycles to read as a note. The old
-    // very short envelope turned it into a soft thump, especially on laptop
-    // speakers. An octave reinforcement carries the same pitch into a range
-    // speakers reproduce clearly without abandoning the low note.
+    // Keep even the shortest voice long enough to read as a note, with an
+    // octave reinforcement that stays clear on laptop speakers.
     const duration = Math.min(0.12, Math.max(targetDuration, 4.5 / Math.max(frequency, 1)));
     const attack = Math.min(0.006, Math.max(0.002, duration * 0.11));
     const bodyTime = Math.max(attack + 0.008, duration * 0.5);
@@ -1893,8 +1891,8 @@ export default function Home() {
     const targetDuration = isImpact ? 0.052 : 0.034;
     const basePeakGain = isImpact ? 0.2 : 0.14;
     const peakGain = basePeakGain * (soundVolume / 100) ** 2.5;
-    // Keep the live sorter brighter than the completion flourish: C4 is the
-    // floor, while the cap at G5 stays comfortably clear on a 256-bar run.
+    // C4 is the floor, while the cap at G5 stays comfortably clear on a
+    // 256-bar run.
     // The gentle curve compresses the crowded high end rather than letting it
     // climb into piercing territory as values increase.
     const compressedValue = Math.sqrt(normalizedValue);
@@ -1910,7 +1908,9 @@ export default function Home() {
     if (!context || context.state !== "running" || volume <= 0) return;
 
     const now = context.currentTime + 0.015;
-    const sweepSemitones = [0, 2, 4, 5, 7, 9, 11, 12, 14, 16, 17, 19, 21, 23, 24];
+    // Match the live C4–G5 palette so the final confirmation feels like the
+    // resolution of the sort rather than a separate, lower-register cue.
+    const sweepSemitones = [0, 2, 4, 5, 7, 9, 11, 12, 14, 16, 17, 19];
     const targetDuration = 0.095;
     const spacing =
       (COMPLETION_SWEEP_DURATION / 1_000 - targetDuration) /
@@ -1918,7 +1918,7 @@ export default function Home() {
     const peakGain = 0.16 * (volume / 100) ** 2.5;
 
     sweepSemitones.forEach((semitone, index) => {
-      const frequency = 65.41 * 2 ** (semitone / 12);
+      const frequency = 261.63 * 2 ** (semitone / 12);
       playMusicalVoice(context, now + index * spacing, frequency, targetDuration, peakGain);
     });
   }
