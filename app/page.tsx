@@ -4661,7 +4661,7 @@ export default function Home() {
             <p className="eyebrow">{algorithmDetails.eyebrow}</p>
             <h2 id="learn-title">
               <span className="learn-copy__algorithm-name">{algorithmLabel}</span>
-              <span className="learn-copy__title-divider" aria-hidden="true" />
+              <br />
               {algorithmDetails.learnTitle}
             </h2>
             <div className="learn-copy__explanation">

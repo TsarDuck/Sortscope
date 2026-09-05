@@ -1452,15 +1452,6 @@ input:focus-visible {
   color: #b7afff;
 }
 
-.learn-copy__title-divider {
-  display: inline-block;
-  height: 0.78em;
-  margin: 0 0.24em;
-  border-left: 0.055em solid rgba(91, 222, 255, 0.82);
-  transform: translateY(0.06em);
-  vertical-align: 0.02em;
-}
-
 .learn-copy__explanation {
   display: grid;
   gap: 14px;
