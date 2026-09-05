@@ -94,6 +94,7 @@ type StepPhase =
 
 type BenchmarkPattern = "random" | "reverse" | "nearly-sorted";
 type BenchmarkTab = "table" | "bars";
+type AlgorithmCardTab = "walkthrough" | "python";
 type BogoPracticeCasinoSound = "entry" | "shuffle" | "fail" | "success";
 
 type PracticeGroupTone = "cyan" | "violet" | "mint" | "gold";
@@ -879,76 +880,67 @@ const ALGORITHM_DETAILS: Record<AlgorithmId, AlgorithmDetails> = {
     ],
     practice: [
       {
-        prompt: "Pivot 4 is parked on the right. Move the smaller value 1 into the first open spot on its left side.",
-        start: [6, 1, 7, 3, 8, 2, 5, 4],
-        target: [1, 6, 7, 3, 8, 2, 5, 4],
-        pivot: 4,
+        prompt: "Pivot 3 is parked on the right. Move the smaller value 1 into the first open spot on its left side.",
+        start: [6, 1, 7, 4, 8, 2, 5, 3],
+        target: [1, 6, 7, 4, 8, 2, 5, 3],
+        pivot: 3,
         activeRange: [0, 7],
         settled: [],
-        hint: "1 is no larger than pivot 4, so trade it with the first value, 6. Leave the highlighted pivot parked for now.",
+        hint: "1 is no larger than pivot 3, so trade it with the first value, 6. Leave the highlighted pivot parked for now.",
       },
       {
-        prompt: "Keep pivot 4 parked. Move 3 into the next open spot on its smaller-value side.",
-        start: [1, 6, 7, 3, 8, 2, 5, 4],
-        target: [1, 3, 7, 6, 8, 2, 5, 4],
-        pivot: 4,
+        prompt: "Keep pivot 3 parked. Move 2 into the next open spot on its smaller-value side.",
+        start: [1, 6, 7, 4, 8, 2, 5, 3],
+        target: [1, 2, 7, 4, 8, 6, 5, 3],
+        pivot: 3,
         activeRange: [0, 7],
         settled: [],
-        hint: "3 also belongs before 4. Swap 3 with 6, the next value in the not-yet-partitioned area.",
+        hint: "2 also belongs before 3. Swap 2 with 6, the next value in the not-yet-partitioned area.",
       },
       {
-        prompt: "There is one more smaller value for pivot 4: move 2 into the final open spot on its left.",
-        start: [1, 3, 7, 6, 8, 2, 5, 4],
-        target: [1, 3, 2, 6, 8, 7, 5, 4],
-        pivot: 4,
+        prompt: "Place pivot 3 directly after 1 and 2. Its position becomes permanent.",
+        start: [1, 2, 7, 4, 8, 6, 5, 3],
+        target: [1, 2, 3, 4, 8, 6, 5, 7],
+        pivot: 3,
         activeRange: [0, 7],
-        settled: [],
-        hint: "2 belongs before 4. It trades with 7 to finish the smaller-value side [1, 3, 2].",
+        settled: [1, 2],
+        hint: "Swap the highlighted pivot 3 with 7. Everything left of it is smaller; everything right is larger.",
       },
       {
-        prompt: "Now place pivot 4 directly after its smaller-value side. Its position becomes permanent.",
-        start: [1, 3, 2, 6, 8, 7, 5, 4],
-        target: [1, 3, 2, 4, 8, 7, 5, 6],
-        pivot: 4,
-        activeRange: [0, 7],
-        settled: [],
-        hint: "Swap the highlighted pivot 4 with 6. Everything left of it is smaller; everything right is larger.",
-      },
-      {
-        prompt: "A new smaller range opens on the left. Its new pivot is 2—place it between 1 and 3.",
-        start: [1, 3, 2, 4, 8, 7, 5, 6],
-        target: [1, 2, 3, 4, 8, 7, 5, 6],
-        pivot: 2,
-        activeRange: [0, 2],
-        settled: [4],
-        hint: "1 is already on pivot 2's smaller side. Swap the highlighted 2 with 3 to lock it in place.",
-      },
-      {
-        prompt: "The left side is finished. In the right range, pivot 6 is parked on the right—move 5 to its smaller side.",
-        start: [1, 2, 3, 4, 8, 7, 5, 6],
-        target: [1, 2, 3, 4, 5, 7, 8, 6],
-        pivot: 6,
-        activeRange: [4, 7],
-        settled: [1, 2, 3, 4],
-        hint: "Only 5 is no larger than pivot 6. Swap 5 with the first active value, 8.",
-      },
-      {
-        prompt: "Place pivot 6 immediately after 5. That locks the next pivot position.",
-        start: [1, 2, 3, 4, 5, 7, 8, 6],
-        target: [1, 2, 3, 4, 5, 6, 8, 7],
-        pivot: 6,
-        activeRange: [4, 7],
-        settled: [1, 2, 3, 4, 5],
-        hint: "Swap the highlighted pivot 6 with 7, the first value on its larger side.",
-      },
-      {
-        prompt: "Only two values remain. The new pivot is 7; swap it into its final spot to finish the row.",
-        start: [1, 2, 3, 4, 5, 6, 8, 7],
-        target: [1, 2, 3, 4, 5, 6, 7, 8],
+        prompt: "The left side is finished. In the right range, pivot 7 is parked on the right—move 6 into the next open smaller-value spot.",
+        start: [1, 2, 3, 4, 8, 6, 5, 7],
+        target: [1, 2, 3, 4, 6, 8, 5, 7],
         pivot: 7,
-        activeRange: [6, 7],
-        settled: [1, 2, 3, 4, 5, 6],
-        hint: "7 is the pivot for this final pair. Swap it with 8 to finish Quick Sort.",
+        activeRange: [3, 7],
+        settled: [1, 2, 3],
+        hint: "4 is already in the smaller area. Move 6 beside it by swapping 6 with 8, the next value in the not-yet-partitioned area.",
+      },
+      {
+        prompt: "Keep pivot 7 parked. Move 5 into the final open spot on its smaller-value side.",
+        start: [1, 2, 3, 4, 6, 8, 5, 7],
+        target: [1, 2, 3, 4, 6, 5, 8, 7],
+        pivot: 7,
+        activeRange: [3, 7],
+        settled: [1, 2, 3],
+        hint: "5 belongs before 7. Swap it with 8 to finish pivot 7's smaller-value side [4, 6, 5].",
+      },
+      {
+        prompt: "Place pivot 7 immediately after 4, 6, and 5. That locks the next pivot position.",
+        start: [1, 2, 3, 4, 6, 5, 8, 7],
+        target: [1, 2, 3, 4, 6, 5, 7, 8],
+        pivot: 7,
+        activeRange: [3, 7],
+        settled: [1, 2, 3],
+        hint: "Swap the highlighted pivot 7 with 8. Everything left of it is smaller, and 8 is fixed on its right.",
+      },
+      {
+        prompt: "Only [4, 6, 5] remains. Pivot 5 is parked on the right—place it between 4 and 6 to finish the row.",
+        start: [1, 2, 3, 4, 6, 5, 7, 8],
+        target: [1, 2, 3, 4, 5, 6, 7, 8],
+        pivot: 5,
+        activeRange: [3, 5],
+        settled: [1, 2, 3, 7, 8],
+        hint: "4 is already on pivot 5's smaller side. Swap the highlighted 5 with 6 to finish Quick Sort.",
       },
     ],
   },
@@ -1383,6 +1375,384 @@ const ALGORITHM_DETAILS: Record<AlgorithmId, AlgorithmDetails> = {
   },
 };
 
+// These are deliberately written as complete, runnable Python functions instead
+// of pseudo-code. They mirror the decisions used by the visualizer; the React
+// implementation additionally records animation frames and work counters.
+const PYTHON_IMPLEMENTATIONS: Record<AlgorithmId, string> = {
+  bogo: String.raw`import random
+
+
+def bogo_sort(values, max_attempts=999_999_999):
+    values = list(values)
+    attempts = 0
+
+    while any(values[index - 1] > values[index] for index in range(1, len(values))):
+        if max_attempts is not None and attempts >= max_attempts:
+            return values, False
+
+        # Fisher-Yates: every permutation is equally likely.
+        for index in range(len(values) - 1, 0, -1):
+            swap_index = random.randrange(index + 1)
+            if swap_index != index:
+                values[index], values[swap_index] = values[swap_index], values[index]
+
+        attempts += 1
+
+    return values, True`,
+  selection: String.raw`def selection_sort(values):
+    values = list(values)
+
+    for start in range(len(values) - 1):
+        minimum = start
+
+        for scan in range(start + 1, len(values)):
+            if values[scan] < values[minimum]:
+                minimum = scan
+
+        if minimum != start:
+            values[start], values[minimum] = values[minimum], values[start]
+
+    return values`,
+  insertion: String.raw`def insertion_sort(values):
+    values = list(values)
+
+    for index in range(1, len(values)):
+        key = values[index]
+        insert_at = index - 1
+
+        while insert_at >= 0 and values[insert_at] > key:
+            values[insert_at + 1] = values[insert_at]
+            insert_at -= 1
+
+        values[insert_at + 1] = key
+
+    return values`,
+  bubble: String.raw`def bubble_sort(values):
+    values = list(values)
+
+    for upper in range(len(values) - 1, 0, -1):
+        swapped = False
+
+        for index in range(upper):
+            if values[index] > values[index + 1]:
+                values[index], values[index + 1] = values[index + 1], values[index]
+                swapped = True
+
+        if not swapped:
+            break
+
+    return values`,
+  cocktail: String.raw`def cocktail_sort(values):
+    values = list(values)
+    lower = 0
+    upper = len(values) - 1
+
+    while lower < upper:
+        swapped = False
+
+        for index in range(lower, upper):
+            if values[index] > values[index + 1]:
+                values[index], values[index + 1] = values[index + 1], values[index]
+                swapped = True
+
+        upper -= 1
+        if not swapped or lower >= upper:
+            break
+
+        swapped = False
+        for index in range(upper, lower - 1, -1):
+            if values[index] > values[index + 1]:
+                values[index], values[index + 1] = values[index + 1], values[index]
+                swapped = True
+
+        lower += 1
+        if not swapped:
+            break
+
+    return values`,
+  heap: String.raw`def heap_sort(values):
+    values = list(values)
+
+    def sift_down(root, heap_size):
+        while True:
+            left = root * 2 + 1
+            if left >= heap_size:
+                return
+
+            right = left + 1
+            largest = right if right < heap_size and values[right] > values[left] else left
+            if values[root] >= values[largest]:
+                return
+
+            values[root], values[largest] = values[largest], values[root]
+            root = largest
+
+    for root in range(len(values) // 2 - 1, -1, -1):
+        sift_down(root, len(values))
+
+    for end in range(len(values) - 1, 0, -1):
+        values[0], values[end] = values[end], values[0]
+        sift_down(0, end)
+
+    return values`,
+  quick: String.raw`def quick_sort(values):
+    values = list(values)
+    stack = [(0, len(values) - 1)] if len(values) > 1 else []
+
+    while stack:
+        low, high = stack.pop()
+        if low >= high:
+            continue
+
+        # Sortscope's Quick Sort parks the rightmost value as the pivot.
+        pivot = values[high]
+        store = low
+
+        for scan in range(low, high):
+            if values[scan] <= pivot:
+                values[scan], values[store] = values[store], values[scan]
+                store += 1
+
+        values[store], values[high] = values[high], values[store]
+
+        # Push right first so the left partition is handled next.
+        if store + 1 < high:
+            stack.append((store + 1, high))
+        if low < store - 1:
+            stack.append((low, store - 1))
+
+    return values`,
+  pdq: String.raw`import math
+
+
+def pdq_sort(values):
+    values = list(values)
+    insertion_threshold = 16
+
+    def insertion_sort_range(low, high):
+        for index in range(low + 1, high + 1):
+            key = values[index]
+            insert_at = index - 1
+            while insert_at >= low and values[insert_at] > key:
+                values[insert_at + 1] = values[insert_at]
+                insert_at -= 1
+            values[insert_at + 1] = key
+
+    def heap_sort_range(low, high):
+        length = high - low + 1
+
+        def sift_down(root, heap_size):
+            while True:
+                left = root * 2 + 1
+                if left >= heap_size:
+                    return
+                right = left + 1
+                largest = right if right < heap_size and values[low + right] > values[low + left] else left
+                if values[low + root] >= values[low + largest]:
+                    return
+                values[low + root], values[low + largest] = values[low + largest], values[low + root]
+                root = largest
+
+        for root in range(length // 2 - 1, -1, -1):
+            sift_down(root, length)
+        for end in range(length - 1, 0, -1):
+            values[low], values[low + end] = values[low + end], values[low]
+            sift_down(0, end)
+
+    def median_of_three_index(low, high):
+        middle = low + (high - low) // 2
+        if values[low] < values[middle]:
+            if values[middle] < values[high]:
+                return middle
+            return high if values[low] < values[high] else low
+        if values[low] < values[high]:
+            return low
+        return high if values[middle] < values[high] else middle
+
+    def break_patterns(low, high):
+        length = high - low + 1
+        if length < 8:
+            return
+        first = low + 1
+        middle = low + length // 2
+        last = high - 1
+        values[first], values[middle] = values[middle], values[first]
+        values[middle], values[last] = values[last], values[middle]
+
+    def partition(low, high, pivot):
+        left, right = low, high
+        did_swap = False
+
+        while True:
+            while values[left] < pivot:
+                left += 1
+            while values[right] > pivot:
+                right -= 1
+            if left >= right:
+                return right, did_swap
+
+            values[left], values[right] = values[right], values[left]
+            did_swap = True
+            left += 1
+            right -= 1
+
+    bad_allowed = max(1, math.floor(math.log2(max(len(values), 2))) * 2)
+    stack = [(0, len(values) - 1, bad_allowed)] if len(values) > 1 else []
+
+    while stack:
+        low, high, bad_allowed = stack.pop()
+        length = high - low + 1
+
+        if length <= insertion_threshold:
+            insertion_sort_range(low, high)
+            continue
+
+        pivot = values[median_of_three_index(low, high)]
+        split, did_swap = partition(low, high, pivot)
+
+        if not did_swap and all(values[index - 1] <= values[index] for index in range(low + 1, high + 1)):
+            continue
+
+        left_size = split - low + 1
+        right_size = high - split
+        child_bad_allowed = bad_allowed
+
+        if min(left_size, right_size) * 8 < length:
+            child_bad_allowed -= 1
+            if child_bad_allowed <= 0:
+                heap_sort_range(low, high)
+                continue
+            break_patterns(low, split)
+            break_patterns(split + 1, high)
+
+        # Schedule the larger side first so the smaller side runs next.
+        if left_size > right_size:
+            if low < split:
+                stack.append((low, split, child_bad_allowed))
+            if split + 1 < high:
+                stack.append((split + 1, high, child_bad_allowed))
+        else:
+            if split + 1 < high:
+                stack.append((split + 1, high, child_bad_allowed))
+            if low < split:
+                stack.append((low, split, child_bad_allowed))
+
+    return values`,
+  merge: String.raw`def merge_sort(values):
+    values = list(values)
+    width = 1
+
+    while width < len(values):
+        for left in range(0, len(values), width * 2):
+            middle = min(left + width, len(values))
+            right = min(left + width * 2, len(values))
+            if middle >= right:
+                continue
+
+            left_run = values[left:middle]
+            right_run = values[middle:right]
+            left_index = right_index = 0
+            destination = left
+
+            while left_index < len(left_run) and right_index < len(right_run):
+                if left_run[left_index] <= right_run[right_index]:
+                    values[destination] = left_run[left_index]
+                    left_index += 1
+                else:
+                    values[destination] = right_run[right_index]
+                    right_index += 1
+                destination += 1
+
+            values[destination:right] = left_run[left_index:] + right_run[right_index:]
+
+        width *= 2
+
+    return values`,
+  powersort: String.raw`def powersort(values):
+    values = list(values)
+    size = len(values)
+    if size < 2:
+        return values
+
+    def discover_natural_run(start):
+        end = start + 1
+
+        if end < size:
+            if values[start] > values[end]:
+                end += 1
+                while end < size and values[end - 1] > values[end]:
+                    end += 1
+                values[start:end] = reversed(values[start:end])
+            else:
+                end += 1
+                while end < size and values[end - 1] <= values[end]:
+                    end += 1
+
+        return start, end
+
+    def node_power(left, right):
+        denominator = size * 2
+        left_centre = left[0] * 2 + (left[1] - left[0])
+        right_centre = right[0] * 2 + (right[1] - right[0])
+        power = 0
+
+        while left_centre != right_centre and power < 53:
+            left_centre *= 2
+            right_centre *= 2
+            left_bit = left_centre // denominator
+            right_bit = right_centre // denominator
+            power += 1
+
+            if left_bit != right_bit:
+                return power
+
+            left_centre %= denominator
+            right_centre %= denominator
+
+        return max(power, 1)
+
+    def merge_runs(left, right):
+        left_values = values[left[0]:left[1]]
+        right_values = values[right[0]:right[1]]
+        left_index = right_index = 0
+        destination = left[0]
+
+        while left_index < len(left_values) and right_index < len(right_values):
+            if left_values[left_index] <= right_values[right_index]:
+                values[destination] = left_values[left_index]
+                left_index += 1
+            else:
+                values[destination] = right_values[right_index]
+                right_index += 1
+            destination += 1
+
+        values[destination:right[1]] = left_values[left_index:] + right_values[right_index:]
+        return left[0], right[1]
+
+    current = discover_natural_run(0)
+    next_start = current[1]
+    stack = []  # (run, boundary power)
+
+    while next_start < size:
+        next_run = discover_natural_run(next_start)
+        next_start = next_run[1]
+        power = node_power(current, next_run)
+
+        # Close deeper boundaries before this wider one.
+        while stack and stack[-1][1] > power:
+            previous_run, previous_power = stack.pop()
+            current = merge_runs(previous_run, current)
+
+        stack.append((current, power))
+        current = next_run
+
+    while stack:
+        previous_run, previous_power = stack.pop()
+        current = merge_runs(previous_run, current)
+
+    return values`,
+};
+
 function createInitialStep(
   values: number[],
   algorithm: AlgorithmId = "insertion",
@@ -1753,8 +2123,9 @@ function getPhaseLabel(phase: StepPhase) {
 }
 
 export default function Home() {
-  const [algorithm, setAlgorithm] = useState<AlgorithmId>("insertion");
+  const [algorithm, setAlgorithm] = useState<AlgorithmId>("bogo");
   const [isAlgorithmPickerOpen, setIsAlgorithmPickerOpen] = useState(false);
+  const [algorithmCardTab, setAlgorithmCardTab] = useState<AlgorithmCardTab>("walkthrough");
   const [arraySize, setArraySize] = useState(DEFAULT_ARRAY_SIZE);
   const [arraySizeInput, setArraySizeInput] = useState(String(DEFAULT_ARRAY_SIZE));
   const [speed, setSpeed] = useState(DEFAULT_SPEED);
@@ -1980,10 +2351,25 @@ export default function Home() {
       return new Set<number>();
     }
 
+    // Neighboring active runs become one merge workspace. Keep its blue
+    // brackets at the outer edges so their shared slot never looks like a
+    // divider, while separate active workspaces still get their own pair.
+    const mergedActiveRanges = practiceGroups
+      .filter((group) => group.active)
+      .map((group) => group.range)
+      .sort(([leftStart], [rightStart]) => leftStart - rightStart)
+      .reduce<Array<[number, number]>>((ranges, [start, end]) => {
+        const previousRange = ranges.at(-1);
+        if (previousRange && start <= previousRange[1] + 1) {
+          previousRange[1] = Math.max(previousRange[1], end);
+        } else {
+          ranges.push([start, end]);
+        }
+        return ranges;
+      }, []);
+
     return new Set(
-      practiceGroups.flatMap((group) =>
-        group.active ? [group.range[0], group.range[1] + 1] : [],
-      ),
+      mergedActiveRanges.flatMap(([start, end]) => [start, end + 1]),
     );
   }, [algorithm, practiceFinished, practiceGroups]);
   const algorithmLabel = algorithmDetails.label;
@@ -3914,6 +4300,31 @@ export default function Home() {
     }
   }
 
+  function handleAlgorithmCardTabKeyDown(
+    event: ReactKeyboardEvent<HTMLButtonElement>,
+    currentTab: AlgorithmCardTab,
+  ) {
+    let nextTab: AlgorithmCardTab | null = null;
+
+    if (event.key === "ArrowLeft" || event.key === "ArrowUp") {
+      nextTab = currentTab === "walkthrough" ? "python" : "walkthrough";
+    } else if (event.key === "ArrowRight" || event.key === "ArrowDown") {
+      nextTab = currentTab === "walkthrough" ? "python" : "walkthrough";
+    } else if (event.key === "Home") {
+      nextTab = "walkthrough";
+    } else if (event.key === "End") {
+      nextTab = "python";
+    }
+
+    if (!nextTab) return;
+
+    event.preventDefault();
+    setAlgorithmCardTab(nextTab);
+    window.requestAnimationFrame(() => {
+      document.getElementById(algorithm + "-" + nextTab + "-tab")?.focus();
+    });
+  }
+
   function setAlgorithmPickerItemRef(
     option: AlgorithmId,
     element: HTMLButtonElement | null,
@@ -3937,6 +4348,7 @@ export default function Home() {
 
   function handleAlgorithmChange(nextAlgorithm: AlgorithmId) {
     setIsAlgorithmPickerOpen(false);
+    setAlgorithmCardTab("walkthrough");
     resetCompletionSweep();
     resetBogoElapsedTimer();
     setBogoCelebrationPhase("hidden");
@@ -4624,14 +5036,14 @@ export default function Home() {
               </div>
             </div>
 
+            {algorithm === "insertion" && currentStep.phase === "shift" && currentStep.key !== null && (
+              <div className="held-key" aria-hidden="true">
+                <span>holding key</span>
+                <strong>{currentStep.key}</strong>
+              </div>
+            )}
             <div className="chart-stage" role="img" aria-label={"Array values: " + displayValues + ". " + currentStep.message}>
               <div className="chart-grid" aria-hidden="true" />
-              {algorithm === "insertion" && currentStep.phase === "shift" && currentStep.key !== null && (
-                <div className="held-key" aria-hidden="true">
-                  <span>holding key</span>
-                  <strong>{currentStep.key}</strong>
-                </div>
-              )}
               <div
                 className={
                   "bars " +
@@ -4828,21 +5240,77 @@ export default function Home() {
               <span>{algorithmDetails.cardTitle}</span>
               <span>{algorithmDetails.cardTag}</span>
             </div>
-            <ol className="algorithm-steps">
-              {algorithmDetails.steps.map((step, index) => {
-                const example = algorithmDetails.examples[index];
-                return (
-                <li key={step}>
-                  <i>{String(index + 1).padStart(2, "0")}</i>
-                  <div className="algorithm-step__body">
-                    <strong>{step}</strong>
-                    <code>{example.values}</code>
-                    <p>{example.detail}</p>
-                  </div>
-                </li>
-                );
-              })}
-            </ol>
+            <div
+              className="algorithm-card__tabs"
+              role="tablist"
+              aria-label={algorithmLabel + " algorithm details"}
+            >
+              <button
+                id={algorithm + "-walkthrough-tab"}
+                className="algorithm-card__tab"
+                type="button"
+                role="tab"
+                aria-selected={algorithmCardTab === "walkthrough"}
+                aria-controls={algorithm + "-walkthrough-panel"}
+                tabIndex={algorithmCardTab === "walkthrough" ? 0 : -1}
+                onClick={() => setAlgorithmCardTab("walkthrough")}
+                onKeyDown={(event) => handleAlgorithmCardTabKeyDown(event, "walkthrough")}
+              >
+                Walkthrough
+              </button>
+              <button
+                id={algorithm + "-python-tab"}
+                className="algorithm-card__tab"
+                type="button"
+                role="tab"
+                aria-selected={algorithmCardTab === "python"}
+                aria-controls={algorithm + "-python-panel"}
+                tabIndex={algorithmCardTab === "python" ? 0 : -1}
+                onClick={() => setAlgorithmCardTab("python")}
+                onKeyDown={(event) => handleAlgorithmCardTabKeyDown(event, "python")}
+              >
+                Python
+              </button>
+            </div>
+            {algorithmCardTab === "walkthrough" ? (
+              <div
+                id={algorithm + "-walkthrough-panel"}
+                className="algorithm-card__panel"
+                role="tabpanel"
+                aria-labelledby={algorithm + "-walkthrough-tab"}
+              >
+                <ol className="algorithm-steps">
+                  {algorithmDetails.steps.map((step, index) => {
+                    const example = algorithmDetails.examples[index];
+                    return (
+                    <li key={step}>
+                      <i>{String(index + 1).padStart(2, "0")}</i>
+                      <div className="algorithm-step__body">
+                        <strong>{step}</strong>
+                        <code>{example.values}</code>
+                        <p>{example.detail}</p>
+                      </div>
+                    </li>
+                    );
+                  })}
+                </ol>
+              </div>
+            ) : (
+              <div
+                id={algorithm + "-python-panel"}
+                className="algorithm-card__panel algorithm-card__panel--python"
+                role="tabpanel"
+                aria-labelledby={algorithm + "-python-tab"}
+              >
+                <div className="algorithm-card__code-heading">
+                  <span>PYTHON IMPLEMENTATION</span>
+                  <span>matches the visualizer&apos;s sorting rule</span>
+                </div>
+                <pre className="algorithm-card__code">
+                  <code>{PYTHON_IMPLEMENTATIONS[algorithm]}</code>
+                </pre>
+              </div>
+            )}
           </div>
 
           <div className="algorithm-insights" aria-label={algorithmLabel + " benefits and trade-offs"}>
