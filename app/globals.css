@@ -1561,6 +1561,54 @@ input:focus-visible {
   background: rgba(7, 10, 27, 0.44);
 }
 
+/* A normal lesson accepts an item anywhere between its neighbors, not just
+   directly on top of another block. Quick Sort is intentionally swap-only. */
+.practice-drop-slot {
+  position: relative;
+  align-self: stretch;
+  flex: 0 0 7px;
+  min-height: 48px;
+  border-radius: 7px;
+  pointer-events: none;
+  transition: flex-basis 150ms ease, background 150ms ease, box-shadow 150ms ease;
+}
+
+.practice-drop-slot::before {
+  position: absolute;
+  top: 8px;
+  bottom: 8px;
+  left: 50%;
+  width: 2px;
+  border-radius: 999px;
+  background: rgba(135, 218, 246, 0.18);
+  content: "";
+  transform: translateX(-50%);
+  transition: background 150ms ease, box-shadow 150ms ease;
+}
+
+.practice-board--dragging .practice-drop-slot {
+  flex-basis: 16px;
+  background: rgba(84, 191, 223, 0.08);
+  box-shadow: inset 0 0 0 1px rgba(129, 231, 251, 0.12);
+}
+
+.practice-board--dragging .practice-drop-slot::before {
+  background: rgba(145, 232, 250, 0.72);
+  box-shadow: 0 0 10px rgba(94, 213, 242, 0.42);
+}
+
+.practice-drop-slot--target {
+  flex-basis: 21px !important;
+  background: rgba(100, 231, 160, 0.16) !important;
+  box-shadow: inset 0 0 0 1px rgba(143, 249, 190, 0.48), 0 0 14px rgba(88, 222, 150, 0.18) !important;
+}
+
+.practice-drop-slot--target::before {
+  width: 3px;
+  background: #a7ffd0 !important;
+  box-shadow: 0 0 12px rgba(128, 247, 180, 0.78) !important;
+}
+
 .practice-block {
   position: relative;
   min-width: 48px;

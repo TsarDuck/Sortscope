@@ -1,6 +1,7 @@
 "use client";
 
 import {
+  Fragment,
   type CSSProperties,
   type PointerEvent as ReactPointerEvent,
   useEffect,
@@ -2519,15 +2520,30 @@ export default function Home() {
     }, 440);
   }
 
-  function movePracticeItem(fromIndex: number, toIndex: number, capturePosition = true) {
-    if (practiceFinished || practiceUndoPending || fromIndex === toIndex) return;
+  function movePracticeItem(
+    fromIndex: number,
+    toIndex: number,
+    capturePosition = true,
+    mode: "swap" | "insert" = "swap",
+  ) {
+    if (practiceFinished || practiceUndoPending) return;
+    const insertionIndex = mode === "insert" && toIndex > fromIndex ? toIndex - 1 : toIndex;
+    if ((mode === "swap" && fromIndex === toIndex) || (mode === "insert" && insertionIndex === fromIndex)) {
+      return;
+    }
     if (capturePosition) {
       practiceBlockPositionsRef.current = capturePracticeBlockPositions();
     }
 
     const previousValues = [...practiceValues];
     const nextValues = [...practiceValues];
-    [nextValues[fromIndex], nextValues[toIndex]] = [nextValues[toIndex], nextValues[fromIndex]];
+    if (mode === "insert") {
+      const movedValue = nextValues.splice(fromIndex, 1)[0];
+      if (movedValue === undefined) return;
+      nextValues.splice(insertionIndex, 0, movedValue);
+    } else {
+      [nextValues[fromIndex], nextValues[toIndex]] = [nextValues[toIndex], nextValues[fromIndex]];
+    }
     setPracticeValues(nextValues);
     const result = evaluatePracticeMove(nextValues);
     if (result === "wrong") {
@@ -2562,18 +2578,24 @@ export default function Home() {
     const board = practiceBoardRef.current;
     if (!board) return null;
 
-    const blocks = Array.from(board.querySelectorAll<HTMLButtonElement>("[data-practice-index]"));
+    const candidates = isQuickPractice
+      ? Array.from(board.querySelectorAll<HTMLElement>("[data-practice-index]"))
+      : Array.from(board.querySelectorAll<HTMLElement>("[data-practice-drop-index]"));
     let nearestIndex: number | null = null;
     let nearestDistance = Infinity;
 
-    blocks.forEach((block) => {
-      const rect = block.getBoundingClientRect();
+    candidates.forEach((candidate) => {
+      const rect = candidate.getBoundingClientRect();
       const centerX = rect.left + rect.width / 2;
       const centerY = rect.top + rect.height / 2;
       const distance = (clientX - centerX) ** 2 + (clientY - centerY) ** 2;
       if (distance < nearestDistance) {
         nearestDistance = distance;
-        nearestIndex = Number(block.dataset.practiceIndex);
+        nearestIndex = Number(
+          isQuickPractice
+            ? candidate.dataset.practiceIndex
+            : candidate.dataset.practiceDropIndex,
+        );
       }
     });
 
@@ -2585,11 +2607,28 @@ export default function Home() {
     if (!drag) return;
 
     const destination = practiceDropIndex;
-    const shouldMove = !cancelled && drag.moved && destination !== null && destination !== drag.fromIndex;
+    const insertionIndex =
+      destination === null
+        ? null
+        : destination > drag.fromIndex
+          ? destination - 1
+          : destination;
+    const shouldMove =
+      !cancelled &&
+      drag.moved &&
+      destination !== null &&
+      (isQuickPractice
+        ? destination !== drag.fromIndex
+        : insertionIndex !== null && insertionIndex !== drag.fromIndex);
     if (shouldMove) {
       practiceBlockPositionsRef.current = capturePracticeBlockPositions();
       suppressPracticeClickRef.current = true;
-      movePracticeItem(drag.fromIndex, destination, false);
+      movePracticeItem(
+        drag.fromIndex,
+        destination,
+        false,
+        isQuickPractice ? "swap" : "insert",
+      );
     }
 
     practicePointerRef.current = null;
@@ -3495,10 +3534,10 @@ export default function Home() {
             <p className="practice-lab__help">
               {isQuickPractice
                 ? "The gold block is the parked pivot. Make the one safe swap for this partition; a different move slides back immediately, so the next pivot can never become stuck. You can start the swap from either block."
-                : "Select or drag either of the two values to swap them. The starting value does not matter: a swap stays when it puts the row closer to this step's target; otherwise it slides back."}
+                : "Click two blocks to swap them, or drag a block into any glowing gap between blocks. The final arrangement—not which value you started with—decides whether the move stays."}
             </p>
             <div
-              className="practice-board"
+              className={"practice-board " + (practiceDraggingId ? "practice-board--dragging" : "")}
               ref={practiceBoardRef}
               role="group"
               aria-label={algorithmLabel + " interactive practice blocks"}
@@ -3520,6 +3559,19 @@ export default function Home() {
                             ? ", outside the current partition"
                             : "";
                       return (
+                        <Fragment key={practiceItemId}>
+                          {!isQuickPractice && (
+                            <span
+                              className={
+                                "practice-drop-slot " +
+                                (practiceDropIndex === index && practiceDraggingId
+                                  ? "practice-drop-slot--target"
+                                  : "")
+                              }
+                              data-practice-drop-index={index}
+                              aria-hidden="true"
+                            />
+                          )}
                         <button
                           className={
                             "practice-block " +
@@ -3529,7 +3581,7 @@ export default function Home() {
                             (isQuickPractice && !isInQuickRange ? "practice-block--quick-waiting " : "") +
                             (practiceSelectedIndex === index ? "practice-block--selected " : "") +
                             (isDragging ? "practice-block--dragging " : "") +
-                            (practiceDropIndex === index && practiceDragIndex !== index
+                            (isQuickPractice && practiceDropIndex === index && practiceDragIndex !== index
                               ? "practice-block--drop-target"
                               : "")
                           }
@@ -3563,8 +3615,21 @@ export default function Home() {
                           {isQuickPivot && <span className="practice-block__badge">pivot</span>}
                           {isQuickSettled && <span className="practice-block__badge practice-block__badge--fixed">fixed</span>}
                         </button>
+                        </Fragment>
                       );
                     })}
+              {!isQuickPractice && (
+                <span
+                  className={
+                    "practice-drop-slot " +
+                    (practiceDropIndex === practiceValues.length && practiceDraggingId
+                      ? "practice-drop-slot--target"
+                      : "")
+                  }
+                  data-practice-drop-index={practiceValues.length}
+                  aria-hidden="true"
+                />
+              )}
             </div>
             <div className="practice-lab__actions">
               {practiceFinished ? (
