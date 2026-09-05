@@ -212,17 +212,21 @@ const COMPLETION_SWEEP_MIN_DURATION = 425;
 const COMPLETION_SWEEP_MILLISECONDS_PER_BAR = 5;
 const COMPLETION_SWEEP_AUDIO_VISUAL_LEAD = 24;
 const COMPLETION_SWEEP_RELEASE_TAIL = 70;
-// Scheduling all 256 finish tones synchronously produces hundreds of Web
-// Audio nodes in one render turn. Keep a short look-ahead queue instead so
-// the sweep still plays one note per value without starving the visual frame.
-const COMPLETION_SWEEP_SCHEDULE_AHEAD_SECONDS = 0.12;
-const COMPLETION_SWEEP_SCHEDULE_INTERVAL = 45;
 const COMPLETION_SWEEP_OUTPUT_RELEASE_SECONDS = 0.018;
+const LIVE_TONE_OUTPUT_RELEASE_SECONDS = 0.018;
+const AUDIO_SOURCE_STOP_PADDING_SECONDS = 0.008;
 const MAX_LIVE_TONE_SOURCES = 16;
 // Give dense Web Audio voices several render quanta to receive their attack
 // envelope. This is inaudible as timing latency, but prevents a busy frame
 // from starting an oscillator at its default (full) gain and clicking.
 const DENSE_TONE_SCHEDULE_LEAD_SECONDS = 0.008;
+// Above this size the learning value comes from the changing order and
+// highlights, not from keeping a separate DOM element for every value. A
+// canvas gives WebKit one composited surface instead of 64–256 independently
+// styled gradient boxes every playback frame. Keep the regular DOM/FLIP path
+// for smaller rows and careful slow-motion inspection.
+const CANVAS_BAR_RENDERER_MIN_ARRAY_SIZE = 64;
+const DENSE_CANVAS_MAX_PIXEL_RATIO = 1.5;
 // A full React tree and 256 bar nodes cannot be repainted meaningfully more
 // than about 30 times per second on every desktop WebView. At the fastest
 // settings, advance several already-recorded algorithm steps per paint rather
@@ -2268,6 +2272,225 @@ const SortingBarSlot = memo(function SortingBarSlot({
   );
 });
 
+type DenseBarCanvasFrame = {
+  items: RenderedBarItem[];
+  largestValue: number;
+  step: SortStep;
+  algorithm: AlgorithmId;
+  settledIndices: ReadonlySet<number> | null;
+  completionSweepActive: boolean;
+  completionSweepStepDuration: number;
+  prefersReducedMotion: boolean;
+};
+
+type DenseCanvasSurface = {
+  width: number;
+  height: number;
+  pixelRatio: number;
+};
+
+const DENSE_CANVAS_BAR_COLORS: Record<string, string> = {
+  "bar--idle": "#3d477c",
+  "bar--sorted": "#68d595",
+  "bar--limited": "#d76975",
+  "bar--shuffle": "#ba72e6",
+  "bar--key": "#9586f6",
+  "bar--pivot": "#ef9848",
+  "bar--compare": "#f4c35d",
+  "bar--shift": "#ed8977",
+  "bar--insert": "#9784f5",
+  "bar--swap": "#ed8977",
+  "bar--merge": "#5784ac",
+  "bar--run": "#65c9b7",
+  "bar--power": "#a77be0",
+  "bar--heap": "#739de4",
+};
+
+function getDenseCanvasBarColor(barClassName: string, isCompletionScan: boolean) {
+  if (isCompletionScan) return "#f0445b";
+  return DENSE_CANVAS_BAR_COLORS[barClassName] ?? DENSE_CANVAS_BAR_COLORS["bar--idle"];
+}
+
+// A max-size row can update dozens of times a second. Its prior implementation
+// made React reconcile 256 flex children and asked WebKit to repaint a gradient
+// and border for each one. Canvas keeps the same colors and status emphasis in
+// a single low-overhead surface. It intentionally only serves the fast dense
+// mode: the DOM path remains responsible for slow FLIP movement and labels.
+const DenseBarCanvas = memo(function DenseBarCanvas({
+  items,
+  largestValue,
+  step,
+  algorithm,
+  settledIndices,
+  completionSweepActive,
+  completionSweepStepDuration,
+  prefersReducedMotion,
+}: DenseBarCanvasFrame) {
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const contextRef = useRef<CanvasRenderingContext2D | null>(null);
+  const surfaceRef = useRef<DenseCanvasSurface>({ width: 0, height: 0, pixelRatio: 1 });
+  const frameRef = useRef<DenseBarCanvasFrame>({
+    items,
+    largestValue,
+    step,
+    algorithm,
+    settledIndices,
+    completionSweepActive,
+    completionSweepStepDuration,
+    prefersReducedMotion,
+  });
+  const drawRef = useRef<(now?: number) => void>(() => undefined);
+  const completionStartedAtRef = useRef<number | null>(null);
+
+  const draw = useCallback((now = performance.now()) => {
+    const canvas = canvasRef.current;
+    const { width, height, pixelRatio } = surfaceRef.current;
+    if (!canvas || width <= 0 || height <= 0) return;
+
+    const context = contextRef.current;
+    if (!context) return;
+
+    const frame = frameRef.current;
+    const itemCount = frame.items.length;
+    if (itemCount === 0) return;
+
+    context.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
+    context.clearRect(0, 0, width, height);
+    context.imageSmoothingEnabled = false;
+
+    const completionStartedAt = completionStartedAtRef.current;
+    const completionElapsed =
+      completionStartedAt === null
+        ? -1
+        : now - completionStartedAt - COMPLETION_SWEEP_AUDIO_VISUAL_LEAD;
+    const completionIndex =
+      frame.completionSweepActive &&
+      !frame.prefersReducedMotion &&
+      completionElapsed >= 0 &&
+      frame.completionSweepStepDuration > 0
+        ? Math.min(
+            itemCount - 1,
+            Math.floor(completionElapsed / frame.completionSweepStepDuration),
+          )
+        : -1;
+
+    // Keep the original one-pixel dense gap when there is enough room. At
+    // narrower layouts a fractional gap costs more visual clarity than it
+    // gives, so the bars share the surface cleanly instead.
+    const gap = itemCount > 1 && width / itemCount >= 3 ? 1 : 0;
+    const barWidth = Math.max(1, (width - gap * (itemCount - 1)) / itemCount);
+    const maximum = Math.max(frame.largestValue, 1);
+
+    for (let index = 0; index < itemCount; index += 1) {
+      const item = frame.items[index]!;
+      const x = index * (barWidth + gap);
+
+      if (item.isGap) {
+        const gapHeight = Math.max(16, height * 0.1);
+        context.save();
+        context.strokeStyle = "rgba(183, 174, 255, 0.86)";
+        context.lineWidth = 1;
+        context.setLineDash([2, 2]);
+        context.strokeRect(x + 0.5, height - gapHeight + 0.5, Math.max(0, barWidth - 1), gapHeight);
+        context.restore();
+        continue;
+      }
+
+      const barHeight = Math.max(0, Math.min(height, (item.value / maximum) * height));
+      const barClassName = getBarClass(index, frame.step, frame.algorithm, frame.settledIndices);
+      context.fillStyle = getDenseCanvasBarColor(barClassName, index === completionIndex);
+      context.fillRect(x, height - barHeight, barWidth, barHeight);
+    }
+  }, []);
+
+  useLayoutEffect(() => {
+    drawRef.current = draw;
+  }, [draw]);
+
+  useLayoutEffect(() => {
+    frameRef.current = {
+      items,
+      largestValue,
+      step,
+      algorithm,
+      settledIndices,
+      completionSweepActive,
+      completionSweepStepDuration,
+      prefersReducedMotion,
+    };
+    draw();
+  }, [
+    algorithm,
+    completionSweepActive,
+    completionSweepStepDuration,
+    draw,
+    items,
+    largestValue,
+    prefersReducedMotion,
+    settledIndices,
+    step,
+  ]);
+
+  useLayoutEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    contextRef.current = canvas.getContext("2d");
+
+    const resizeSurface = () => {
+      const bounds = canvas.getBoundingClientRect();
+      const width = Math.max(1, Math.round(bounds.width));
+      const height = Math.max(1, Math.round(bounds.height));
+      const pixelRatio = Math.min(window.devicePixelRatio || 1, DENSE_CANVAS_MAX_PIXEL_RATIO);
+      const backingWidth = Math.max(1, Math.round(width * pixelRatio));
+      const backingHeight = Math.max(1, Math.round(height * pixelRatio));
+
+      surfaceRef.current = { width, height, pixelRatio };
+      if (canvas.width !== backingWidth) canvas.width = backingWidth;
+      if (canvas.height !== backingHeight) canvas.height = backingHeight;
+      drawRef.current();
+    };
+
+    resizeSurface();
+    if (typeof ResizeObserver === "undefined") {
+      window.addEventListener("resize", resizeSurface);
+      return () => {
+        window.removeEventListener("resize", resizeSurface);
+        contextRef.current = null;
+      };
+    }
+
+    const observer = new ResizeObserver(resizeSurface);
+    observer.observe(canvas);
+    return () => {
+      observer.disconnect();
+      contextRef.current = null;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!completionSweepActive || prefersReducedMotion) {
+      completionStartedAtRef.current = null;
+      return;
+    }
+
+    completionStartedAtRef.current = performance.now();
+    const animationEnd =
+      COMPLETION_SWEEP_AUDIO_VISUAL_LEAD + completionSweepStepDuration * Math.max(items.length, 1);
+    let animationFrame = 0;
+    const animate = (now: number) => {
+      drawRef.current(now);
+      if (now - completionStartedAtRef.current! < animationEnd) {
+        animationFrame = window.requestAnimationFrame(animate);
+      }
+    };
+    animationFrame = window.requestAnimationFrame(animate);
+
+    return () => window.cancelAnimationFrame(animationFrame);
+  }, [completionSweepActive, completionSweepStepDuration, items.length, prefersReducedMotion]);
+
+  return <canvas className="bars-canvas" ref={canvasRef} aria-hidden="true" />;
+});
+
 function getPhaseLabel(phase: StepPhase) {
   const labels: Record<StepPhase, string> = {
     ready: "Ready",
@@ -2383,11 +2606,11 @@ export default function Home() {
   const completionSweepStartedRef = useRef(false);
   const completionSweepStartTimerRef = useRef<number | null>(null);
   const completionSweepEndTimerRef = useRef<number | null>(null);
-  const completionSweepScheduleTimerRef = useRef<number | null>(null);
   const completionSweepRunRef = useRef(0);
   const completionSweepSourcesRef = useRef(new Set<OscillatorNode>());
   const completionSweepOutputRef = useRef<GainNode | null>(null);
   const liveToneSourcesRef = useRef(new Set<OscillatorNode>());
+  const liveToneOutputRef = useRef<GainNode | null>(null);
   const motionBarElementsRef = useRef(new Map<string, HTMLDivElement>());
   const motionBarPositionsRef = useRef(new Map<string, number>());
   const motionBarTokensRef = useRef<string[]>([]);
@@ -3071,6 +3294,13 @@ export default function Home() {
     !isBogo &&
     !prefersReducedMotion &&
     interpolationSpeed <= MOVE_INTERPOLATION_MAX_SPEED;
+  // Dense fast playback does not need individual DOM boxes or FLIP geometry.
+  // Preserve those more tactile details for slow inspection and every row up
+  // to 63 values; switch only the 64–256 high-speed path to one canvas.
+  const useCanvasBarRenderer =
+    !isBogo &&
+    originalValues.length >= CANVAS_BAR_RENDERER_MIN_ARRAY_SIZE &&
+    !shouldInterpolateMoves;
   const denseBarTransitionStyle = shouldInterpolateDenseBars
     ? ({
         "--bar-transition-duration": String(Math.min(260, Math.max(90, delay * 0.75))) + "ms",
@@ -3093,9 +3323,22 @@ export default function Home() {
       : steps.length > 1
         ? Math.round((stepIndex / (steps.length - 1)) * 100)
         : 0;
-  const displayValues = renderedBarItems
-    .map((item) => (item.isGap ? "open gap" : String(item.value)))
-    .join(", ");
+  // Reading every member of a 64–256-value row on every playback frame is
+  // not useful to assistive technology and makes WebKit rebuild a large AX
+  // string on the same cadence as the canvas. The live message below remains
+  // available when a run pauses or completes, where its detail is actionable.
+  const summarizeDenseRunForAccessibility =
+    isLargeArray && useCanvasBarRenderer && isRunning;
+  const displayValues = summarizeDenseRunForAccessibility
+    ? String(currentStep.values.length) + " values"
+    : renderedBarItems
+        .map((item) => (item.isGap ? "open gap" : String(item.value)))
+        .join(", ");
+  const chartAccessibleLabel =
+    summarizeDenseRunForAccessibility
+      ? "Animated " + algorithmLabel + " visualization with " + displayValues + "."
+      : "Array values: " + displayValues + ". " + currentStep.message;
+  const liveStatusPoliteness = summarizeDenseRunForAccessibility ? "off" : "polite";
   const largestValue = Math.max(...originalValues, 1);
   const liveStatus =
     currentStep.phase === "limited"
@@ -3186,47 +3429,84 @@ export default function Home() {
     setCompletionSweepActive(false);
   }
 
-  function stopCompletionSweepSound() {
-    if (completionSweepScheduleTimerRef.current !== null) {
-      window.clearTimeout(completionSweepScheduleTimerRef.current);
-      completionSweepScheduleTimerRef.current = null;
+  function releaseAudioOutput(
+    output: GainNode | null,
+    releaseSeconds: number,
+  ) {
+    if (!output) return;
+
+    const context = audioContextRef.current;
+    const now = context?.currentTime ?? 0;
+    try {
+      // Never sever an audible oscillator graph at an arbitrary waveform
+      // point. That hard discontinuity is the characteristic click that was
+      // still audible after a reset, mute, or late completion callback.
+      output.gain.cancelScheduledValues(now);
+      output.gain.setValueAtTime(Math.max(0.0001, output.gain.value), now);
+      output.gain.exponentialRampToValueAtTime(0.0001, now + releaseSeconds);
+    } catch {
+      // A closed context cannot be automated, but its graph can still be
+      // released below without retaining native audio resources.
     }
-    // A dense sweep may have a short look-ahead queue when a WebView misses a
-    // frame. Muting its shared output before disconnecting avoids stopping an
-    // oscillator at an arbitrary waveform position, which is audible as a
-    // pop. The sources already have their own bounded release/stop times.
+
+    window.setTimeout(() => {
+      try {
+        output.disconnect();
+      } catch {
+        // A prior cleanup may have already detached this one-shot bus.
+      }
+    }, Math.ceil(releaseSeconds * 1_000) + 8);
+  }
+
+  function stopTrackedToneSources(
+    sources: Set<OscillatorNode>,
+    releaseSeconds: number,
+  ) {
+    const context = audioContextRef.current;
+    const stopAt = context
+      ? context.currentTime + releaseSeconds + AUDIO_SOURCE_STOP_PADDING_SECONDS
+      : undefined;
+
+    // Keep the source's ended listener attached: it owns the complete graph
+    // teardown. Clearing only the tracking set is safe because every voice
+    // removes itself idempotently when Web Audio reaches its stop time.
+    [...sources].forEach((source) => {
+      try {
+        if (stopAt === undefined) source.stop();
+        else source.stop(stopAt);
+      } catch {
+        // An oscillator that has already ended cannot contribute more work.
+      }
+    });
+    sources.clear();
+  }
+
+  function stopCompletionSweepSound() {
     const output = completionSweepOutputRef.current;
     completionSweepOutputRef.current = null;
-    if (output) {
-      const context = audioContextRef.current;
-      const now = context?.currentTime ?? 0;
-      try {
-        output.gain.cancelScheduledValues(now);
-        output.gain.setValueAtTime(Math.max(0.0001, output.gain.value), now);
-        output.gain.exponentialRampToValueAtTime(
-          0.0001,
-          now + COMPLETION_SWEEP_OUTPUT_RELEASE_SECONDS,
-        );
-        window.setTimeout(() => output.disconnect(),
-          Math.ceil(COMPLETION_SWEEP_OUTPUT_RELEASE_SECONDS * 1_000) + 8,
-        );
-      } catch {
-        // The owning AudioContext may already be closed during unmount.
-      }
-    }
-    completionSweepSourcesRef.current.clear();
+    releaseAudioOutput(output, COMPLETION_SWEEP_OUTPUT_RELEASE_SECONDS);
+    stopTrackedToneSources(
+      completionSweepSourcesRef.current,
+      COMPLETION_SWEEP_OUTPUT_RELEASE_SECONDS,
+    );
   }
 
   function stopLiveSortingToneSound() {
-    liveToneSourcesRef.current.forEach((source) => {
-      source.onended = null;
-      try {
-        source.stop();
-      } catch {
-        // A source that already ended cannot contribute any more work.
-      }
-    });
-    liveToneSourcesRef.current.clear();
+    const output = liveToneOutputRef.current;
+    liveToneOutputRef.current = null;
+    releaseAudioOutput(output, LIVE_TONE_OUTPUT_RELEASE_SECONDS);
+    stopTrackedToneSources(liveToneSourcesRef.current, LIVE_TONE_OUTPUT_RELEASE_SECONDS);
+  }
+
+  function getLiveToneOutput(context: AudioContext) {
+    const existing = liveToneOutputRef.current;
+    if (existing) return existing;
+
+    const output = context.createGain();
+    output.gain.setValueAtTime(1, context.currentTime);
+    output.connect(context.destination);
+    liveToneOutputRef.current = output;
+    return output;
   }
 
   function startCompletionSweep(sweepValues: number[], duration: number) {
@@ -3246,6 +3526,10 @@ export default function Home() {
     completionSweepEndTimerRef.current = window.setTimeout(() => {
       completionSweepEndTimerRef.current = null;
       if (completionSweepRunRef.current !== sweepRun) return;
+      // A late WebKit `resume()` resolution must not be allowed to start a
+      // fresh native-audio graph after the visual sweep has already ended.
+      // Retiring this generation makes that completion callback harmless.
+      completionSweepRunRef.current += 1;
       stopCompletionSweepSound();
       setCompletionSweepActive(false);
     }, duration + COMPLETION_SWEEP_AUDIO_VISUAL_LEAD + COMPLETION_SWEEP_RELEASE_TAIL);
@@ -3358,12 +3642,39 @@ export default function Home() {
     toneFilter.connect(envelope);
     envelope.connect(output);
 
-    if (trackedSources) {
-      trackedSources.add(fundamental);
-      trackedSources.add(octave);
-      fundamental.addEventListener("ended", () => trackedSources.delete(fundamental), { once: true });
-      octave.addEventListener("ended", () => trackedSources.delete(octave), { once: true });
-    }
+    // Oscillators stop themselves, but Web Audio does not automatically
+    // disconnect the filter/gain graph that they were connected through.
+    // Leaving those finished graphs attached caused long high-speed sessions
+    // to retain thousands of silent nodes, eventually starving the audio
+    // renderer (especially in WKWebView). Tear the whole voice down only
+    // after both oscillators finish so the octave cannot be cut off early.
+    let endedOscillators = 0;
+    let released = false;
+    const releaseVoice = () => {
+      if (released || endedOscillators < 2) return;
+      released = true;
+      try {
+        fundamental.disconnect();
+        octave.disconnect();
+        fundamentalLevel.disconnect();
+        octaveLevel.disconnect();
+        rumbleFilter.disconnect();
+        toneFilter.disconnect();
+        envelope.disconnect();
+      } catch {
+        // Disconnect is idempotent in practice, but a closed context can
+        // reject it while the host is shutting down.
+      }
+    };
+    const onOscillatorEnded = (oscillator: OscillatorNode) => {
+      trackedSources?.delete(oscillator);
+      endedOscillators += 1;
+      releaseVoice();
+    };
+    fundamental.addEventListener("ended", () => onOscillatorEnded(fundamental), { once: true });
+    octave.addEventListener("ended", () => onOscillatorEnded(octave), { once: true });
+    trackedSources?.add(fundamental);
+    trackedSources?.add(octave);
 
     fundamental.start(startTime);
     octave.start(startTime);
@@ -3404,20 +3715,39 @@ export default function Home() {
     const basePeakGain = isImpact ? 0.2 : 0.14;
     const peakGain = basePeakGain * (volume / 100) ** 2.5;
     const frequency = getSortingToneFrequency(activeValue);
+    const isDenseTone = originalValues.length > PIANO_TONE_MAX_ARRAY_SIZE;
     // Preserve the immediate, musical response for the 4–25 note piano
     // mapping. Dense continuous-tone rows receive a tiny scheduling lead so
     // a lagged render cannot start an oscillator before its attack is ready.
-    const startTime = originalValues.length > PIANO_TONE_MAX_ARRAY_SIZE
+    const startTime = isDenseTone
       ? getSafeScheduledAudioTime(
           now,
           context.currentTime,
           DENSE_TONE_SCHEDULE_LEAD_SECONDS,
         )
       : now;
+    const output = getLiveToneOutput(context);
 
-    // Two oscillators make up each full musical voice. A hard cap keeps a
-    // delayed Web Audio backend from accumulating work faster than it can
-    // render when a very fast sort emits many state changes in one frame.
+    if (isDenseTone) {
+      // Large rows use a one-oscillator continuous-Hz voice. The old piano
+      // graph (two oscillators, two filters, and three gains per beep) is
+      // lovely at 4–25 values but needlessly expensive at 256 values.
+      if (liveToneSourcesRef.current.size + 1 > MAX_LIVE_TONE_SOURCES) return;
+      playCompactTone(
+        context,
+        startTime,
+        frequency,
+        targetDuration,
+        peakGain,
+        liveToneSourcesRef.current,
+        output,
+      );
+      return;
+    }
+
+    // Two oscillators make up each small, musical piano voice. A hard cap
+    // keeps a delayed Web Audio backend from accumulating work faster than it
+    // can render when several state changes land in one frame.
     if (liveToneSourcesRef.current.size + 2 > MAX_LIVE_TONE_SOURCES) return;
     playMusicalVoice(
       context,
@@ -3426,21 +3756,20 @@ export default function Home() {
       targetDuration,
       peakGain,
       liveToneSourcesRef.current,
+      output,
     );
   }
 
-  function playCompactSweepVoice(
+  function playCompactTone(
     context: AudioContext,
     startTime: number,
     frequency: number,
     targetDuration: number,
     peakGain: number,
+    trackedSources: Set<OscillatorNode>,
     output: AudioNode = context.destination,
   ) {
-    // Dense (26+ value) arrays use a single voiced oscillator per red bar.
-    // The bar-to-note mapping remains one-to-one, but this avoids creating the
-    // five-node reinforced voice graph hundreds of times in a single sweep.
-    const duration = Math.min(0.024, Math.max(0.007, targetDuration));
+    const duration = Math.min(0.06, Math.max(0.007, targetDuration));
     const attack = Math.min(0.003, duration * 0.28);
     const oscillator = context.createOscillator();
     const envelope = context.createGain();
@@ -3452,15 +3781,78 @@ export default function Home() {
     envelope.gain.exponentialRampToValueAtTime(0.0001, startTime + duration);
     oscillator.connect(envelope);
     envelope.connect(output);
+    trackedSources.add(oscillator);
+    oscillator.addEventListener("ended", () => {
+      trackedSources.delete(oscillator);
+      try {
+        oscillator.disconnect();
+        envelope.disconnect();
+      } catch {
+        // A reset can release this short voice before it ends.
+      }
+    }, { once: true });
+    oscillator.start(startTime);
+    oscillator.stop(startTime + duration + 0.008);
+  }
+
+  function playDenseCompletionSweep(
+    context: AudioContext,
+    valuesToScan: readonly number[],
+    startTime: number,
+    duration: number,
+    peakGain: number,
+    output: AudioNode,
+  ) {
+    // A 256-value finish used to allocate 256 oscillators and 256 envelopes
+    // over roughly one second. On a lagged WebKit renderer that created a
+    // burst of native-audio work precisely when the visualizer was busiest.
+    // A single phase-continuous oscillator with one frequency automation point
+    // per value keeps the one-note-per-bar rule while eliminating that spike.
+    const oscillator = context.createOscillator();
+    const filter = context.createBiquadFilter();
+    const envelope = context.createGain();
+    const spacing = duration / 1_000 / valuesToScan.length;
+    const attack = Math.min(0.012, Math.max(0.004, spacing * 0.75));
+    const release = 0.02;
+    const endTime = startTime + duration / 1_000;
+    const bodyEnd = Math.max(startTime + attack, endTime - release);
+
+    oscillator.type = "triangle";
+    oscillator.frequency.setValueAtTime(
+      getSortingToneFrequency(valuesToScan[0] ?? 1),
+      startTime,
+    );
+    valuesToScan.forEach((value, index) => {
+      const noteTime = startTime + (index + 0.5) * spacing;
+      const frequency = getSortingToneFrequency(value);
+      // Linear ramps keep phase continuous—unlike restarting hundreds of
+      // oscillators—while each value still contributes its own pitch point.
+      oscillator.frequency.linearRampToValueAtTime(frequency, noteTime);
+    });
+    filter.type = "lowpass";
+    filter.frequency.setValueAtTime(2_000, startTime);
+    filter.Q.setValueAtTime(0.4, startTime);
+    envelope.gain.setValueAtTime(0.0001, startTime);
+    envelope.gain.exponentialRampToValueAtTime(peakGain, startTime + attack);
+    envelope.gain.setValueAtTime(peakGain, bodyEnd);
+    envelope.gain.exponentialRampToValueAtTime(0.0001, endTime + release);
+
+    oscillator.connect(filter);
+    filter.connect(envelope);
+    envelope.connect(output);
     completionSweepSourcesRef.current.add(oscillator);
     oscillator.addEventListener("ended", () => {
       completionSweepSourcesRef.current.delete(oscillator);
-      oscillator.disconnect();
-      envelope.disconnect();
+      try {
+        oscillator.disconnect();
+        filter.disconnect();
+        envelope.disconnect();
+      } catch {
+        // The shared output can be released before its voice ends.
+      }
     }, { once: true });
     oscillator.start(startTime);
-    oscillator.stop(startTime + duration + 0.004);
-    return duration;
+    oscillator.stop(endTime + release + AUDIO_SOURCE_STOP_PADDING_SECONDS);
   }
 
   function playCompletionSweepSound(
@@ -3470,107 +3862,57 @@ export default function Home() {
   ) {
     const context = audioContextRef.current;
     const volume = soundVolumeRef.current;
-    if (!context || context.state !== "running" || volume <= 0) return;
+    if (
+      completionSweepRunRef.current !== sweepRun ||
+      !context ||
+      context.state !== "running" ||
+      volume <= 0
+    ) return;
 
     const valuesToScan = sweepValues.length ? sweepValues : originalValues;
     if (valuesToScan.length === 0) return;
 
-    const spacing = duration / 1_000 / valuesToScan.length;
     const startTime = context.currentTime + COMPLETION_SWEEP_AUDIO_VISUAL_LEAD / 1_000;
     const liveImpactPeak = 0.2 * (volume / 100) ** 2.5;
     const useCompactVoice = valuesToScan.length > PIANO_TONE_MAX_ARRAY_SIZE;
     // Give a sweep its own output bus. It lets the end/reset path release a
-    // late look-ahead queue smoothly instead of stopping active oscillators.
+    // current tone smoothly rather than stopping a waveform at a hard edge.
     const output = context.createGain();
     output.gain.setValueAtTime(1, context.currentTime);
     output.connect(context.destination);
     completionSweepOutputRef.current = output;
-    let nextIndex = 0;
-    // In the normal case this remains identical to the visual timing. If a
-    // dense sweep callback arrives late, it spaces overdue tones back out
-    // instead of launching a burst of past-due oscillators in one quantum.
-    let nextDenseVoiceStartTime = startTime;
+    if (useCompactVoice) {
+      playDenseCompletionSweep(
+        context,
+        valuesToScan,
+        startTime,
+        duration,
+        0.16 * (volume / 100) ** 2.5,
+        output,
+      );
+      return;
+    }
 
-    const scheduleNextWindow = () => {
-      if (
-        completionSweepRunRef.current !== sweepRun ||
-        audioContextRef.current !== context ||
-        context.state !== "running" ||
-        soundVolumeRef.current <= 0
-      ) {
-        return;
-      }
-
-      const scheduleThrough = context.currentTime + COMPLETION_SWEEP_SCHEDULE_AHEAD_SECONDS;
-      while (nextIndex < valuesToScan.length) {
-        const noteTime = startTime + (nextIndex + 0.5) * spacing;
-        if (noteTime > scheduleThrough) break;
-
-        const voiceStartTime = useCompactVoice
-          ? Math.max(
-              getSafeScheduledAudioTime(
-                noteTime,
-                context.currentTime,
-                DENSE_TONE_SCHEDULE_LEAD_SECONDS,
-              ),
-              nextDenseVoiceStartTime,
-            )
-          : noteTime;
-        // Do not turn one late renderer frame into dozens of oscillator
-        // allocations scheduled far beyond this window. The next short
-        // look-ahead turn continues the sequence without a timing burst.
-        if (useCompactVoice && voiceStartTime > scheduleThrough) break;
-        if (useCompactVoice) {
-          nextDenseVoiceStartTime = voiceStartTime + spacing;
-        }
-
-        const value = valuesToScan[nextIndex] ?? 1;
-        const frequency = getSortingToneFrequency(value);
-        const requestedDuration = useCompactVoice
-          ? Math.min(0.024, Math.max(0.007, spacing * 1.25))
-          : Math.min(0.052, Math.max(0.012, spacing * 0.9));
-        const actualVoiceDuration = useCompactVoice
-          ? requestedDuration
-          : Math.min(0.12, Math.max(requestedDuration, 4.5 / Math.max(frequency, 1)));
-        const overlap = Math.max(1, actualVoiceDuration / spacing);
-        const peakGain = liveImpactPeak / Math.sqrt(overlap);
-
-        if (useCompactVoice) {
-          playCompactSweepVoice(
-            context,
-            voiceStartTime,
-            frequency,
-            requestedDuration,
-            peakGain,
-            output,
-          );
-        } else {
-          playMusicalVoice(
-            context,
-            voiceStartTime,
-            frequency,
-            requestedDuration,
-            peakGain,
-            completionSweepSourcesRef.current,
-            output,
-          );
-        }
-        nextIndex += 1;
-      }
-
-      if (nextIndex < valuesToScan.length) {
-        completionSweepScheduleTimerRef.current = window.setTimeout(
-          scheduleNextWindow,
-          COMPLETION_SWEEP_SCHEDULE_INTERVAL,
-        );
-      } else {
-        completionSweepScheduleTimerRef.current = null;
-      }
-    };
-
-    // Each red completion bar still receives exactly one note. Only the
-    // allocation is windowed, keeping a max-size/high-speed finish responsive.
-    scheduleNextWindow();
+    const spacing = duration / 1_000 / valuesToScan.length;
+    valuesToScan.forEach((value, index) => {
+      const noteTime = startTime + (index + 0.5) * spacing;
+      const frequency = getSortingToneFrequency(value);
+      const requestedDuration = Math.min(0.052, Math.max(0.012, spacing * 0.9));
+      const actualVoiceDuration = Math.min(
+        0.12,
+        Math.max(requestedDuration, 4.5 / Math.max(frequency, 1)),
+      );
+      const overlap = Math.max(1, actualVoiceDuration / spacing);
+      playMusicalVoice(
+        context,
+        noteTime,
+        frequency,
+        requestedDuration,
+        liveImpactPeak / Math.sqrt(overlap),
+        completionSweepSourcesRef.current,
+        output,
+      );
+    });
   }
 
   function playBogoShuffleTexture(attempt: number) {
@@ -3597,6 +3939,7 @@ export default function Home() {
       0.075,
       peakGain,
       liveToneSourcesRef.current,
+      getLiveToneOutput(context),
     );
   }
 
@@ -3624,6 +3967,14 @@ export default function Home() {
       gain.gain.exponentialRampToValueAtTime(0.0001, startTime + duration);
       oscillator.connect(gain);
       gain.connect(context.destination);
+      oscillator.addEventListener("ended", () => {
+        try {
+          oscillator.disconnect();
+          gain.disconnect();
+        } catch {
+          // The app may have released the context while the victory tail ran.
+        }
+      }, { once: true });
       oscillator.start(startTime);
       oscillator.stop(startTime + duration + 0.02);
     });
@@ -6189,54 +6540,67 @@ export default function Home() {
                 </em>
               </div>
             )}
-            <div className="chart-stage" role="img" aria-label={"Array values: " + displayValues + ". " + currentStep.message}>
+            <div className="chart-stage" role="img" aria-label={chartAccessibleLabel}>
               <div className="chart-grid" aria-hidden="true" />
-              <div
-                className={
-                  "bars " +
-                  (isLargeArray ? "bars--dense " : "") +
-                  (algorithm === "merge" || algorithm === "powersort" ? "bars--merge " : "") +
-                  (shouldInterpolateMoves ? "bars--flip bars--flip-" + motionSlideStage + " " : "") +
-                  (completionSweepActive && !prefersReducedMotion ? "bars--completion-sweeping " : "") +
-                  (shouldInterpolateDenseBars ? "bars--smooth" : "")
-                }
-                style={activeBarTransitionStyle}
-                aria-hidden="true"
-              >
-                {renderedBarItems.map((item, index) => {
-                  const height = (item.value / largestValue) * 100;
-                  const slideOffset = shouldInterpolateMoves
-                    ? motionSlideOffsets[item.token]
-                    : undefined;
-                  return (
-                    <SortingBarSlot
-                      key={
-                        shouldInterpolateMoves
-                          ? "motion-" + item.token
-                          : String(index) + "-" + String(originalValues.length)
-                      }
-                      value={item.value}
-                      isGap={item.isGap}
-                      height={height}
-                      barClassName={getBarClass(index, currentStep, algorithm, settledBarIndices)}
-                      showValue={arraySize <= 24}
-                      motionToken={shouldInterpolateMoves ? item.token : null}
-                      slideOffset={slideOffset}
-                      onMotionBarRef={shouldInterpolateMoves ? setMotionBarRef : null}
-                      completionScanDelay={
-                        completionSweepActive && !prefersReducedMotion
-                          ? COMPLETION_SWEEP_AUDIO_VISUAL_LEAD + index * completionSweepStepDuration
-                          : undefined
-                      }
-                      completionScanDuration={
-                        completionSweepActive && !prefersReducedMotion
-                          ? completionSweepStepDuration
-                          : undefined
-                      }
-                    />
-                  );
-                })}
-              </div>
+              {useCanvasBarRenderer ? (
+                <DenseBarCanvas
+                  items={renderedBarItems}
+                  largestValue={largestValue}
+                  step={currentStep}
+                  algorithm={algorithm}
+                  settledIndices={settledBarIndices}
+                  completionSweepActive={completionSweepActive}
+                  completionSweepStepDuration={completionSweepStepDuration}
+                  prefersReducedMotion={prefersReducedMotion}
+                />
+              ) : (
+                <div
+                  className={
+                    "bars " +
+                    (isLargeArray ? "bars--dense " : "") +
+                    (algorithm === "merge" || algorithm === "powersort" ? "bars--merge " : "") +
+                    (shouldInterpolateMoves ? "bars--flip bars--flip-" + motionSlideStage + " " : "") +
+                    (completionSweepActive && !prefersReducedMotion ? "bars--completion-sweeping " : "") +
+                    (shouldInterpolateDenseBars ? "bars--smooth" : "")
+                  }
+                  style={activeBarTransitionStyle}
+                  aria-hidden="true"
+                >
+                  {renderedBarItems.map((item, index) => {
+                    const height = (item.value / largestValue) * 100;
+                    const slideOffset = shouldInterpolateMoves
+                      ? motionSlideOffsets[item.token]
+                      : undefined;
+                    return (
+                      <SortingBarSlot
+                        key={
+                          shouldInterpolateMoves
+                            ? "motion-" + item.token
+                            : String(index) + "-" + String(originalValues.length)
+                        }
+                        value={item.value}
+                        isGap={item.isGap}
+                        height={height}
+                        barClassName={getBarClass(index, currentStep, algorithm, settledBarIndices)}
+                        showValue={arraySize <= 24}
+                        motionToken={shouldInterpolateMoves ? item.token : null}
+                        slideOffset={slideOffset}
+                        onMotionBarRef={shouldInterpolateMoves ? setMotionBarRef : null}
+                        completionScanDelay={
+                          completionSweepActive && !prefersReducedMotion
+                            ? COMPLETION_SWEEP_AUDIO_VISUAL_LEAD + index * completionSweepStepDuration
+                            : undefined
+                        }
+                        completionScanDuration={
+                          completionSweepActive && !prefersReducedMotion
+                            ? completionSweepStepDuration
+                            : undefined
+                        }
+                      />
+                    );
+                  })}
+                </div>
+              )}
               <div className="axis-labels" aria-hidden="true">
                 <span>lower values</span>
                 <span>higher values</span>
@@ -7171,7 +7535,7 @@ export default function Home() {
           )}
         </section>
 
-        <p className="sr-only" aria-live="polite" aria-atomic="true">{liveStatus}</p>
+        <p className="sr-only" aria-live={liveStatusPoliteness} aria-atomic="true">{liveStatus}</p>
       </div>
     </main>
   );

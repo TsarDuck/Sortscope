@@ -1462,6 +1462,20 @@ input:focus-visible {
   height: 100%;
 }
 
+/* Large fast rows use one Canvas surface instead of hundreds of individually
+   styled DOM bars. It occupies the exact same chart area; the parent retains
+   the accessible array/message label, so this decorative surface stays hidden
+   from assistive technology. */
+.bars-canvas {
+  position: relative;
+  z-index: 1;
+  display: block;
+  width: 100%;
+  height: 100%;
+  contain: layout paint;
+  pointer-events: none;
+}
+
 .bar-slot {
   position: relative;
   display: flex;
