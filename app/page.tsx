@@ -3,7 +3,9 @@
 import {
   Fragment,
   type CSSProperties,
+  type KeyboardEvent as ReactKeyboardEvent,
   type PointerEvent as ReactPointerEvent,
+  type WheelEvent as ReactWheelEvent,
   useEffect,
   useLayoutEffect,
   useMemo,
@@ -27,9 +29,17 @@ import {
 } from "./lib/sorting";
 import {
   applyPracticeMove,
+  isPracticeRowFinished,
   isPracticeMoveProgress,
+  resolvePracticeDropTarget,
   type PracticeDropMode,
+  type PracticeDropRegion,
+  type PracticeDropTarget,
 } from "./lib/practice";
+import {
+  createSmallArrayPianoToneMap,
+  getContinuousToneFrequency,
+} from "./lib/audio";
 
 type AlgorithmId =
   | "insertion"
@@ -62,6 +72,40 @@ type StepPhase =
 
 type BenchmarkPattern = "random" | "reverse" | "nearly-sorted";
 type BenchmarkTab = "table" | "lines";
+type GrowthView = {
+  zoom: number;
+  centerX: number;
+  centerY: number;
+};
+type GrowthGraphDomain = {
+  minimumExponent: number;
+  maximumExponent: number;
+  exponentSpan: number;
+};
+type GrowthViewport = GrowthGraphDomain & {
+  zoom: number;
+  xStart: number;
+  xEnd: number;
+  xSpan: number;
+  yMinimum: number;
+  yMaximum: number;
+  ySpan: number;
+};
+
+type PracticeGroupTone = "cyan" | "violet" | "mint" | "gold";
+
+type PracticeGroup = {
+  /** Inclusive slot range occupied by this visible run in the lesson row. */
+  range: [number, number];
+  /** Plain-language name shown in the run key and announced to screen readers. */
+  label: string;
+  /** A short explanation of what this run is doing in the current step. */
+  detail?: string;
+  /** Matching color for the run key and the bars on its blocks. */
+  tone: PracticeGroupTone;
+  /** Marks the runs the learner should work with in this step. */
+  active?: boolean;
+};
 
 type BlockPracticeStep = {
   prompt: string;
@@ -75,12 +119,13 @@ type BlockPracticeStep = {
   activeRange?: [number, number];
   /** Values whose final positions are already proven by earlier pivots. */
   settled?: number[];
+  /** Visible run boundaries for merge-style lessons. Ranges use row slots. */
+  groups?: PracticeGroup[];
 };
 
 type PracticeStep = BlockPracticeStep;
 
-type PracticeMoveResult = "solved" | "progress" | "wrong";
-type PracticeDropTarget = { index: number; mode: PracticeDropMode };
+type PracticeMoveResult = "complete" | "solved" | "progress" | "wrong";
 
 type SortStep = {
   values: number[];
@@ -171,6 +216,10 @@ const GROWTH_GRAPH_PLOT_TOP = 24;
 const GROWTH_GRAPH_PLOT_BOTTOM = 52;
 const GROWTH_GRAPH_PLOT_WIDTH = GROWTH_GRAPH_WIDTH - GROWTH_GRAPH_PLOT_LEFT - GROWTH_GRAPH_PLOT_RIGHT;
 const GROWTH_GRAPH_PLOT_HEIGHT = GROWTH_GRAPH_HEIGHT - GROWTH_GRAPH_PLOT_TOP - GROWTH_GRAPH_PLOT_BOTTOM;
+const GROWTH_GRAPH_MIN_X_SPAN = 0.1;
+const GROWTH_GRAPH_MIN_Y_SPAN = 0.65;
+const GROWTH_GRAPH_MAX_ZOOM = 10;
+const GROWTH_GRAPH_ZOOM_STEP = 1.35;
 const BOGO_MIN_ATTEMPTS = 1;
 const BOGO_STANDARD_MAX_ATTEMPTS = 999_999_999;
 // At the top end, the live runner works in short CPU batches. This is a
@@ -179,6 +228,9 @@ const BOGO_STANDARD_MAX_ATTEMPTS = 999_999_999;
 const BOGO_FAST_ESTIMATED_SHUFFLES_PER_SECOND = 2_500_000;
 const BOGO_RATE_SAMPLE_INTERVAL = 250;
 const BOGO_EXPECTED_RATE_FREEZE_AFTER = 2_500;
+// A small buffer makes a direct block drop forgiving without swallowing the
+// dedicated gap that sits between adjacent blocks.
+const PRACTICE_DIRECT_DROP_HIT_SLOP = 8;
 const INITIAL_VALUES = [
   17, 5, 22, 8, 19, 3, 14, 24, 1, 12, 7, 20, 10, 23, 4, 16, 9, 21, 2, 18,
   6, 15, 11, 13,
@@ -884,42 +936,81 @@ const ALGORITHM_DETAILS: Record<AlgorithmId, AlgorithmDetails> = {
         start: [5, 1, 6, 2, 7, 3, 8, 4],
         target: [1, 5, 6, 2, 7, 3, 8, 4],
         hint: "Each one-value run is already ordered; write the smaller front value first.",
+        groups: [
+          { range: [0, 1], label: "working pair", detail: "turn these two one-value runs into one ordered run", tone: "cyan", active: true },
+          { range: [2, 3], label: "next pair", detail: "leave this pair for its own merge", tone: "violet" },
+          { range: [4, 5], label: "next pair", detail: "leave this pair for its own merge", tone: "mint" },
+          { range: [6, 7], label: "next pair", detail: "leave this pair for its own merge", tone: "gold" },
+        ],
       },
       {
         prompt: "Sort the second pair into [2, 6].",
         start: [1, 5, 6, 2, 7, 3, 8, 4],
         target: [1, 5, 2, 6, 7, 3, 8, 4],
         hint: "Keep the first completed run [1, 5] untouched.",
+        groups: [
+          { range: [0, 1], label: "ready run", detail: "this pair is already ordered", tone: "cyan" },
+          { range: [2, 3], label: "working pair", detail: "turn these two one-value runs into one ordered run", tone: "violet", active: true },
+          { range: [4, 5], label: "next pair", detail: "leave this pair for its own merge", tone: "mint" },
+          { range: [6, 7], label: "next pair", detail: "leave this pair for its own merge", tone: "gold" },
+        ],
       },
       {
         prompt: "Sort the third pair into [3, 7].",
         start: [1, 5, 2, 6, 7, 3, 8, 4],
         target: [1, 5, 2, 6, 3, 7, 8, 4],
         hint: "Only the third neighboring pair needs to change.",
+        groups: [
+          { range: [0, 1], label: "ready run", detail: "this pair is already ordered", tone: "cyan" },
+          { range: [2, 3], label: "ready run", detail: "this pair is already ordered", tone: "violet" },
+          { range: [4, 5], label: "working pair", detail: "turn these two one-value runs into one ordered run", tone: "mint", active: true },
+          { range: [6, 7], label: "next pair", detail: "leave this pair for its own merge", tone: "gold" },
+        ],
       },
       {
         prompt: "Sort the final pair into [4, 8].",
         start: [1, 5, 2, 6, 3, 7, 8, 4],
         target: [1, 5, 2, 6, 3, 7, 4, 8],
         hint: "After this, all four two-value runs are ordered.",
+        groups: [
+          { range: [0, 1], label: "ready run", detail: "this pair is already ordered", tone: "cyan" },
+          { range: [2, 3], label: "ready run", detail: "this pair is already ordered", tone: "violet" },
+          { range: [4, 5], label: "ready run", detail: "this pair is already ordered", tone: "mint" },
+          { range: [6, 7], label: "working pair", detail: "turn these two one-value runs into one ordered run", tone: "gold", active: true },
+        ],
       },
       {
         prompt: "Merge [1, 5] with [2, 6] into one four-value run.",
         start: [1, 5, 2, 6, 3, 7, 4, 8],
         target: [1, 2, 5, 6, 3, 7, 4, 8],
         hint: "2 is the next smallest front value, so it belongs before 5.",
+        groups: [
+          { range: [0, 1], label: "left run", detail: "take the next smallest front value from this run", tone: "cyan", active: true },
+          { range: [2, 3], label: "right run", detail: "take the next smallest front value from this run", tone: "violet", active: true },
+          { range: [4, 5], label: "waiting run", detail: "this pair merges in the next step", tone: "mint" },
+          { range: [6, 7], label: "waiting run", detail: "this pair merges in the next step", tone: "gold" },
+        ],
       },
       {
         prompt: "Merge [3, 7] with [4, 8] into the other four-value run.",
         start: [1, 2, 5, 6, 3, 7, 4, 8],
         target: [1, 2, 5, 6, 3, 4, 7, 8],
         hint: "4 needs to come before 7 while the completed left run stays untouched.",
+        groups: [
+          { range: [0, 3], label: "ready four-value run", detail: "this merged run is already in order", tone: "cyan" },
+          { range: [4, 5], label: "left run", detail: "take the next smallest front value from this run", tone: "mint", active: true },
+          { range: [6, 7], label: "right run", detail: "take the next smallest front value from this run", tone: "gold", active: true },
+        ],
       },
       {
         prompt: "Complete the final merge of the two ordered four-value runs.",
         start: [1, 2, 5, 6, 3, 4, 7, 8],
         target: [1, 2, 3, 4, 5, 6, 7, 8],
         hint: "Bring 3 and then 4 left through [5, 6]. Each helpful swap remains on the board.",
+        groups: [
+          { range: [0, 3], label: "left four-value run", detail: "compare its next front value with the other run", tone: "cyan", active: true },
+          { range: [4, 7], label: "right four-value run", detail: "compare its next front value with the other run", tone: "violet", active: true },
+        ],
       },
     ],
   },
@@ -963,18 +1054,36 @@ const ALGORITHM_DETAILS: Record<AlgorithmId, AlgorithmDetails> = {
         start: [5, 1, 6, 2, 7, 3, 8, 4],
         target: [1, 5, 6, 2, 7, 3, 8, 4],
         hint: "Powersort begins by spotting a run that is already easy to make increasing.",
+        groups: [
+          { range: [0, 1], label: "falling run", detail: "reverse this short run so it rises", tone: "gold", active: true },
+          { range: [2, 3], label: "next run", detail: "this short run will be prepared next", tone: "violet" },
+          { range: [4, 5], label: "later run", detail: "keep this boundary visible for the merge plan", tone: "mint" },
+          { range: [6, 7], label: "later run", detail: "keep this boundary visible for the merge plan", tone: "cyan" },
+        ],
       },
       {
         prompt: "Make the next two-value rising run [2, 6].",
         start: [1, 5, 6, 2, 7, 3, 8, 4],
         target: [1, 5, 2, 6, 7, 3, 8, 4],
         hint: "Leave the run [1, 5] alone while you prepare the next run." ,
+        groups: [
+          { range: [0, 1], label: "ready run", detail: "Powersort can reuse this order", tone: "gold" },
+          { range: [2, 3], label: "falling run", detail: "reverse this short run so it rises", tone: "violet", active: true },
+          { range: [4, 5], label: "later run", detail: "keep this boundary visible for the merge plan", tone: "mint" },
+          { range: [6, 7], label: "later run", detail: "keep this boundary visible for the merge plan", tone: "cyan" },
+        ],
       },
       {
         prompt: "Use the discovered runs to finish the stable merge.",
         start: [1, 5, 2, 6, 7, 3, 8, 4],
         target: [1, 2, 3, 4, 5, 6, 7, 8],
         hint: "Bring the smallest available front value forward each time; the runs give you a head start.",
+        groups: [
+          { range: [0, 1], label: "ready run", detail: "this discovered run already rises", tone: "gold", active: true },
+          { range: [2, 3], label: "ready run", detail: "this discovered run already rises", tone: "violet", active: true },
+          { range: [4, 5], label: "run to merge", detail: "use its smallest available value when it belongs next", tone: "mint", active: true },
+          { range: [6, 7], label: "run to merge", detail: "use its smallest available value when it belongs next", tone: "cyan", active: true },
+        ],
       },
     ],
   },
@@ -1067,6 +1176,10 @@ function arraysMatch(left: number[], right: number[]) {
   return left.length === right.length && left.every((value, index) => value === right[index]);
 }
 
+function getPracticeGroupAtIndex(groups: PracticeGroup[], index: number) {
+  return groups.find((group) => index >= group.range[0] && index <= group.range[1]);
+}
+
 // Every hands-on lesson uses a complete, consecutive set of values. Small
 // legacy examples are extended with already-visible trailing values so even a
 // first lesson has enough blocks to feel like a real little array, while the
@@ -1099,6 +1212,100 @@ function formatGrowthSize(value: number) {
   if (value >= 1_000_000) return (value / 1_000_000).toFixed(2).replace(/\.00$/, "") + "m";
   if (value >= 1_000) return Math.round(value / 1_000) + "k";
   return String(value);
+}
+
+function clamp(value: number, minimum: number, maximum: number) {
+  return Math.min(maximum, Math.max(minimum, value));
+}
+
+function getGrowthViewport(domain: GrowthGraphDomain, view: GrowthView): GrowthViewport {
+  const maximumZoom = Math.max(
+    1,
+    Math.min(
+      GROWTH_GRAPH_MAX_ZOOM,
+      1 / GROWTH_GRAPH_MIN_X_SPAN,
+      domain.exponentSpan / GROWTH_GRAPH_MIN_Y_SPAN,
+    ),
+  );
+  const zoom = clamp(view.zoom, 1, maximumZoom);
+  const xSpan = Math.max(GROWTH_GRAPH_MIN_X_SPAN, 1 / zoom);
+  const ySpan = Math.max(GROWTH_GRAPH_MIN_Y_SPAN, domain.exponentSpan / zoom);
+  const centerX = clamp(view.centerX, xSpan / 2, 1 - xSpan / 2);
+  const centerY = clamp(
+    view.centerY,
+    domain.minimumExponent + ySpan / 2,
+    domain.maximumExponent - ySpan / 2,
+  );
+
+  return {
+    ...domain,
+    zoom,
+    xStart: centerX - xSpan / 2,
+    xEnd: centerX + xSpan / 2,
+    xSpan,
+    yMinimum: centerY - ySpan / 2,
+    yMaximum: centerY + ySpan / 2,
+    ySpan,
+  };
+}
+
+function normalizeGrowthView(domain: GrowthGraphDomain, view: GrowthView): GrowthView {
+  const viewport = getGrowthViewport(domain, view);
+  return {
+    zoom: viewport.zoom,
+    centerX: (viewport.xStart + viewport.xEnd) / 2,
+    centerY: (viewport.yMinimum + viewport.yMaximum) / 2,
+  };
+}
+
+function zoomGrowthView(
+  domain: GrowthGraphDomain,
+  view: GrowthView,
+  multiplier: number,
+  focusX?: number,
+  focusY?: number,
+): GrowthView {
+  const viewport = getGrowthViewport(domain, view);
+  const maximumZoom = Math.max(
+    1,
+    Math.min(
+      GROWTH_GRAPH_MAX_ZOOM,
+      1 / GROWTH_GRAPH_MIN_X_SPAN,
+      domain.exponentSpan / GROWTH_GRAPH_MIN_Y_SPAN,
+    ),
+  );
+  const zoom = clamp(viewport.zoom * multiplier, 1, maximumZoom);
+  const zoomedViewport = getGrowthViewport(domain, { ...view, zoom });
+  const pinnedX = focusX ?? (viewport.xStart + viewport.xEnd) / 2;
+  const pinnedY = focusY ?? (viewport.yMinimum + viewport.yMaximum) / 2;
+  const xRatio = clamp((pinnedX - viewport.xStart) / viewport.xSpan, 0, 1);
+  const yRatio = clamp((viewport.yMaximum - pinnedY) / viewport.ySpan, 0, 1);
+
+  return normalizeGrowthView(domain, {
+    zoom,
+    centerX: pinnedX + (0.5 - xRatio) * zoomedViewport.xSpan,
+    centerY: pinnedY + (yRatio - 0.5) * zoomedViewport.ySpan,
+  });
+}
+
+function panGrowthView(
+  domain: GrowthGraphDomain,
+  view: GrowthView,
+  deltaX: number,
+  deltaY: number,
+): GrowthView {
+  const viewport = getGrowthViewport(domain, view);
+  return normalizeGrowthView(domain, {
+    ...view,
+    centerX: (viewport.xStart + viewport.xEnd) / 2 - (deltaX / GROWTH_GRAPH_PLOT_WIDTH) * viewport.xSpan,
+    centerY: (viewport.yMinimum + viewport.yMaximum) / 2 + (deltaY / GROWTH_GRAPH_PLOT_HEIGHT) * viewport.ySpan,
+  });
+}
+
+function formatGrowthMultiplier(value: number) {
+  if (value >= 100) return Math.round(value).toLocaleString("en-US") + "×";
+  if (value >= 10) return value.toFixed(1).replace(/\.0$/, "") + "×";
+  return value.toFixed(2).replace(/0$/, "").replace(/\.$/, "") + "×";
 }
 
 function buildInsertionSteps(source: number[]): SortStep[] {
@@ -1417,6 +1624,15 @@ export default function Home() {
   const [visibleGrowthAlgorithms, setVisibleGrowthAlgorithms] = useState(
     () => ({ ...DEFAULT_GROWTH_ALGORITHM_VISIBILITY }),
   );
+  const [growthFocusedAlgorithm, setGrowthFocusedAlgorithm] = useState<BenchmarkAlgorithm | "all">("all");
+  const [growthView, setGrowthView] = useState<GrowthView>({
+    zoom: 1,
+    centerX: 0.5,
+    centerY: 0,
+  });
+  const [growthInspectionIndex, setGrowthInspectionIndex] = useState(0);
+  const [growthHoverIndex, setGrowthHoverIndex] = useState<number | null>(null);
+  const [isGrowthPanning, setIsGrowthPanning] = useState(false);
   const [originalValues, setOriginalValues] = useState(INITIAL_VALUES);
   const [values, setValues] = useState(INITIAL_VALUES);
   const [steps, setSteps] = useState<SortStep[]>([]);
@@ -1469,14 +1685,24 @@ export default function Home() {
     startY: number;
     anchorX: number;
     anchorY: number;
+    sourceOrigin: PracticeDropRegion;
     moved: boolean;
   } | null>(null);
   // State paints the highlighted target, while this ref preserves the latest
-  // pointer location for a quick drag-and-release in the same event turn.
+  // pointer location for the in-flight drag. Release still rechecks the live
+  // geometry, so an old highlight can never become an accidental destination.
   const practiceDropTargetRef = useRef<PracticeDropTarget | null>(null);
   const suppressPracticeClickRef = useRef(false);
+  const practiceClickSuppressionTimerRef = useRef<number | null>(null);
   const practiceUndoTimerRef = useRef<number | null>(null);
   const practiceAdvanceTimerRef = useRef<number | null>(null);
+  const growthPanRef = useRef<{
+    pointerId: number;
+    startX: number;
+    startY: number;
+    view: GrowthView;
+    moved: boolean;
+  } | null>(null);
   const bogoSessionRef = useRef<BogoSession | null>(null);
   const bogoRateSampleRef = useRef<{
     startedAt: number;
@@ -1505,6 +1731,10 @@ export default function Home() {
   const prefersReducedMotion = usePrefersReducedMotion();
   const isBogo = algorithm === "bogo";
   const playbackSpeed = isBogo ? speed : getPlaybackSpeed(speed);
+  const smallArrayPianoToneMap = useMemo(
+    () => createSmallArrayPianoToneMap(originalValues),
+    [originalValues],
+  );
   // While a control is being adjusted, keep the visual interpolation policy
   // at the last settled speed. Playback timing continues to use `speed`, so
   // the sort still reacts live without remounting bars at the 75% boundary.
@@ -1550,6 +1780,9 @@ export default function Home() {
   const quickPivot = isQuickPractice ? currentPractice.pivot ?? null : null;
   const quickActiveRange = isQuickPractice ? currentPractice.activeRange : undefined;
   const quickSettledValues = isQuickPractice ? currentPractice.settled ?? [] : [];
+  // Merge-family lessons use these position-based ranges to make the already
+  // ordered runs visually explicit without changing the board's drag geometry.
+  const practiceGroups = practiceFinished ? [] : currentPractice.groups ?? [];
   const algorithmLabel = algorithmDetails.label;
   const stageLabel = algorithmDetails.stageLabel;
   const totalStages = isBogo
@@ -1589,45 +1822,95 @@ export default function Home() {
     "--benchmark-columns": theoreticalBenchmarkData.length,
     minWidth: String(180 + theoreticalBenchmarkData.length * 118) + "px",
   } as CSSProperties;
-  const growthGraphDomain = useMemo(() => {
+  const growthGraphDomain = useMemo<GrowthGraphDomain>(() => {
     const modeledValues = theoreticalBenchmarkData.flatMap((entry) => Object.values(entry.work));
     const minimumExponent = Math.floor(Math.log10(Math.max(1, Math.min(...modeledValues))));
     const maximumExponent = Math.ceil(Math.log10(Math.max(...modeledValues)));
-    const exponentSpan = Math.max(1, maximumExponent - minimumExponent);
-
-    return {
-      minimumExponent,
-      exponentSpan,
-      ticks: Array.from({ length: 5 }, (_, index) => {
+    return { minimumExponent, maximumExponent, exponentSpan: Math.max(1, maximumExponent - minimumExponent) };
+  }, [theoreticalBenchmarkData]);
+  const growthViewport = useMemo(
+    () => getGrowthViewport(growthGraphDomain, growthView),
+    [growthGraphDomain, growthView],
+  );
+  const growthGraphTicks = useMemo(
+    () =>
+      Array.from({ length: 5 }, (_, index) => {
         const ratio = index / 4;
-        const exponent = maximumExponent - exponentSpan * ratio;
+        const exponent = growthViewport.yMaximum - growthViewport.ySpan * ratio;
         return {
           label: formatCount(10 ** exponent),
           y: GROWTH_GRAPH_PLOT_TOP + GROWTH_GRAPH_PLOT_HEIGHT * ratio,
         };
       }),
-    };
-  }, [theoreticalBenchmarkData]);
+    [growthViewport],
+  );
+  useEffect(() => {
+    setGrowthView((current) => {
+      const next = normalizeGrowthView(growthGraphDomain, current);
+      return next.zoom === current.zoom && next.centerX === current.centerX && next.centerY === current.centerY
+        ? current
+        : next;
+    });
+  }, [growthGraphDomain]);
+  const allGrowthSeries = useMemo(
+    () =>
+      BENCHMARK_ALGORITHMS.map((benchmarkAlgorithm) => ({
+        ...benchmarkAlgorithm,
+        color: BENCHMARK_COLORS[benchmarkAlgorithm.key],
+        points: theoreticalBenchmarkData.map((entry, index) => {
+          const work = entry.work[benchmarkAlgorithm.key];
+          return {
+            size: entry.size,
+            work,
+            exponent: Math.log10(Math.max(work, 1)),
+            normalizedX: index / Math.max(theoreticalBenchmarkData.length - 1, 1),
+          };
+        }),
+      })),
+    [theoreticalBenchmarkData],
+  );
   const visibleGrowthSeries = useMemo(
     () =>
-      BENCHMARK_ALGORITHMS.filter((benchmarkAlgorithm) => visibleGrowthAlgorithms[benchmarkAlgorithm.key]).map(
-        (benchmarkAlgorithm) => ({
+      allGrowthSeries
+        .filter((benchmarkAlgorithm) => visibleGrowthAlgorithms[benchmarkAlgorithm.key])
+        .map((benchmarkAlgorithm) => ({
           ...benchmarkAlgorithm,
-          color: BENCHMARK_COLORS[benchmarkAlgorithm.key],
-          points: theoreticalBenchmarkData.map((entry, index) => {
-            const work = entry.work[benchmarkAlgorithm.key];
-            const workExponent = Math.log10(Math.max(work, 1));
-            const x = GROWTH_GRAPH_PLOT_LEFT +
-              (GROWTH_GRAPH_PLOT_WIDTH * index) / Math.max(theoreticalBenchmarkData.length - 1, 1);
-            const y = GROWTH_GRAPH_PLOT_TOP +
-              (1 - (workExponent - growthGraphDomain.minimumExponent) / growthGraphDomain.exponentSpan) *
-                GROWTH_GRAPH_PLOT_HEIGHT;
-            return { size: entry.size, work, x, y };
-          }),
-        }),
-      ),
-    [growthGraphDomain, theoreticalBenchmarkData, visibleGrowthAlgorithms],
+          isFocused: growthFocusedAlgorithm === benchmarkAlgorithm.key,
+          points: benchmarkAlgorithm.points.map((point) => ({
+            ...point,
+            x: GROWTH_GRAPH_PLOT_LEFT +
+              ((point.normalizedX - growthViewport.xStart) / growthViewport.xSpan) * GROWTH_GRAPH_PLOT_WIDTH,
+            y: GROWTH_GRAPH_PLOT_TOP +
+              ((growthViewport.yMaximum - point.exponent) / growthViewport.ySpan) * GROWTH_GRAPH_PLOT_HEIGHT,
+          })),
+        })),
+    [allGrowthSeries, growthFocusedAlgorithm, growthViewport, visibleGrowthAlgorithms],
   );
+  const activeGrowthInspectionIndex = Math.min(
+    Math.max(growthHoverIndex ?? growthInspectionIndex, 0),
+    Math.max(theoreticalBenchmarkData.length - 1, 0),
+  );
+  const growthInspection = useMemo(() => {
+    const entry = theoreticalBenchmarkData[activeGrowthInspectionIndex];
+    const normalizedX = activeGrowthInspectionIndex / Math.max(theoreticalBenchmarkData.length - 1, 1);
+    const x = GROWTH_GRAPH_PLOT_LEFT +
+      ((normalizedX - growthViewport.xStart) / growthViewport.xSpan) * GROWTH_GRAPH_PLOT_WIDTH;
+    const rows = allGrowthSeries
+      .filter((series) => visibleGrowthAlgorithms[series.key])
+      .map((series) => ({
+        ...series,
+        work: entry?.work[series.key] ?? 0,
+      }))
+      .sort((left, right) => right.work - left.work);
+    const fastestWork = Math.max(1, rows.at(-1)?.work ?? 1);
+
+    return {
+      size: entry?.size ?? THEORY_BENCHMARK_SIZES[0],
+      x,
+      isVisible: x >= GROWTH_GRAPH_PLOT_LEFT && x <= GROWTH_GRAPH_PLOT_LEFT + GROWTH_GRAPH_PLOT_WIDTH,
+      rows: rows.map((row) => ({ ...row, multiplier: row.work / fastestWork })),
+    };
+  }, [activeGrowthInspectionIndex, allGrowthSeries, growthViewport, theoreticalBenchmarkData, visibleGrowthAlgorithms]);
 
   const currentStep = useMemo(
     () =>
@@ -2074,15 +2357,10 @@ export default function Home() {
   }
 
   function getSortingToneFrequency(value: number) {
-    const normalizedValue = Math.min(
-      1,
-      Math.max(0, (value - 1) / Math.max(largestValue - 1, 1)),
-    );
-    const compressedValue = Math.sqrt(normalizedValue);
-    // Keep the C4-to-C6 range, but interpolate within it instead of rounding
-    // values to a piano semitone. This lets neighboring bars have neighboring
-    // frequencies, including during the completion scan.
-    return 261.63 * 2 ** ((compressedValue * 24) / 12);
+    const pianoFrequency = smallArrayPianoToneMap?.get(value);
+    if (pianoFrequency !== undefined) return pianoFrequency;
+
+    return getContinuousToneFrequency(value, largestValue);
   }
 
   function playSortingTone(step: SortStep) {
@@ -2201,6 +2479,9 @@ export default function Home() {
       }
       if (practiceAdvanceTimerRef.current !== null) {
         window.clearTimeout(practiceAdvanceTimerRef.current);
+      }
+      if (practiceClickSuppressionTimerRef.current !== null) {
+        window.clearTimeout(practiceClickSuppressionTimerRef.current);
       }
       if (completionSweepStartTimerRef.current !== null) {
         window.clearTimeout(completionSweepStartTimerRef.current);
@@ -2427,6 +2708,25 @@ export default function Home() {
     }
   }
 
+  function clearPracticeClickSuppression() {
+    if (practiceClickSuppressionTimerRef.current !== null) {
+      window.clearTimeout(practiceClickSuppressionTimerRef.current);
+      practiceClickSuppressionTimerRef.current = null;
+    }
+    suppressPracticeClickRef.current = false;
+  }
+
+  function suppressPracticeClickAfterDrag() {
+    clearPracticeClickSuppression();
+    suppressPracticeClickRef.current = true;
+    // A browser normally emits the click that follows pointer-up before this
+    // timer. If it does not, clear the guard before the person's next click.
+    practiceClickSuppressionTimerRef.current = window.setTimeout(() => {
+      practiceClickSuppressionTimerRef.current = null;
+      suppressPracticeClickRef.current = false;
+    }, 0);
+  }
+
   function schedulePracticeAdvance() {
     clearPracticeAdvance();
     // Leave just enough time for the blocks to finish their smooth swap, then
@@ -2437,9 +2737,26 @@ export default function Home() {
     }, 520);
   }
 
+  function completePracticeWalkthrough() {
+    clearPracticeUndo();
+    clearPracticeAdvance();
+    setPracticeStepIndex(practiceSteps.length);
+    setPracticeSelectedIndex(null);
+    setPracticeDragIndex(null);
+    setPracticeDraggingId(null);
+    setPracticeDragOffset({ x: 0, y: 0 });
+    setPracticeDropIndex(null);
+    setPracticeDropMode(null);
+    practicePointerRef.current = null;
+    practiceDropTargetRef.current = null;
+    setPracticeSolved(true);
+    setPracticeFeedback("Fully sorted—this completes the walkthrough.");
+  }
+
   function resetPractice(nextAlgorithm = algorithm) {
     clearPracticeUndo();
     clearPracticeAdvance();
+    clearPracticeClickSuppression();
     const firstStep = normalizePracticeSteps(ALGORITHM_DETAILS[nextAlgorithm].practice)[0];
     setPracticeStepIndex(0);
     setPracticeSelectedIndex(null);
@@ -2472,6 +2789,21 @@ export default function Home() {
     practiceBlockElementsRef.current.delete(id);
   }
 
+  function getPracticeDropRegion(
+    element: HTMLElement,
+    index: number,
+    hitSlop = 0,
+  ): PracticeDropRegion {
+    const rect = element.getBoundingClientRect();
+    return {
+      index,
+      left: rect.left - hitSlop,
+      right: rect.right + hitSlop,
+      top: rect.top - hitSlop,
+      bottom: rect.bottom + hitSlop,
+    };
+  }
+
   function setPracticeDropTarget(target: PracticeDropTarget | null) {
     practiceDropTargetRef.current = target;
     setPracticeDropIndex((current) => (current === target?.index ? current : target?.index ?? null));
@@ -2479,6 +2811,16 @@ export default function Home() {
   }
 
   function evaluatePracticeMove(nextValues: number[]): PracticeMoveResult {
+    // A lesson can sometimes reach the finished row by a legitimate shortcut
+    // before its scripted final sub-step (Heap Sort is a clear example). The
+    // global completion check comes first so a truly sorted permutation never
+    // becomes stranded waiting for a no-longer-needed scripted move. It also
+    // remains safe for Quick Sort: only the actual fully sorted row can take
+    // this path, not a merely plausible-looking pivot placement.
+    if (isPracticeRowFinished(nextValues, currentPractice.target)) {
+      return "complete";
+    }
+
     if (arraysMatch(nextValues, currentPractice.target)) {
       setPracticeSolved(true);
       setPracticeFeedback(
@@ -2544,6 +2886,8 @@ export default function Home() {
     const result = evaluatePracticeMove(nextValues);
     if (result === "wrong") {
       schedulePracticeUndo(previousValues);
+    } else if (result === "complete") {
+      completePracticeWalkthrough();
     } else if (result === "solved") {
       schedulePracticeAdvance();
     }
@@ -2574,35 +2918,40 @@ export default function Home() {
     const board = practiceBoardRef.current;
     if (!board) return null;
 
-    const sourceIndex = practicePointerRef.current?.fromIndex;
-    const blocks = Array.from(board.querySelectorAll<HTMLElement>("[data-practice-index]")).filter(
-      (block) => Number(block.dataset.practiceIndex) !== sourceIndex,
-    );
-    const directBlock = blocks.find((block) => {
-      const rect = block.getBoundingClientRect();
-      return clientX >= rect.left && clientX <= rect.right && clientY >= rect.top && clientY <= rect.bottom;
-    });
-    if (directBlock) {
-      return { index: Number(directBlock.dataset.practiceIndex), mode: "swap" };
+    const boardRect = board.getBoundingClientRect();
+    if (
+      clientX < boardRect.left ||
+      clientX > boardRect.right ||
+      clientY < boardRect.top ||
+      clientY > boardRect.bottom
+    ) {
+      return null;
     }
 
-    const candidates = Array.from(board.querySelectorAll<HTMLElement>("[data-practice-drop-index]"));
-    let nearestIndex: number | null = null;
-    let nearestDistance = Infinity;
+    const sourceIndex = practicePointerRef.current?.fromIndex ?? -1;
+    const blocks = Array.from(board.querySelectorAll<HTMLElement>("[data-practice-index]"))
+      .map((block) => {
+        const index = Number(block.dataset.practiceIndex);
+        return Number.isInteger(index)
+          ? getPracticeDropRegion(block, index, PRACTICE_DIRECT_DROP_HIT_SLOP)
+          : null;
+      })
+      .filter((region): region is PracticeDropRegion => region !== null);
+    const gaps = Array.from(board.querySelectorAll<HTMLElement>("[data-practice-drop-index]"))
+      .map((gap) => {
+        const index = Number(gap.dataset.practiceDropIndex);
+        return Number.isInteger(index) ? getPracticeDropRegion(gap, index) : null;
+      })
+      .filter((region): region is PracticeDropRegion => region !== null);
 
-    candidates.forEach((candidate) => {
-      const rect = candidate.getBoundingClientRect();
-      const centerX = rect.left + rect.width / 2;
-      const centerY = rect.top + rect.height / 2;
-      const distance = (clientX - centerX) ** 2 + (clientY - centerY) ** 2;
-      if (distance < nearestDistance) {
-        nearestDistance = distance;
-        nearestIndex = Number(candidate.dataset.practiceDropIndex);
-      }
-    });
-
-    if (nearestIndex === null) return null;
-    return { index: nearestIndex, mode: "insert" };
+    return resolvePracticeDropTarget(
+      clientX,
+      clientY,
+      sourceIndex,
+      blocks,
+      gaps,
+      practicePointerRef.current?.sourceOrigin,
+    );
   }
 
   function finishPracticeDrag(
@@ -2611,14 +2960,15 @@ export default function Home() {
   ) {
     const drag = practicePointerRef.current;
     if (!drag) return;
+    if (event && event.pointerId !== drag.pointerId) return;
 
-    // Pointer-up may happen before React has committed the final pointer-move
-    // state. Resolve it at release time and keep the last target in a ref, so
-    // all lessons get the same reliable pickup-and-drop behavior.
+    // Resolve against the live geometry on release. The highlighted target is
+    // intentionally never trusted as the action source: it can be one render
+    // behind a quick pointer-up, or stale after a cancelled drag.
     const target = cancelled
       ? null
       : event
-        ? getPracticeDropTarget(event.clientX, event.clientY) ?? practiceDropTargetRef.current
+        ? getPracticeDropTarget(event.clientX, event.clientY)
         : practiceDropTargetRef.current;
     const destination = target?.index ?? null;
     const moveMode = target?.mode ?? "insert";
@@ -2631,9 +2981,13 @@ export default function Home() {
       drag.moved &&
       destination !== null &&
       !arraysMatch(nextValues, practiceValues);
+    if (drag.moved) {
+      // Never turn the pointer-up's synthetic click into a new selection—this
+      // applies to successful, no-op, outside-board, and cancelled drags.
+      suppressPracticeClickAfterDrag();
+    }
     if (shouldMove) {
       practiceBlockPositionsRef.current = capturePracticeBlockPositions();
-      suppressPracticeClickRef.current = true;
       movePracticeItem(
         drag.fromIndex,
         destination,
@@ -2668,12 +3022,22 @@ export default function Home() {
       // point where it was picked up.
       anchorX: event.clientX - (bounds.left + bounds.width / 2),
       anchorY: event.clientY - (bounds.top + bounds.height / 2),
+      sourceOrigin: {
+        index,
+        left: bounds.left,
+        right: bounds.right,
+        top: bounds.top,
+        bottom: bounds.bottom,
+      },
       moved: false,
     };
-    setPracticeDragIndex(index);
-    setPracticeDraggingId(id);
+    // Do not alter the board layout until this becomes a real drag. A normal
+    // click still selects one block, and the first drag frame can measure the
+    // same stable geometry the pointer started from.
+    setPracticeDragIndex(null);
+    setPracticeDraggingId(null);
     setPracticeDragOffset({ x: 0, y: 0 });
-    setPracticeDropTarget({ index, mode: "insert" });
+    setPracticeDropTarget(null);
   }
 
   function handlePracticePointerMove(event: ReactPointerEvent<HTMLButtonElement>) {
@@ -2682,7 +3046,11 @@ export default function Home() {
 
     const deltaX = event.clientX - drag.startX;
     const deltaY = event.clientY - drag.startY;
-    if (Math.abs(deltaX) + Math.abs(deltaY) > 5) drag.moved = true;
+    if (Math.abs(deltaX) + Math.abs(deltaY) > 5 && !drag.moved) {
+      drag.moved = true;
+      setPracticeDragIndex(drag.fromIndex);
+      setPracticeDraggingId(drag.id);
+    }
     if (!drag.moved) return;
 
     event.preventDefault();
@@ -2982,6 +3350,157 @@ export default function Home() {
       "Let Bogo Sort run until it solves?\n\nThis removes the shuffle cap. It may run until the sun explodes (or until you pause or reset it).",
     );
     setBogoRunsUntilSolved(confirmed);
+  }
+
+  function handleGrowthAlgorithmVisibilityToggle(nextAlgorithm: BenchmarkAlgorithm) {
+    if (visibleGrowthAlgorithms[nextAlgorithm] && growthFocusedAlgorithm === nextAlgorithm) {
+      setGrowthFocusedAlgorithm("all");
+    }
+    setVisibleGrowthAlgorithms((current) => ({
+      ...current,
+      [nextAlgorithm]: !current[nextAlgorithm],
+    }));
+  }
+
+  function handleGrowthFocusChange(nextFocus: BenchmarkAlgorithm | "all") {
+    setGrowthFocusedAlgorithm(nextFocus);
+    if (nextFocus !== "all") {
+      setVisibleGrowthAlgorithms((current) => ({ ...current, [nextFocus]: true }));
+    }
+  }
+
+  function resetGrowthView() {
+    setGrowthView({
+      zoom: 1,
+      centerX: 0.5,
+      centerY: (growthGraphDomain.minimumExponent + growthGraphDomain.maximumExponent) / 2,
+    });
+  }
+
+  function getGrowthPointerPosition(clientX: number, clientY: number, chart: HTMLDivElement) {
+    const bounds = chart.getBoundingClientRect();
+    const scaleX = GROWTH_GRAPH_WIDTH / Math.max(bounds.width, 1);
+    const scaleY = GROWTH_GRAPH_HEIGHT / Math.max(bounds.height, 1);
+    const chartX = (clientX - bounds.left) * scaleX;
+    const chartY = (clientY - bounds.top) * scaleY;
+    const plotX = clamp(chartX, GROWTH_GRAPH_PLOT_LEFT, GROWTH_GRAPH_PLOT_LEFT + GROWTH_GRAPH_PLOT_WIDTH);
+    const plotY = clamp(chartY, GROWTH_GRAPH_PLOT_TOP, GROWTH_GRAPH_PLOT_TOP + GROWTH_GRAPH_PLOT_HEIGHT);
+    const xRatio = (plotX - GROWTH_GRAPH_PLOT_LEFT) / GROWTH_GRAPH_PLOT_WIDTH;
+    const yRatio = (plotY - GROWTH_GRAPH_PLOT_TOP) / GROWTH_GRAPH_PLOT_HEIGHT;
+    const normalizedX = growthViewport.xStart + xRatio * growthViewport.xSpan;
+    const exponent = growthViewport.yMaximum - yRatio * growthViewport.ySpan;
+    const nearestIndex = Math.round(normalizedX * Math.max(theoreticalBenchmarkData.length - 1, 0));
+
+    return {
+      chartX,
+      chartY,
+      normalizedX,
+      exponent,
+      nearestIndex: clamp(nearestIndex, 0, Math.max(theoreticalBenchmarkData.length - 1, 0)),
+    };
+  }
+
+  function handleGrowthChartPointerDown(event: ReactPointerEvent<HTMLDivElement>) {
+    if (event.button !== 0) return;
+    const pointer = getGrowthPointerPosition(event.clientX, event.clientY, event.currentTarget);
+    growthPanRef.current = {
+      pointerId: event.pointerId,
+      startX: pointer.chartX,
+      startY: pointer.chartY,
+      view: growthView,
+      moved: false,
+    };
+    event.currentTarget.setPointerCapture(event.pointerId);
+  }
+
+  function handleGrowthChartPointerMove(event: ReactPointerEvent<HTMLDivElement>) {
+    const pointer = getGrowthPointerPosition(event.clientX, event.clientY, event.currentTarget);
+    const activePan = growthPanRef.current;
+    if (!activePan || activePan.pointerId !== event.pointerId) {
+      setGrowthHoverIndex(pointer.nearestIndex);
+      return;
+    }
+
+    const deltaX = pointer.chartX - activePan.startX;
+    const deltaY = pointer.chartY - activePan.startY;
+    if (!activePan.moved && Math.hypot(deltaX, deltaY) > 4) {
+      activePan.moved = true;
+      setIsGrowthPanning(true);
+    }
+    if (activePan.moved) {
+      setGrowthHoverIndex(null);
+      setGrowthView(panGrowthView(growthGraphDomain, activePan.view, deltaX, deltaY));
+    }
+  }
+
+  function finishGrowthChartPointer(event: ReactPointerEvent<HTMLDivElement>) {
+    const activePan = growthPanRef.current;
+    if (!activePan || activePan.pointerId !== event.pointerId) return;
+    const pointer = getGrowthPointerPosition(event.clientX, event.clientY, event.currentTarget);
+    if (!activePan.moved) setGrowthInspectionIndex(pointer.nearestIndex);
+    growthPanRef.current = null;
+    setIsGrowthPanning(false);
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+  }
+
+  function cancelGrowthChartPointer(event: ReactPointerEvent<HTMLDivElement>) {
+    if (growthPanRef.current?.pointerId !== event.pointerId) return;
+    growthPanRef.current = null;
+    setIsGrowthPanning(false);
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+  }
+
+  function handleGrowthChartWheel(event: ReactWheelEvent<HTMLDivElement>) {
+    event.preventDefault();
+    const pointer = getGrowthPointerPosition(event.clientX, event.clientY, event.currentTarget);
+    const multiplier = event.deltaY < 0 ? GROWTH_GRAPH_ZOOM_STEP : 1 / GROWTH_GRAPH_ZOOM_STEP;
+    setGrowthHoverIndex(pointer.nearestIndex);
+    setGrowthInspectionIndex(pointer.nearestIndex);
+    setGrowthView((current) =>
+      zoomGrowthView(growthGraphDomain, current, multiplier, pointer.normalizedX, pointer.exponent),
+    );
+  }
+
+  function handleGrowthChartKeyDown(event: ReactKeyboardEvent<HTMLDivElement>) {
+    const panStep = 0.2;
+    if (event.key === "+" || event.key === "=") {
+      event.preventDefault();
+      setGrowthView((current) => zoomGrowthView(growthGraphDomain, current, GROWTH_GRAPH_ZOOM_STEP));
+      return;
+    }
+    if (event.key === "-" || event.key === "_") {
+      event.preventDefault();
+      setGrowthView((current) => zoomGrowthView(growthGraphDomain, current, 1 / GROWTH_GRAPH_ZOOM_STEP));
+      return;
+    }
+    if (event.key === "0" || event.key === "Home") {
+      event.preventDefault();
+      resetGrowthView();
+      return;
+    }
+    if (event.key === "ArrowLeft") {
+      event.preventDefault();
+      setGrowthView((current) => panGrowthView(growthGraphDomain, current, GROWTH_GRAPH_PLOT_WIDTH * panStep, 0));
+      return;
+    }
+    if (event.key === "ArrowRight") {
+      event.preventDefault();
+      setGrowthView((current) => panGrowthView(growthGraphDomain, current, -GROWTH_GRAPH_PLOT_WIDTH * panStep, 0));
+      return;
+    }
+    if (event.key === "ArrowUp") {
+      event.preventDefault();
+      setGrowthView((current) => panGrowthView(growthGraphDomain, current, 0, GROWTH_GRAPH_PLOT_HEIGHT * panStep));
+      return;
+    }
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      setGrowthView((current) => panGrowthView(growthGraphDomain, current, 0, -GROWTH_GRAPH_PLOT_HEIGHT * panStep));
+    }
   }
 
   const primaryLabel =
@@ -3597,6 +4116,29 @@ export default function Home() {
                 </span>
               </div>
             )}
+            {practiceGroups.length > 0 && (
+              <div className="practice-run-guide" aria-label="Visible ordered runs in this step">
+                <span className="practice-run-guide__label">RUN MAP</span>
+                <ul>
+                  {practiceGroups.map((group, groupIndex) => (
+                    <li
+                      className={
+                        "practice-run-guide__item practice-run-guide__item--" +
+                        group.tone +
+                        (group.active ? " practice-run-guide__item--active" : "")
+                      }
+                      key={group.label + "-" + group.range.join("-") + "-" + groupIndex}
+                      title={group.detail}
+                    >
+                      <span className="practice-run-guide__swatch" aria-hidden="true" />
+                      <strong>{group.label}</strong>
+                      <span>slots {group.range[0] + 1}–{group.range[1] + 1}</span>
+                      {group.active && <em>work here</em>}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
             <p className="practice-lab__help">
               {isQuickPractice
                 ? "The gold block is the parked pivot. Drop onto a block to swap it, or into a glowing gap to shift the row. Only the safe partition move stays, so the next pivot can never become stuck."
@@ -3611,6 +4153,9 @@ export default function Home() {
               {practiceValues.map((value, index) => {
                       const practiceItemId = "value-" + value;
                       const isDragging = practiceDraggingId === practiceItemId;
+                      const practiceGroup = getPracticeGroupAtIndex(practiceGroups, index);
+                      const isGroupStart = practiceGroup?.range[0] === index;
+                      const isGroupEnd = practiceGroup?.range[1] === index;
                       const isQuickWalkthroughComplete = isQuickPractice && practiceFinished;
                       const isQuickPivot = !isQuickWalkthroughComplete && isQuickPractice && value === quickPivot;
                       const isQuickSettled = isQuickWalkthroughComplete || (!isQuickPivot && quickSettledValues.includes(value));
@@ -3626,6 +4171,10 @@ export default function Home() {
                         : isQuickPractice && !isInQuickRange
                             ? ", outside the current partition"
                             : "";
+                      const groupLabel = practiceGroup
+                        ? ", " + practiceGroup.label + (practiceGroup.active ? ", working group" : "") +
+                          (practiceGroup.detail ? ". " + practiceGroup.detail : "")
+                        : "";
                       return (
                         <Fragment key={practiceItemId}>
                           <span
@@ -3641,6 +4190,9 @@ export default function Home() {
                         <button
                           className={
                             "practice-block " +
+                            (practiceGroup ? "practice-block--grouped practice-block--group-" + practiceGroup.tone + " " : "") +
+                            (isGroupStart ? "practice-block--group-start " : "") +
+                            (isGroupEnd ? "practice-block--group-end " : "") +
                             (isQuickPivot ? "practice-block--quick-pivot " : "") +
                             (isQuickSettled ? "practice-block--quick-settled " : "") +
                             (isQuickPractice && !isQuickWalkthroughComplete && isInQuickRange ? "practice-block--quick-active " : "") +
@@ -3663,7 +4215,7 @@ export default function Home() {
                           disabled={practiceUndoPending || practiceSolved}
                           aria-pressed={practiceSelectedIndex === index}
                           aria-grabbed={isDragging}
-                          aria-label={"Value " + value + quickLabel}
+                          aria-label={"Value " + value + groupLabel + quickLabel}
                           style={
                             isDragging
                               ? {
@@ -3818,25 +4370,69 @@ export default function Home() {
           ) : (
             <div id="efficiency-lines-panel" className="growth-panel" role="tabpanel" aria-labelledby="efficiency-lines-tab">
               <div className="growth-panel__header">
-                <div>
+                <div className="growth-panel__intro">
                   <p className="growth-panel__eyebrow">ILLUSTRATIVE MODEL · N=256–1,048,576</p>
                   <p className="growth-panel__copy">
-                    Workload is on the vertical axis and array size is on the horizontal axis. Both use a log scale so the faster curves stay readable beside quadratic ones.
+                    Workload is on the vertical axis and array size is on the horizontal axis. Use the inspector to read exact modeled values, then zoom into nearby lines to separate them.
                   </p>
                 </div>
+
+                <div className="growth-panel__tools">
+                  <label className="growth-focus-control">
+                    <span>Highlight a line</span>
+                    <select
+                      value={growthFocusedAlgorithm}
+                      onChange={(event) => handleGrowthFocusChange(event.target.value as BenchmarkAlgorithm | "all")}
+                    >
+                      <option value="all">All visible lines</option>
+                      {BENCHMARK_ALGORITHMS.map((benchmarkAlgorithm) => (
+                        <option key={benchmarkAlgorithm.key} value={benchmarkAlgorithm.key}>
+                          {benchmarkAlgorithm.label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <div className="growth-zoom-controls" role="group" aria-label="Growth chart zoom controls">
+                    <button
+                      type="button"
+                      onClick={() => setGrowthView((current) => zoomGrowthView(growthGraphDomain, current, GROWTH_GRAPH_ZOOM_STEP))}
+                      aria-label="Zoom in on the growth chart"
+                    >
+                      Zoom in
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setGrowthView((current) => zoomGrowthView(growthGraphDomain, current, 1 / GROWTH_GRAPH_ZOOM_STEP))}
+                      aria-label="Zoom out on the growth chart"
+                    >
+                      Zoom out
+                    </button>
+                    <button type="button" onClick={resetGrowthView} aria-label="Reset growth chart zoom and pan">
+                      Reset view
+                    </button>
+                    <span aria-label={"Current zoom " + Math.round(growthViewport.zoom * 100) + " percent"}>
+                      {Math.round(growthViewport.zoom * 100)}%
+                    </span>
+                  </div>
+                  <p className="growth-panel__gesture" id="growth-chart-help">
+                    Hover or click to inspect a size. Scroll to zoom. Drag to pan. Use arrow keys when the chart is focused.
+                  </p>
+                </div>
+
                 <div className="growth-toggle-list" role="group" aria-label="Algorithms shown in the growth chart">
                   {BENCHMARK_ALGORITHMS.map((benchmarkAlgorithm) => {
                     const isVisible = visibleGrowthAlgorithms[benchmarkAlgorithm.key];
                     return (
                       <button
-                        className={"growth-toggle " + (isVisible ? "growth-toggle--active" : "")}
+                        className={
+                          "growth-toggle " +
+                          (isVisible ? "growth-toggle--active " : "") +
+                          (growthFocusedAlgorithm === benchmarkAlgorithm.key ? "growth-toggle--focused" : "")
+                        }
                         key={benchmarkAlgorithm.key}
                         type="button"
                         aria-pressed={isVisible}
-                        onClick={() => setVisibleGrowthAlgorithms((current) => ({
-                          ...current,
-                          [benchmarkAlgorithm.key]: !current[benchmarkAlgorithm.key],
-                        }))}
+                        onClick={() => handleGrowthAlgorithmVisibilityToggle(benchmarkAlgorithm.key)}
                         style={{ "--growth-line-color": BENCHMARK_COLORS[benchmarkAlgorithm.key] } as CSSProperties}
                       >
                         <i className={"benchmark-legend__swatch benchmark-legend__swatch--" + benchmarkAlgorithm.className} />
@@ -3847,81 +4443,135 @@ export default function Home() {
                 </div>
               </div>
 
-              <div className="growth-chart__scroller">
-                <div
-                  className="growth-chart"
-                  role="img"
-                  aria-label={
-                    visibleGrowthSeries.length
-                      ? "Illustrative workload line chart with logarithmic workload and array-size axes. Showing " + visibleGrowthSeries.map((series) => series.label).join(", ") + "."
-                      : "Illustrative workload line chart. No algorithms are currently selected."
-                  }
-                  style={{ width: String(GROWTH_GRAPH_WIDTH) + "px", height: String(GROWTH_GRAPH_HEIGHT) + "px" }}
-                >
-                  <span className="growth-chart__axis-title growth-chart__axis-title--y">WORKLOAD · LOG SCALE</span>
-                  {growthGraphDomain.ticks.map((tick) => (
-                    <Fragment key={tick.label}>
-                      <i className="growth-chart__gridline" style={{ top: String(tick.y) + "px" }} />
-                      <span className="growth-chart__y-label" style={{ top: String(tick.y) + "px" }}>{tick.label}</span>
-                    </Fragment>
-                  ))}
-                  {visibleGrowthSeries.map((series) => (
-                    <div
-                      className="growth-chart__series"
-                      key={series.key}
-                      aria-hidden="true"
-                      style={{ "--growth-line-color": series.color } as CSSProperties}
-                    >
-                      {series.points.slice(0, -1).map((point, index) => {
-                        const nextPoint = series.points[index + 1];
-                        const deltaX = nextPoint.x - point.x;
-                        const deltaY = nextPoint.y - point.y;
-                        const length = Math.hypot(deltaX, deltaY);
-                        const angle = Math.atan2(deltaY, deltaX) * (180 / Math.PI);
-                        return (
-                          <i
-                            className="growth-chart__segment"
-                            key={point.size}
-                            style={{
-                              left: String(point.x) + "px",
-                              top: String(point.y) + "px",
-                              width: String(length) + "px",
-                              transform: "translateY(-50%) rotate(" + String(angle) + "deg)",
-                            }}
-                          />
-                        );
-                      })}
-                      {series.points.map((point) => (
-                        <i
-                          className="growth-chart__point"
-                          key={point.size}
-                          title={series.label + ": n=" + formatCount(point.size) + ", " + formatCount(point.work) + " modeled work"}
-                          style={{ left: String(point.x) + "px", top: String(point.y) + "px" }}
-                        />
-                      ))}
-                    </div>
-                  ))}
-                  {theoreticalBenchmarkData.map((entry, index) => {
-                    const x = GROWTH_GRAPH_PLOT_LEFT +
-                      (GROWTH_GRAPH_PLOT_WIDTH * index) / Math.max(theoreticalBenchmarkData.length - 1, 1);
-                    return (
-                      <Fragment key={entry.size}>
-                        <i className="growth-chart__x-gridline" style={{ left: String(x) + "px" }} />
-                        <span
-                          className="growth-chart__x-label"
-                          title={"n=" + formatCount(entry.size)}
-                          style={{ left: String(x) + "px" }}
-                        >
-                          {formatGrowthSize(entry.size)}
-                        </span>
+              <div className="growth-analysis">
+                <div className="growth-chart__scroller">
+                  <div
+                    className={"growth-chart " + (isGrowthPanning ? "growth-chart--panning" : "")}
+                    role="region"
+                    tabIndex={0}
+                    aria-describedby="growth-chart-help"
+                    aria-label={
+                      visibleGrowthSeries.length
+                        ? "Interactive illustrative workload line chart with logarithmic workload and array-size axes. Showing " + visibleGrowthSeries.map((series) => series.label).join(", ") + "."
+                        : "Interactive illustrative workload line chart. No algorithms are currently selected."
+                    }
+                    onPointerDown={handleGrowthChartPointerDown}
+                    onPointerMove={handleGrowthChartPointerMove}
+                    onPointerUp={finishGrowthChartPointer}
+                    onPointerCancel={cancelGrowthChartPointer}
+                    onPointerLeave={() => {
+                      if (!growthPanRef.current) setGrowthHoverIndex(null);
+                    }}
+                    onWheel={handleGrowthChartWheel}
+                    onKeyDown={handleGrowthChartKeyDown}
+                    style={{ width: String(GROWTH_GRAPH_WIDTH) + "px", height: String(GROWTH_GRAPH_HEIGHT) + "px" }}
+                  >
+                    <span className="growth-chart__axis-title growth-chart__axis-title--y">WORKLOAD · LOG SCALE</span>
+                    {growthGraphTicks.map((tick, index) => (
+                      <Fragment key={tick.label + index}>
+                        <i className="growth-chart__gridline" style={{ top: String(tick.y) + "px" }} />
+                        <span className="growth-chart__y-label" style={{ top: String(tick.y) + "px" }}>{tick.label}</span>
                       </Fragment>
-                    );
-                  })}
-                  <span className="growth-chart__axis-title growth-chart__axis-title--x">ARRAY SIZE, N · LOG SCALE</span>
-                  {visibleGrowthSeries.length === 0 && (
-                    <p className="growth-chart__empty">Select an algorithm above to draw its workload line.</p>
-                  )}
+                    ))}
+                    {visibleGrowthSeries.map((series) => (
+                      <div
+                        className={
+                          "growth-chart__series " +
+                          (series.isFocused ? "growth-chart__series--focused " : "") +
+                          (growthFocusedAlgorithm !== "all" && !series.isFocused ? "growth-chart__series--dimmed" : "")
+                        }
+                        key={series.key}
+                        aria-hidden="true"
+                        style={{ "--growth-line-color": series.color } as CSSProperties}
+                      >
+                        {series.points.slice(0, -1).map((point, index) => {
+                          const nextPoint = series.points[index + 1];
+                          const deltaX = nextPoint.x - point.x;
+                          const deltaY = nextPoint.y - point.y;
+                          const length = Math.hypot(deltaX, deltaY);
+                          const angle = Math.atan2(deltaY, deltaX) * (180 / Math.PI);
+                          return (
+                            <i
+                              className="growth-chart__segment"
+                              key={point.size}
+                              style={{
+                                left: String(point.x) + "px",
+                                top: String(point.y) + "px",
+                                width: String(length) + "px",
+                                transform: "translateY(-50%) rotate(" + String(angle) + "deg)",
+                              }}
+                            />
+                          );
+                        })}
+                        {series.points.map((point) => (
+                          <i
+                            className="growth-chart__point"
+                            key={point.size}
+                            title={series.label + ": n=" + formatCount(point.size) + ", " + formatCount(point.work) + " modeled work"}
+                            style={{ left: String(point.x) + "px", top: String(point.y) + "px" }}
+                          />
+                        ))}
+                      </div>
+                    ))}
+                    {growthInspection.isVisible && visibleGrowthSeries.length > 0 && (
+                      <>
+                        <i className="growth-chart__crosshair" style={{ left: String(growthInspection.x) + "px" }} />
+                        <span className="growth-chart__crosshair-label" style={{ left: String(growthInspection.x) + "px" }}>
+                          n={formatGrowthSize(growthInspection.size)}
+                        </span>
+                      </>
+                    )}
+                    {theoreticalBenchmarkData.map((entry, index) => {
+                      const normalizedX = index / Math.max(theoreticalBenchmarkData.length - 1, 1);
+                      const x = GROWTH_GRAPH_PLOT_LEFT +
+                        ((normalizedX - growthViewport.xStart) / growthViewport.xSpan) * GROWTH_GRAPH_PLOT_WIDTH;
+                      return (
+                        <Fragment key={entry.size}>
+                          <i className="growth-chart__x-gridline" style={{ left: String(x) + "px" }} />
+                          <span
+                            className="growth-chart__x-label"
+                            title={"n=" + formatCount(entry.size)}
+                            style={{ left: String(x) + "px" }}
+                          >
+                            {formatGrowthSize(entry.size)}
+                          </span>
+                        </Fragment>
+                      );
+                    })}
+                    <span className="growth-chart__axis-title growth-chart__axis-title--x">ARRAY SIZE, N · LOG SCALE</span>
+                    {visibleGrowthSeries.length === 0 && (
+                      <p className="growth-chart__empty">Select an algorithm above to draw its workload line.</p>
+                    )}
+                  </div>
                 </div>
+
+                <aside className="growth-inspector" aria-label={"Modeled workload at n=" + formatCount(growthInspection.size)}>
+                  <p className="growth-inspector__eyebrow">READOUT AT N={formatGrowthSize(growthInspection.size)}</p>
+                  <strong>{formatCount(growthInspection.size)} values</strong>
+                  <p>Exact modeled work makes similar-looking curves easier to compare.</p>
+                  {growthInspection.rows.length ? (
+                    <ol className="growth-inspector__list">
+                      {growthInspection.rows.map((row) => (
+                        <li
+                          key={row.key}
+                          className={growthFocusedAlgorithm === row.key ? "growth-inspector__row--focused" : ""}
+                          style={{ "--growth-line-color": row.color } as CSSProperties}
+                        >
+                          <span>
+                            <i className={"benchmark-legend__swatch benchmark-legend__swatch--" + row.className} />
+                            {row.label}
+                          </span>
+                          <strong>{formatCount(row.work)}</strong>
+                          <small>
+                            {row.multiplier === 1 ? "fastest active line" : formatGrowthMultiplier(row.multiplier) + " the fastest"}
+                          </small>
+                        </li>
+                      ))}
+                    </ol>
+                  ) : (
+                    <p className="growth-inspector__empty">Turn on an algorithm to inspect its modeled work.</p>
+                  )}
+                </aside>
               </div>
             </div>
           )}

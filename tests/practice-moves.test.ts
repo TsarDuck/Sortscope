@@ -3,7 +3,9 @@ import test from "node:test";
 import {
   applyPracticeMove,
   getPracticeTargetScore,
+  isPracticeRowFinished,
   isPracticeMoveProgress,
+  resolvePracticeDropTarget,
 } from "../app/lib/practice";
 
 test("a direct block drop swaps values from either starting block", () => {
@@ -20,6 +22,80 @@ test("a between-block drop inserts and shifts values in both directions", () => 
 test("dropping back into the source gap leaves the row unchanged", () => {
   assert.deepEqual(applyPracticeMove([1, 2, 3, 4], 2, 2, "insert"), [1, 2, 3, 4]);
   assert.deepEqual(applyPracticeMove([1, 2, 3, 4], 2, 2, "swap"), [1, 2, 3, 4]);
+});
+
+test("a fully ordered practice row must still be the lesson's original permutation", () => {
+  const lessonValues = [1, 2, 3, 4, 5, 6];
+
+  assert.equal(isPracticeRowFinished([1, 2, 3, 4, 5, 6], lessonValues), true);
+  assert.equal(isPracticeRowFinished([1, 2, 3, 4, 5, 7], lessonValues), false);
+  assert.equal(isPracticeRowFinished([1, 2, 2, 4, 5, 6], lessonValues), false);
+  assert.equal(isPracticeRowFinished([1, 3, 2, 4, 5, 6], lessonValues), false);
+});
+
+test("the Heap lesson's early finished row passes the global completion guard", () => {
+  // At Heap's fifth scripted step, swapping the root 3 with 1 directly
+  // produces the actual final row rather than that step's intermediate heap.
+  const scriptedStepTarget = [2, 1, 3, 4, 5, 6];
+  const finishedShortcut = applyPracticeMove([3, 2, 1, 4, 5, 6], 0, 2, "swap");
+
+  assert.deepEqual(finishedShortcut, [1, 2, 3, 4, 5, 6]);
+  assert.equal(isPracticeRowFinished(scriptedStepTarget, scriptedStepTarget), false);
+  assert.equal(isPracticeRowFinished(finishedShortcut, scriptedStepTarget), true);
+});
+
+test("one shared drop resolver distinguishes direct swaps from between-block inserts", () => {
+  const blocks = [
+    { index: 0, left: 20, right: 68, top: 20, bottom: 68 },
+    { index: 1, left: 92, right: 140, top: 20, bottom: 68 },
+    { index: 2, left: 164, right: 212, top: 20, bottom: 68 },
+  ];
+  const gaps = [
+    { index: 0, left: 5, right: 12, top: 20, bottom: 68 },
+    { index: 1, left: 77, right: 84, top: 20, bottom: 68 },
+    { index: 2, left: 149, right: 156, top: 20, bottom: 68 },
+    { index: 3, left: 221, right: 228, top: 20, bottom: 68 },
+  ];
+
+  assert.deepEqual(resolvePracticeDropTarget(108, 44, 0, blocks, gaps), {
+    index: 1,
+    mode: "swap",
+  });
+  assert.deepEqual(resolvePracticeDropTarget(80, 44, 0, blocks, gaps), {
+    index: 1,
+    mode: "insert",
+  });
+  assert.deepEqual(resolvePracticeDropTarget(88, 44, 0, blocks, gaps), {
+    index: 1,
+    mode: "swap",
+  });
+});
+
+test("the floating source never becomes its own direct drop target", () => {
+  const blocks = [
+    { index: 0, left: 20, right: 68, top: 20, bottom: 68 },
+    { index: 1, left: 92, right: 140, top: 20, bottom: 68 },
+  ];
+  const gaps = [
+    { index: 0, left: 5, right: 12, top: 20, bottom: 68 },
+    { index: 1, left: 77, right: 84, top: 20, bottom: 68 },
+    { index: 2, left: 149, right: 156, top: 20, bottom: 68 },
+  ];
+
+  assert.equal(resolvePracticeDropTarget(44, 44, 0, blocks, gaps, blocks[0]), null);
+});
+
+test("the shared move mechanics preserve every lesson's 6-to-10 block rows", () => {
+  for (const size of [6, 8, 10]) {
+    const values = Array.from({ length: size }, (_, index) => index + 1);
+    const swapped = applyPracticeMove(values, 0, size - 1, "swap");
+    const inserted = applyPracticeMove(values, 0, size, "insert");
+
+    assert.deepEqual([...swapped].sort((left, right) => left - right), values);
+    assert.deepEqual([...inserted].sort((left, right) => left - right), values);
+    assert.equal(swapped[0], size);
+    assert.equal(inserted[size - 1], 1);
+  }
 });
 
 test("a target-order improvement remains valid when position distance ties", () => {
