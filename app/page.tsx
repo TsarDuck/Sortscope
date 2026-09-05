@@ -1513,7 +1513,7 @@ export default function Home() {
 
       if (soundVolumeRef.current > 0) {
         const context = ensureAudioContext();
-        void context.resume().then(playCompletionSweepSound).catch(() => undefined);
+        void context.resume().then(() => playCompletionSweepSound(currentStep.values)).catch(() => undefined);
       }
 
       completionSweepEndTimerRef.current = window.setTimeout(() => {
@@ -1862,6 +1862,16 @@ export default function Home() {
     octave.stop(startTime + duration + 0.015);
   }
 
+  function getSortingToneFrequency(value: number) {
+    const normalizedValue = Math.min(
+      1,
+      Math.max(0, (value - 1) / Math.max(largestValue - 1, 1)),
+    );
+    const compressedValue = Math.sqrt(normalizedValue);
+    const semitone = Math.round(compressedValue * 19);
+    return 261.63 * 2 ** (semitone / 12);
+  }
+
   function playSortingTone(step: SortStep) {
     const context = audioContextRef.current;
     if (!context || context.state !== "running" || step.values.length === 0) return;
@@ -1876,10 +1886,6 @@ export default function Home() {
       Math.max(0, step.inserting ?? step.comparing ?? step.shifting ?? 0),
     );
     const activeValue = step.values[activeIndex] ?? step.key ?? 1;
-    const normalizedValue = Math.min(
-      1,
-      Math.max(0, (activeValue - 1) / Math.max(largestValue - 1, 1)),
-    );
     const isImpact =
       step.phase === "swap" ||
       step.phase === "shift" ||
@@ -1891,35 +1897,54 @@ export default function Home() {
     const targetDuration = isImpact ? 0.052 : 0.034;
     const basePeakGain = isImpact ? 0.2 : 0.14;
     const peakGain = basePeakGain * (soundVolume / 100) ** 2.5;
-    // C4 is the floor, while the cap at G5 stays comfortably clear on a
-    // 256-bar run.
-    // The gentle curve compresses the crowded high end rather than letting it
-    // climb into piercing territory as values increase.
-    const compressedValue = Math.sqrt(normalizedValue);
-    const semitone = Math.round(compressedValue * 19);
-    const frequency = 261.63 * 2 ** (semitone / 12);
+    const frequency = getSortingToneFrequency(activeValue);
 
     playMusicalVoice(context, now, frequency, targetDuration, peakGain);
   }
 
-  function playCompletionSweepSound() {
+  function playCompletionSweepSound(sweepValues: number[]) {
     const context = audioContextRef.current;
     const volume = soundVolumeRef.current;
     if (!context || context.state !== "running" || volume <= 0) return;
 
-    const now = context.currentTime + 0.015;
-    // Match the live C4–G5 palette so the final confirmation feels like the
-    // resolution of the sort rather than a separate, lower-register cue.
-    const sweepSemitones = [0, 2, 4, 5, 7, 9, 11, 12, 14, 16, 17, 19];
-    const targetDuration = 0.095;
-    const spacing =
-      (COMPLETION_SWEEP_DURATION / 1_000 - targetDuration) /
-      Math.max(sweepSemitones.length - 1, 1);
-    const peakGain = 0.16 * (volume / 100) ** 2.5;
+    const valuesToScan = sweepValues.length ? sweepValues : originalValues;
+    if (valuesToScan.length === 0) return;
 
-    sweepSemitones.forEach((semitone, index) => {
-      const frequency = 261.63 * 2 ** (semitone / 12);
-      playMusicalVoice(context, now + index * spacing, frequency, targetDuration, peakGain);
+    const now = context.currentTime + 0.015;
+    const duration = COMPLETION_SWEEP_DURATION / 1_000;
+    const scanFrequencies = valuesToScan.reduce<number[]>((frequencies, value) => {
+      const frequency = getSortingToneFrequency(value);
+      if (frequencies.at(-1) !== frequency) frequencies.push(frequency);
+      return frequencies;
+    }, []);
+    const spacing = duration / Math.max(scanFrequencies.length - 1, 1);
+    const noteDuration = Math.min(0.115, Math.max(0.028, spacing * 1.35));
+    const peakGain = 0.13 * (volume / 100) ** 2.5;
+    const lastIndex = Math.max(scanFrequencies.length - 1, 1);
+
+    // Scan each pitch that actually appeared in the sort, in order. Repeated
+    // bars mapped to the same pitch are one audible note, so even 256 bars
+    // produce a clear rapid cascade rather than an indistinguishable blur.
+    scanFrequencies.forEach((frequency, index) => {
+      const startTime = now + (index / lastIndex) * (duration - noteDuration);
+      const oscillator = context.createOscillator();
+      const filter = context.createBiquadFilter();
+      const gain = context.createGain();
+
+      oscillator.type = "triangle";
+      oscillator.frequency.setValueAtTime(frequency, startTime);
+      filter.type = "lowpass";
+      filter.frequency.setValueAtTime(2_650, startTime);
+      filter.Q.setValueAtTime(0.5, startTime);
+      gain.gain.setValueAtTime(0.0001, startTime);
+      gain.gain.exponentialRampToValueAtTime(peakGain, startTime + Math.min(0.004, noteDuration * 0.2));
+      gain.gain.exponentialRampToValueAtTime(0.0001, startTime + noteDuration);
+
+      oscillator.connect(filter);
+      filter.connect(gain);
+      gain.connect(context.destination);
+      oscillator.start(startTime);
+      oscillator.stop(startTime + noteDuration + 0.01);
     });
   }
 
