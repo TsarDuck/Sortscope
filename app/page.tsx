@@ -6,6 +6,7 @@ import {
   type PointerEvent as ReactPointerEvent,
   useCallback,
   useEffect,
+  useInsertionEffect,
   useLayoutEffect,
   useMemo,
   useRef,
@@ -43,7 +44,8 @@ import {
   decodePcmWav,
   getContinuousToneFrequency,
   getSafeScheduledAudioTime,
-  PIANO_TONE_MAX_ARRAY_SIZE,
+  isCompletionSweepAudioFinished,
+  usesContinuousDenseTone,
   type DecodedPcmWav,
 } from "./lib/audio";
 import {
@@ -111,6 +113,23 @@ type AudioContextWindow = Window &
   typeof globalThis & {
     webkitAudioContext?: AudioContextConstructor;
   };
+
+type DenseLiveToneVoice = {
+  context: AudioContext;
+  oscillator: OscillatorNode;
+  filter: BiquadFilterNode;
+  envelope: GainNode;
+};
+
+type CompletionSweepAudioRun = {
+  id: number;
+  context: AudioContext;
+  output: GainNode;
+  sources: Set<OscillatorNode>;
+  pendingVoiceCount: number;
+  schedulingComplete: boolean;
+  released: boolean;
+};
 
 type PracticeGroupTone = "cyan" | "violet" | "mint" | "gold";
 
@@ -232,6 +251,12 @@ const DENSE_CANVAS_MAX_PIXEL_RATIO = 1.5;
 // settings, advance several already-recorded algorithm steps per paint rather
 // than asking macOS/Linux/Windows to render a frame for every tiny mutation.
 const DENSE_PLAYBACK_FRAME_INTERVAL = 32;
+// The canvas can advance every visual frame without asking React to reconcile
+// the rest of the teaching page at that same rate. Keep status text, counters,
+// and audible semantic snapshots responsive, but cap them at a modest 12.5 Hz
+// cadence. That remains smooth enough for pitch/status feedback while halving
+// reconciliation pressure on the desktop WebViews that struggled most.
+const DENSE_CANVAS_PARENT_UPDATE_INTERVAL = 80;
 const BOGO_COMPLETION_SWEEP_DELAY = 720;
 // Keep the win message on screen long enough to read, then let its exit
 // animation finish before removing it from the DOM.
@@ -2041,6 +2066,23 @@ function usePrefersReducedMotion() {
   return prefersReducedMotion;
 }
 
+function detectCanvas2DSupport() {
+  if (typeof document === "undefined") return false;
+  try {
+    return document.createElement("canvas").getContext("2d") !== null;
+  } catch {
+    return false;
+  }
+}
+
+function useCanvas2DSupported() {
+  // Keep the DOM renderer as a safe fallback for any unusual embedded host
+  // that exposes a canvas element without a 2D context. A lazy initial value
+  // avoids an extra render solely to probe browser capability.
+  const [isSupported] = useState(detectCanvas2DSupport);
+  return isSupported;
+}
+
 function getBarClass(
   index: number,
   step: SortStep,
@@ -2283,6 +2325,18 @@ type DenseBarCanvasFrame = {
   prefersReducedMotion: boolean;
 };
 
+type DenseBarCanvasPlayback = {
+  steps: SortStep[];
+  initialStepIndex: number;
+  isRunning: boolean;
+  stepDelay: number;
+  stepStride: number;
+  onCheckpoint: (stepIndex: number, isComplete: boolean) => void;
+  onContextUnavailable: () => void;
+};
+
+type DenseBarCanvasProps = DenseBarCanvasFrame & DenseBarCanvasPlayback;
+
 type DenseCanvasSurface = {
   width: number;
   height: number;
@@ -2325,7 +2379,14 @@ const DenseBarCanvas = memo(function DenseBarCanvas({
   completionSweepActive,
   completionSweepStepDuration,
   prefersReducedMotion,
-}: DenseBarCanvasFrame) {
+  steps,
+  initialStepIndex,
+  isRunning,
+  stepDelay,
+  stepStride,
+  onCheckpoint,
+  onContextUnavailable,
+}: DenseBarCanvasProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const contextRef = useRef<CanvasRenderingContext2D | null>(null);
   const surfaceRef = useRef<DenseCanvasSurface>({ width: 0, height: 0, pixelRatio: 1 });
@@ -2341,6 +2402,22 @@ const DenseBarCanvas = memo(function DenseBarCanvas({
   });
   const drawRef = useRef<(now?: number) => void>(() => undefined);
   const completionStartedAtRef = useRef<number | null>(null);
+  const playbackTraceRef = useRef<SortStep[] | null>(null);
+  const contextUnavailableReportedRef = useRef(false);
+  const latestStepsRef = useRef(steps);
+  const playbackStepIndexRef = useRef(initialStepIndex);
+  const playbackConfigRef = useRef({
+    initialStepIndex,
+    stepDelay,
+    stepStride,
+    onCheckpoint,
+  });
+  // Insertion effects run before layout-effect teardown. That lets the old
+  // local runner recognize a new trace before its cleanup can flush a stale
+  // index into a freshly reset run.
+  useInsertionEffect(() => {
+    latestStepsRef.current = steps;
+  }, [steps]);
 
   const draw = useCallback((now = performance.now()) => {
     const canvas = canvasRef.current;
@@ -2408,6 +2485,47 @@ const DenseBarCanvas = memo(function DenseBarCanvas({
   }, [draw]);
 
   useLayoutEffect(() => {
+    playbackConfigRef.current = {
+      initialStepIndex,
+      stepDelay,
+      stepStride,
+      onCheckpoint,
+    };
+  }, [initialStepIndex, onCheckpoint, stepDelay, stepStride]);
+
+  const drawPlaybackStep = useCallback((nextStep: SortStep) => {
+    const settled = nextStep.settled ?? [];
+    const visuallySettled = nextStep.visualSettled ?? [];
+    frameRef.current = {
+      items: getRenderedBarItems(nextStep),
+      largestValue,
+      step: nextStep,
+      algorithm,
+      settledIndices:
+        settled.length === 0 && visuallySettled.length === 0
+          ? null
+          : new Set([...settled, ...visuallySettled]),
+      // A live dense run cannot be in its completion sweep yet. Preserve the
+      // current props nevertheless so the ordinary React sync owns the final
+      // red scan once the terminal checkpoint commits.
+      completionSweepActive: frameRef.current.completionSweepActive,
+      completionSweepStepDuration: frameRef.current.completionSweepStepDuration,
+      prefersReducedMotion: frameRef.current.prefersReducedMotion,
+    };
+    drawRef.current();
+  }, [algorithm, largestValue]);
+
+  useLayoutEffect(() => {
+    const localPlaybackStep = steps[playbackStepIndexRef.current];
+    // Pausing changes the parent state before its checkpoint callback has
+    // committed. Keep the last canvas frame in place during that tiny handoff
+    // instead of drawing the previous semantic snapshot for one frame.
+    const isAwaitingPlaybackFlush =
+      !isRunning &&
+      playbackTraceRef.current === steps &&
+      localPlaybackStep !== undefined &&
+      step !== localPlaybackStep;
+    if ((isRunning && steps.length > 0) || isAwaitingPlaybackFlush) return;
     frameRef.current = {
       items,
       largestValue,
@@ -2429,12 +2547,98 @@ const DenseBarCanvas = memo(function DenseBarCanvas({
     prefersReducedMotion,
     settledIndices,
     step,
+    isRunning,
+    steps,
+  ]);
+
+  useLayoutEffect(() => {
+    if (!isRunning || steps.length === 0) return;
+
+    const finalStepIndex = steps.length - 1;
+    if (playbackTraceRef.current !== steps) {
+      playbackTraceRef.current = steps;
+      const { initialStepIndex: nextInitialStepIndex } = playbackConfigRef.current;
+      playbackStepIndexRef.current = Math.min(
+        finalStepIndex,
+        Math.max(0, nextInitialStepIndex),
+      );
+    }
+
+    let animationFrame = 0;
+    let lastAdvanceAt = performance.now();
+    let lastCheckpointAt = lastAdvanceAt;
+    const currentStepIndex = () => playbackStepIndexRef.current;
+
+    drawPlaybackStep(steps[currentStepIndex()]!);
+
+    const advance = (now: number) => {
+      const {
+        stepDelay: latestStepDelay,
+        stepStride: latestStepStride,
+        onCheckpoint: latestCheckpoint,
+      } = playbackConfigRef.current;
+      const elapsed = now - lastAdvanceAt;
+      const advances = Math.floor(elapsed / Math.max(latestStepDelay, 1));
+      if (advances > 0) {
+        const nextStepIndex = Math.min(
+          finalStepIndex,
+          currentStepIndex() + advances * Math.max(1, latestStepStride),
+        );
+        playbackStepIndexRef.current = nextStepIndex;
+        lastAdvanceAt += advances * Math.max(latestStepDelay, 1);
+        drawPlaybackStep(steps[nextStepIndex]!);
+
+        if (nextStepIndex === finalStepIndex) {
+          latestCheckpoint(nextStepIndex, true);
+          return;
+        }
+      }
+
+      if (now - lastCheckpointAt >= DENSE_CANVAS_PARENT_UPDATE_INTERVAL) {
+        lastCheckpointAt = now;
+        latestCheckpoint(currentStepIndex(), false);
+      }
+      animationFrame = window.requestAnimationFrame(advance);
+    };
+
+    animationFrame = window.requestAnimationFrame(advance);
+    return () => {
+      window.cancelAnimationFrame(animationFrame);
+      // A pause or a switch back to the DOM renderer must resume at the
+      // exact canvas frame just painted, not the last 50 ms React checkpoint.
+      // On reset/new traces the render-time trace ref already points to the
+      // new list, so stale cleanup cannot overwrite the fresh index zero
+      // state before the next paint.
+      if (latestStepsRef.current === steps) {
+        playbackConfigRef.current.onCheckpoint(playbackStepIndexRef.current, false);
+      }
+    };
+  }, [
+    drawPlaybackStep,
+    isRunning,
+    steps,
   ]);
 
   useLayoutEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-    contextRef.current = canvas.getContext("2d");
+    let context: CanvasRenderingContext2D | null = null;
+    try {
+      context = canvas.getContext("2d");
+    } catch {
+      // Some embedded WebViews expose a canvas element but reject 2D context
+      // acquisition after the initial feature probe. Let the parent choose
+      // the established DOM renderer rather than leaving an empty chart.
+    }
+    if (!context) {
+      contextRef.current = null;
+      if (!contextUnavailableReportedRef.current) {
+        contextUnavailableReportedRef.current = true;
+        onContextUnavailable();
+      }
+      return;
+    }
+    contextRef.current = context;
 
     const resizeSurface = () => {
       const bounds = canvas.getBoundingClientRect();
@@ -2465,7 +2669,7 @@ const DenseBarCanvas = memo(function DenseBarCanvas({
       observer.disconnect();
       contextRef.current = null;
     };
-  }, []);
+  }, [onContextUnavailable]);
 
   useEffect(() => {
     if (!completionSweepActive || prefersReducedMotion) {
@@ -2551,6 +2755,11 @@ export default function Home() {
   const [steps, setSteps] = useState<SortStep[]>([]);
   const [stepIndex, setStepIndex] = useState(0);
   const [runState, setRunState] = useState<RunState>("ready");
+  // Feature detection succeeds in a few desktop WebViews that still decline
+  // a real 2D context at mount. Treat that as a session-level capability miss
+  // and stay on the proven DOM renderer rather than repeatedly mounting a
+  // blank canvas.
+  const [canvasRendererUnavailable, setCanvasRendererUnavailable] = useState(false);
   const [bogoLiveStep, setBogoLiveStep] = useState<SortStep | null>(null);
   const [bogoMeasuredShuffleRate, setBogoMeasuredShuffleRate] = useState<number | null>(null);
   const [bogoFrozenExpectedShuffleRate, setBogoFrozenExpectedShuffleRate] = useState<number | null>(null);
@@ -2607,10 +2816,10 @@ export default function Home() {
   const completionSweepStartTimerRef = useRef<number | null>(null);
   const completionSweepEndTimerRef = useRef<number | null>(null);
   const completionSweepRunRef = useRef(0);
-  const completionSweepSourcesRef = useRef(new Set<OscillatorNode>());
-  const completionSweepOutputRef = useRef<GainNode | null>(null);
+  const completionSweepAudioRunRef = useRef<CompletionSweepAudioRun | null>(null);
   const liveToneSourcesRef = useRef(new Set<OscillatorNode>());
   const liveToneOutputRef = useRef<GainNode | null>(null);
+  const denseLiveToneVoiceRef = useRef<DenseLiveToneVoice | null>(null);
   const motionBarElementsRef = useRef(new Map<string, HTMLDivElement>());
   const motionBarPositionsRef = useRef(new Map<string, number>());
   const motionBarTokensRef = useRef<string[]>([]);
@@ -2703,6 +2912,7 @@ export default function Home() {
   speedRef.current = speed;
   soundVolumeRef.current = soundVolume;
   const prefersReducedMotion = usePrefersReducedMotion();
+  const supportsCanvas2D = useCanvas2DSupported();
   const isBogo = algorithm === "bogo";
   const playbackSpeed = isBogo ? speed : getPlaybackSpeed(speed);
   const smallArrayPianoToneMap = useMemo(
@@ -3299,6 +3509,8 @@ export default function Home() {
   // to 63 values; switch only the 64–256 high-speed path to one canvas.
   const useCanvasBarRenderer =
     !isBogo &&
+    supportsCanvas2D &&
+    !canvasRendererUnavailable &&
     originalValues.length >= CANVAS_BAR_RENDERER_MIN_ARRAY_SIZE &&
     !shouldInterpolateMoves;
   const denseBarTransitionStyle = shouldInterpolateDenseBars
@@ -3359,6 +3571,21 @@ export default function Home() {
             currentStep.pass +
             (isBogo && bogoRunsUntilSolved ? " with no shuffle cap." : " of " + totalStages + ".")
           : "Ready to demonstrate " + algorithmLabel + ".";
+
+  // The dense canvas owns high-speed visual ticks. React receives a compact
+  // semantic checkpoint for the visible counters, narration, and sound rather
+  // than reconciling the whole page for every painted canvas frame.
+  const handleDenseCanvasPlaybackCheckpoint = useCallback(
+    (nextStepIndex: number, isComplete: boolean) => {
+      setStepIndex((current) => (current === nextStepIndex ? current : nextStepIndex));
+      if (isComplete) setRunState("complete");
+    },
+    [],
+  );
+
+  const handleDenseCanvasContextUnavailable = useCallback(() => {
+    setCanvasRendererUnavailable(true);
+  }, []);
 
   function resetBogoElapsedTimer() {
     const stopwatch = bogoElapsedTimerRef.current;
@@ -3435,8 +3662,21 @@ export default function Home() {
   ) {
     if (!output) return;
 
-    const context = audioContextRef.current;
-    const now = context?.currentTime ?? 0;
+    // The output itself owns the authoritative context. A replacement
+    // AudioContext must never schedule automation using a timestamp from an
+    // older graph, or a newly created context could leave a stale output bus
+    // attached and silently cap later live voices.
+    const context = output.context;
+    if (context.state !== "running") {
+      try {
+        output.disconnect();
+      } catch {
+        // A closed graph is already silent and safe to forget.
+      }
+      return;
+    }
+
+    const now = context.currentTime;
     try {
       // Never sever an audible oscillator graph at an arbitrary waveform
       // point. That hard discontinuity is the characteristic click that was
@@ -3462,36 +3702,54 @@ export default function Home() {
     sources: Set<OscillatorNode>,
     releaseSeconds: number,
   ) {
-    const context = audioContextRef.current;
-    const stopAt = context
-      ? context.currentTime + releaseSeconds + AUDIO_SOURCE_STOP_PADDING_SECONDS
-      : undefined;
-
     // Keep the source's ended listener attached: it owns the complete graph
     // teardown. Clearing only the tracking set is safe because every voice
     // removes itself idempotently when Web Audio reaches its stop time.
     [...sources].forEach((source) => {
+      sources.delete(source);
       try {
-        if (stopAt === undefined) source.stop();
-        else source.stop(stopAt);
+        if (source.context.state !== "running") {
+          // A suspended/closed audio clock cannot honour a future fade. Stop
+          // at its current quantum so a later resume cannot revive this run.
+          source.stop();
+          source.disconnect();
+          return;
+        }
+        source.stop(
+          source.context.currentTime +
+            releaseSeconds +
+            AUDIO_SOURCE_STOP_PADDING_SECONDS,
+        );
       } catch {
-        // An oscillator that has already ended cannot contribute more work.
+        // An oscillator that has already ended or belongs to a closed context
+        // cannot contribute more work. Detach its root node defensively.
+        try {
+          source.disconnect();
+        } catch {
+          // The source may already be detached by its ended callback.
+        }
       }
     });
-    sources.clear();
   }
 
   function stopCompletionSweepSound() {
-    const output = completionSweepOutputRef.current;
-    completionSweepOutputRef.current = null;
-    releaseAudioOutput(output, COMPLETION_SWEEP_OUTPUT_RELEASE_SECONDS);
+    const run = completionSweepAudioRunRef.current;
+    completionSweepAudioRunRef.current = null;
+    if (!run) return;
+
+    // Reset/mute/new-run paths deliberately interrupt a completion cue. The
+    // normal completion path below waits for all source `ended` events, but a
+    // direct person action must be allowed to stop it right away.
+    run.released = true;
+    releaseAudioOutput(run.output, COMPLETION_SWEEP_OUTPUT_RELEASE_SECONDS);
     stopTrackedToneSources(
-      completionSweepSourcesRef.current,
+      run.sources,
       COMPLETION_SWEEP_OUTPUT_RELEASE_SECONDS,
     );
   }
 
   function stopLiveSortingToneSound() {
+    stopDenseLiveToneVoice(LIVE_TONE_OUTPUT_RELEASE_SECONDS);
     const output = liveToneOutputRef.current;
     liveToneOutputRef.current = null;
     releaseAudioOutput(output, LIVE_TONE_OUTPUT_RELEASE_SECONDS);
@@ -3500,13 +3758,168 @@ export default function Home() {
 
   function getLiveToneOutput(context: AudioContext) {
     const existing = liveToneOutputRef.current;
-    if (existing) return existing;
+    if (existing?.context === context) return existing;
+    if (existing) {
+      try {
+        existing.disconnect();
+      } catch {
+        // The retired context may already have torn down this output.
+      }
+      liveToneOutputRef.current = null;
+    }
 
     const output = context.createGain();
     output.gain.setValueAtTime(1, context.currentTime);
     output.connect(context.destination);
     liveToneOutputRef.current = output;
     return output;
+  }
+
+  function disconnectDenseLiveToneVoice(voice: DenseLiveToneVoice) {
+    try {
+      voice.oscillator.disconnect();
+      voice.filter.disconnect();
+      voice.envelope.disconnect();
+    } catch {
+      // The source may have already been released by its own ended callback.
+    }
+  }
+
+  function stopDenseLiveToneVoice(releaseSeconds: number) {
+    const voice = denseLiveToneVoiceRef.current;
+    if (!voice) return;
+    denseLiveToneVoiceRef.current = null;
+
+    if (voice.context.state !== "running") {
+      try {
+        voice.oscillator.stop();
+      } catch {
+        // A closed source cannot be stopped again.
+      }
+      disconnectDenseLiveToneVoice(voice);
+      return;
+    }
+
+    const now = voice.context.currentTime;
+    try {
+      voice.envelope.gain.cancelScheduledValues(now);
+      voice.envelope.gain.setValueAtTime(
+        Math.max(0.0001, voice.envelope.gain.value),
+        now,
+      );
+      voice.envelope.gain.exponentialRampToValueAtTime(0.0001, now + releaseSeconds);
+      voice.oscillator.stop(now + releaseSeconds + AUDIO_SOURCE_STOP_PADDING_SECONDS);
+    } catch {
+      // A closed native context cannot honour a release envelope. It is safe
+      // to detach the graph immediately because it can no longer be audible.
+      disconnectDenseLiveToneVoice(voice);
+    }
+  }
+
+  function playContinuousDenseTone(
+    context: AudioContext,
+    startTime: number,
+    frequency: number,
+    peakGain: number,
+  ) {
+    let voice = denseLiveToneVoiceRef.current;
+    if (voice && voice.context !== context) {
+      // Rebuilding a closed/interrupted context must never leave the prior
+      // native graph attached to the new output device.
+      disconnectDenseLiveToneVoice(voice);
+      denseLiveToneVoiceRef.current = null;
+      voice = null;
+    }
+
+    if (voice) {
+      try {
+        // AudioParam automation is phase-continuous. Updating this one voice
+        // at every dense semantic checkpoint avoids the source-per-frame
+        // allocation and start/stop gaps that made large-array audio vanish.
+        voice.oscillator.frequency.cancelScheduledValues(startTime);
+        voice.oscillator.frequency.setTargetAtTime(frequency, startTime, 0.008);
+        voice.envelope.gain.cancelScheduledValues(startTime);
+        voice.envelope.gain.setTargetAtTime(peakGain, startTime, 0.01);
+      } catch {
+        // A context that is in the middle of closing is handled by the next
+        // user gesture, which creates a fresh voice through ensureAudioContext.
+      }
+      return;
+    }
+
+    const oscillator = context.createOscillator();
+    const filter = context.createBiquadFilter();
+    const envelope = context.createGain();
+    const output = getLiveToneOutput(context);
+    const createdVoice: DenseLiveToneVoice = {
+      context,
+      oscillator,
+      filter,
+      envelope,
+    };
+
+    oscillator.type = "triangle";
+    oscillator.frequency.setValueAtTime(frequency, startTime);
+    filter.type = "lowpass";
+    filter.frequency.setValueAtTime(2_000, startTime);
+    filter.Q.setValueAtTime(0.35, startTime);
+    envelope.gain.setValueAtTime(0.0001, startTime);
+    envelope.gain.exponentialRampToValueAtTime(peakGain, startTime + 0.012);
+    oscillator.connect(filter);
+    filter.connect(envelope);
+    envelope.connect(output);
+    denseLiveToneVoiceRef.current = createdVoice;
+    oscillator.addEventListener("ended", () => {
+      if (denseLiveToneVoiceRef.current === createdVoice) {
+        denseLiveToneVoiceRef.current = null;
+      }
+      disconnectDenseLiveToneVoice(createdVoice);
+    }, { once: true });
+    oscillator.start(startTime);
+  }
+
+  function tryReleaseCompletedCompletionSweepAudioRun(run: CompletionSweepAudioRun) {
+    if (
+      run.released ||
+      !isCompletionSweepAudioFinished(
+        run.schedulingComplete,
+        run.pendingVoiceCount,
+      )
+    ) {
+      return;
+    }
+
+    run.released = true;
+    if (completionSweepAudioRunRef.current === run) {
+      completionSweepAudioRunRef.current = null;
+    }
+
+    // All oscillator envelopes have already reached silence before their
+    // `ended` events fire, so this direct disconnect cannot create a click.
+    // Most importantly, it is driven by the AudioContext timeline rather than
+    // a wall-clock timer that may run while that timeline is interrupted.
+    try {
+      run.output.disconnect();
+    } catch {
+      // The output may have been detached by an explicit reset in the same
+      // event turn.
+    }
+  }
+
+  function registerCompletionSweepVoice(run: CompletionSweepAudioRun) {
+    run.pendingVoiceCount += 1;
+    let ended = false;
+    return () => {
+      if (ended) return;
+      ended = true;
+      run.pendingVoiceCount = Math.max(0, run.pendingVoiceCount - 1);
+      tryReleaseCompletedCompletionSweepAudioRun(run);
+    };
+  }
+
+  function markCompletionSweepAudioSchedulingComplete(run: CompletionSweepAudioRun) {
+    run.schedulingComplete = true;
+    tryReleaseCompletedCompletionSweepAudioRun(run);
   }
 
   function startCompletionSweep(sweepValues: number[], duration: number) {
@@ -3526,13 +3939,37 @@ export default function Home() {
     completionSweepEndTimerRef.current = window.setTimeout(() => {
       completionSweepEndTimerRef.current = null;
       if (completionSweepRunRef.current !== sweepRun) return;
-      // A late WebKit `resume()` resolution must not be allowed to start a
-      // fresh native-audio graph after the visual sweep has already ended.
-      // Retiring this generation makes that completion callback harmless.
-      completionSweepRunRef.current += 1;
-      stopCompletionSweepSound();
+      // Visual completion is independent from the native audio lifetime.
+      // `resume()` can resolve late under load, so stopping audio here used to
+      // cut a just-started completion cue down to a click or silence.
       setCompletionSweepActive(false);
     }, duration + COMPLETION_SWEEP_AUDIO_VISUAL_LEAD + COMPLETION_SWEEP_RELEASE_TAIL);
+  }
+
+  function retireClosedAudioContext(closedContext: AudioContext) {
+    if (audioContextRef.current !== closedContext) return;
+
+    // A closed context cannot deliver source-ended events or a release
+    // envelope. Invalidate every graph tied to it before building another
+    // context so the fresh one never inherits stale output buses, source
+    // caps, a pending completion run, or a casino player from the dead graph.
+    if (completionSweepStartTimerRef.current !== null) {
+      window.clearTimeout(completionSweepStartTimerRef.current);
+      completionSweepStartTimerRef.current = null;
+    }
+    if (completionSweepEndTimerRef.current !== null) {
+      window.clearTimeout(completionSweepEndTimerRef.current);
+      completionSweepEndTimerRef.current = null;
+    }
+    completionSweepRunRef.current += 1;
+    completionSweepStartedRef.current = false;
+    stopCompletionSweepSound();
+    stopLiveSortingToneSound();
+    clearBogoPracticeInteraction();
+    lastToneTimeRef.current = 0;
+    lastBogoTextureTimeRef.current = 0;
+    audioContextRef.current = null;
+    setCompletionSweepActive(false);
   }
 
   function ensureAudioContext() {
@@ -3541,7 +3978,11 @@ export default function Home() {
     // A WebKit context can become `interrupted` when macOS changes audio
     // routes, and a closed context can no longer be resumed. Recreate only
     // the latter; every non-running live state gets a fresh resume request.
-    if (!context || context.state === "closed") {
+    if (context?.state === "closed") {
+      retireClosedAudioContext(context);
+      context = null;
+    }
+    if (!context) {
       const audioWindow = window as AudioContextWindow;
       const AudioContextClass = audioWindow.AudioContext ?? audioWindow.webkitAudioContext;
       if (!AudioContextClass) {
@@ -3599,6 +4040,7 @@ export default function Home() {
     peakGain: number,
     trackedSources?: Set<OscillatorNode>,
     output: AudioNode = context.destination,
+    onVoiceEnded?: () => void,
   ) {
     // Keep even the shortest voice long enough to read as a note, with an
     // octave reinforcement that stays clear on laptop speakers.
@@ -3665,6 +4107,7 @@ export default function Home() {
         // Disconnect is idempotent in practice, but a closed context can
         // reject it while the host is shutting down.
       }
+      onVoiceEnded?.();
     };
     const onOscillatorEnded = (oscillator: OscillatorNode) => {
       trackedSources?.delete(oscillator);
@@ -3691,21 +4134,37 @@ export default function Home() {
 
   function playSortingTone(step: SortStep) {
     const context = audioContextRef.current;
-    if (!context || context.state !== "running" || step.values.length === 0) return;
+    if (!context || step.values.length === 0) return;
+    if (context.state === "closed") {
+      // A long-running visualizer can outlive an OS audio-route reset. Start
+      // recovery on this checkpoint; the next one will use the fresh graph.
+      ensureAudioContext();
+      return;
+    }
+    if (context.state !== "running") {
+      // macOS can transiently report an interrupted context while the WebView
+      // is under load. A single early return used to turn that brief state
+      // into an entire silent run because nothing retried the resume.
+      void context.resume().catch(() => undefined);
+      return;
+    }
 
     const volume = soundVolumeRef.current;
     if (volume <= 0) return;
 
+    const isDenseTone = usesContinuousDenseTone(originalValues.length);
     const now = context.currentTime;
-    const cooldown = isLargeArray ? 0.045 : 0.028;
-    if (now - lastToneTimeRef.current < cooldown) return;
-    lastToneTimeRef.current = now;
+    if (!isDenseTone) {
+      const cooldown = 0.028;
+      if (now - lastToneTimeRef.current < cooldown) return;
+      lastToneTimeRef.current = now;
+    }
 
-    const activeIndex = Math.min(
-      step.values.length - 1,
-      Math.max(0, step.inserting ?? step.comparing ?? step.shifting ?? 0),
-    );
-    const activeValue = step.values[activeIndex] ?? step.key ?? 1;
+    const activeIndex = step.inserting ?? step.comparing ?? step.shifting;
+    const activeValue =
+      activeIndex === null || activeIndex === undefined
+        ? step.key ?? step.values[0] ?? 1
+        : step.values[Math.min(step.values.length - 1, Math.max(0, activeIndex))] ?? step.key ?? 1;
     const isImpact =
       step.phase === "swap" ||
       step.phase === "shift" ||
@@ -3715,7 +4174,6 @@ export default function Home() {
     const basePeakGain = isImpact ? 0.2 : 0.14;
     const peakGain = basePeakGain * (volume / 100) ** 2.5;
     const frequency = getSortingToneFrequency(activeValue);
-    const isDenseTone = originalValues.length > PIANO_TONE_MAX_ARRAY_SIZE;
     // Preserve the immediate, musical response for the 4–25 note piano
     // mapping. Dense continuous-tone rows receive a tiny scheduling lead so
     // a lagged render cannot start an oscillator before its attack is ready.
@@ -3726,24 +4184,21 @@ export default function Home() {
           DENSE_TONE_SCHEDULE_LEAD_SECONDS,
         )
       : now;
-    const output = getLiveToneOutput(context);
 
     if (isDenseTone) {
-      // Large rows use a one-oscillator continuous-Hz voice. The old piano
-      // graph (two oscillators, two filters, and three gains per beep) is
-      // lovely at 4–25 values but needlessly expensive at 256 values.
-      if (liveToneSourcesRef.current.size + 1 > MAX_LIVE_TONE_SOURCES) return;
-      playCompactTone(
+      // Dense rows use one continuously tuned source rather than a new short
+      // oscillator for every render checkpoint. That keeps the pitch moving
+      // at max speed even when WebKit coalesces visual frames.
+      playContinuousDenseTone(
         context,
         startTime,
         frequency,
-        targetDuration,
-        peakGain,
-        liveToneSourcesRef.current,
-        output,
+        Math.min(0.25, peakGain * 1.25),
       );
       return;
     }
+
+    const output = getLiveToneOutput(context);
 
     // Two oscillators make up each small, musical piano voice. A hard cap
     // keeps a delayed Web Audio backend from accumulating work faster than it
@@ -3760,41 +4215,6 @@ export default function Home() {
     );
   }
 
-  function playCompactTone(
-    context: AudioContext,
-    startTime: number,
-    frequency: number,
-    targetDuration: number,
-    peakGain: number,
-    trackedSources: Set<OscillatorNode>,
-    output: AudioNode = context.destination,
-  ) {
-    const duration = Math.min(0.06, Math.max(0.007, targetDuration));
-    const attack = Math.min(0.003, duration * 0.28);
-    const oscillator = context.createOscillator();
-    const envelope = context.createGain();
-
-    oscillator.type = "triangle";
-    oscillator.frequency.setValueAtTime(frequency, startTime);
-    envelope.gain.setValueAtTime(0.0001, startTime);
-    envelope.gain.exponentialRampToValueAtTime(peakGain, startTime + attack);
-    envelope.gain.exponentialRampToValueAtTime(0.0001, startTime + duration);
-    oscillator.connect(envelope);
-    envelope.connect(output);
-    trackedSources.add(oscillator);
-    oscillator.addEventListener("ended", () => {
-      trackedSources.delete(oscillator);
-      try {
-        oscillator.disconnect();
-        envelope.disconnect();
-      } catch {
-        // A reset can release this short voice before it ends.
-      }
-    }, { once: true });
-    oscillator.start(startTime);
-    oscillator.stop(startTime + duration + 0.008);
-  }
-
   function playDenseCompletionSweep(
     context: AudioContext,
     valuesToScan: readonly number[],
@@ -3802,6 +4222,8 @@ export default function Home() {
     duration: number,
     peakGain: number,
     output: AudioNode,
+    run: CompletionSweepAudioRun,
+    onVoiceEnded: () => void,
   ) {
     // A 256-value finish used to allocate 256 oscillators and 256 envelopes
     // over roughly one second. On a lagged WebKit renderer that created a
@@ -3840,9 +4262,9 @@ export default function Home() {
     oscillator.connect(filter);
     filter.connect(envelope);
     envelope.connect(output);
-    completionSweepSourcesRef.current.add(oscillator);
+    run.sources.add(oscillator);
     oscillator.addEventListener("ended", () => {
-      completionSweepSourcesRef.current.delete(oscillator);
+      run.sources.delete(oscillator);
       try {
         oscillator.disconnect();
         filter.disconnect();
@@ -3850,6 +4272,7 @@ export default function Home() {
       } catch {
         // The shared output can be released before its voice ends.
       }
+      onVoiceEnded();
     }, { once: true });
     oscillator.start(startTime);
     oscillator.stop(endTime + release + AUDIO_SOURCE_STOP_PADDING_SECONDS);
@@ -3874,22 +4297,41 @@ export default function Home() {
 
     const startTime = context.currentTime + COMPLETION_SWEEP_AUDIO_VISUAL_LEAD / 1_000;
     const liveImpactPeak = 0.2 * (volume / 100) ** 2.5;
-    const useCompactVoice = valuesToScan.length > PIANO_TONE_MAX_ARRAY_SIZE;
+    const useCompactVoice = usesContinuousDenseTone(valuesToScan.length);
     // Give a sweep its own output bus. It lets the end/reset path release a
     // current tone smoothly rather than stopping a waveform at a hard edge.
     const output = context.createGain();
     output.gain.setValueAtTime(1, context.currentTime);
     output.connect(context.destination);
-    completionSweepOutputRef.current = output;
+    const run: CompletionSweepAudioRun = {
+      id: sweepRun,
+      context,
+      output,
+      sources: new Set<OscillatorNode>(),
+      pendingVoiceCount: 0,
+      schedulingComplete: false,
+      released: false,
+    };
+    completionSweepAudioRunRef.current = run;
     if (useCompactVoice) {
-      playDenseCompletionSweep(
-        context,
-        valuesToScan,
-        startTime,
-        duration,
-        0.16 * (volume / 100) ** 2.5,
-        output,
-      );
+      const onVoiceEnded = registerCompletionSweepVoice(run);
+      try {
+        playDenseCompletionSweep(
+          context,
+          valuesToScan,
+          startTime,
+          duration,
+          0.16 * (volume / 100) ** 2.5,
+          output,
+          run,
+          onVoiceEnded,
+        );
+      } catch {
+        // A route can disappear after `resume()` resolves. Mark the failed
+        // voice as complete so this run cannot retain an orphaned output bus.
+        onVoiceEnded();
+      }
+      markCompletionSweepAudioSchedulingComplete(run);
       return;
     }
 
@@ -3903,22 +4345,34 @@ export default function Home() {
         Math.max(requestedDuration, 4.5 / Math.max(frequency, 1)),
       );
       const overlap = Math.max(1, actualVoiceDuration / spacing);
-      playMusicalVoice(
-        context,
-        noteTime,
-        frequency,
-        requestedDuration,
-        liveImpactPeak / Math.sqrt(overlap),
-        completionSweepSourcesRef.current,
-        output,
-      );
+      const onVoiceEnded = registerCompletionSweepVoice(run);
+      try {
+        playMusicalVoice(
+          context,
+          noteTime,
+          frequency,
+          requestedDuration,
+          liveImpactPeak / Math.sqrt(overlap),
+          run.sources,
+          output,
+          onVoiceEnded,
+        );
+      } catch {
+        onVoiceEnded();
+      }
     });
+    markCompletionSweepAudioSchedulingComplete(run);
   }
 
   function playBogoShuffleTexture(attempt: number) {
     const context = audioContextRef.current;
     const volume = soundVolumeRef.current;
-    if (!context || context.state !== "running" || volume <= 0) return;
+    if (!context || volume <= 0) return;
+    if (context.state === "closed") {
+      ensureAudioContext();
+      return;
+    }
+    if (context.state !== "running") return;
 
     const now = context.currentTime;
     if (now - lastBogoTextureTimeRef.current < 0.13) return;
@@ -4042,18 +4496,33 @@ export default function Home() {
   }, [soundVolume]);
 
   useEffect(() => {
+    const usesDenseTone = usesContinuousDenseTone(originalValues.length);
+    const hasAudibleDenseCheckpoint =
+      currentStep.phase !== "ready" &&
+      currentStep.phase !== "complete" &&
+      currentStep.phase !== "limited";
     if (
       isBogo ||
       !soundEnabled ||
       runState !== "running" ||
-      stepIndex === 0 ||
-      !AUDIBLE_PHASES.includes(currentStep.phase)
+      (!usesDenseTone && stepIndex === 0) ||
+      (usesDenseTone
+        ? !hasAudibleDenseCheckpoint
+        : !AUDIBLE_PHASES.includes(currentStep.phase))
     ) {
       return;
     }
 
     playSortingTone(currentStep);
-  }, [currentStep, isBogo, runState, soundEnabled, stepIndex]);
+  }, [currentStep, isBogo, originalValues.length, runState, soundEnabled, stepIndex]);
+
+  // A dense row owns one continuous audio voice while it is running. Release
+  // it as soon as the runner pauses, completes, or mutes; waiting for another
+  // React step would leave that source sustaining after the motion stopped.
+  useEffect(() => {
+    if (soundEnabled && runState === "running") return;
+    stopLiveSortingToneSound();
+  }, [runState, soundEnabled]);
 
   useEffect(() => {
     if (!isBogo || !soundEnabled || runState !== "running") return;
@@ -4224,7 +4693,7 @@ export default function Home() {
   }, [isBogo, runState]);
 
   useEffect(() => {
-    if (isBogo || runState !== "running" || steps.length === 0) return;
+    if (isBogo || useCanvasBarRenderer || runState !== "running" || steps.length === 0) return;
 
     const timer = window.setTimeout(() => {
       if (stepIndex >= steps.length - 1) {
@@ -4253,6 +4722,7 @@ export default function Home() {
     runState,
     stepIndex,
     steps,
+    useCanvasBarRenderer,
   ]);
 
   function createNewArray(
@@ -4382,7 +4852,15 @@ export default function Home() {
     const gain = bogoPracticeAudioGainRef.current;
     bogoPracticeAudioSourceRef.current = null;
     bogoPracticeAudioGainRef.current = null;
-    if (!source) return;
+    if (!source) {
+      try {
+        gain?.disconnect();
+      } catch {
+        // A source can fail after connecting its gain node; the lone output
+        // still must not survive a context replacement.
+      }
+      return;
+    }
     releaseBogoPracticeAudio(source, gain);
   }
 
@@ -4498,6 +4976,12 @@ export default function Home() {
       void Promise.all([context.resume(), loadBogoPracticeCasinoClip(sound)])
         .then(([, clip]) => {
           if (settled || usingTimedFallback || !isCurrentCue()) return;
+          if (audioContextRef.current !== context || context.state !== "running") {
+            // The click's context was retired while its clip was loading.
+            // Never attach a newly decoded casino graph to that dead context.
+            scheduleTimedFallback();
+            return;
+          }
 
           const buffer = context.createBuffer(
             clip.numberOfChannels,
@@ -6552,6 +7036,13 @@ export default function Home() {
                   completionSweepActive={completionSweepActive}
                   completionSweepStepDuration={completionSweepStepDuration}
                   prefersReducedMotion={prefersReducedMotion}
+                  steps={steps}
+                  initialStepIndex={stepIndex}
+                  isRunning={isRunning}
+                  stepDelay={deterministicPlaybackDelay}
+                  stepStride={densePlaybackStepStride}
+                  onCheckpoint={handleDenseCanvasPlaybackCheckpoint}
+                  onContextUnavailable={handleDenseCanvasContextUnavailable}
                 />
               ) : (
                 <div

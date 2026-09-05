@@ -8,6 +8,8 @@ import {
   decodePcmWav,
   getContinuousToneFrequency,
   getSafeScheduledAudioTime,
+  isCompletionSweepAudioFinished,
+  usesContinuousDenseTone,
 } from "../app/lib/audio";
 
 function createPcmWav({
@@ -100,6 +102,20 @@ test("dense tone scheduling never starts in the current or a past audio quantum"
   assert.equal(getSafeScheduledAudioTime(1.25, 1, 0.008), 1.25);
   assert.equal(getSafeScheduledAudioTime(0.95, 1, 0.008), 1.008);
   assert.equal(getSafeScheduledAudioTime(1, 1, 0), 1);
+});
+
+test("dense rows use one continuous tone engine while piano rows retain note voices", () => {
+  assert.equal(usesContinuousDenseTone(25), false);
+  assert.equal(usesContinuousDenseTone(26), true);
+  assert.equal(usesContinuousDenseTone(256), true);
+});
+
+test("completion output waits for source-ended lifecycle completion", () => {
+  assert.equal(isCompletionSweepAudioFinished(false, 0), false);
+  assert.equal(isCompletionSweepAudioFinished(true, 2), false);
+  assert.equal(isCompletionSweepAudioFinished(true, 1), false);
+  assert.equal(isCompletionSweepAudioFinished(true, 0), true);
+  assert.equal(isCompletionSweepAudioFinished(true, -1), true);
 });
 
 test("casino PCM WAV decoding creates normalized Web Audio channels", () => {

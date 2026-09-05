@@ -9,6 +9,28 @@ export const PIANO_TONE_LOW_FREQUENCY = 261.6255653005986; // C4
 export const PIANO_TONE_SEMITONE_SPAN = 24; // C4 through C6
 
 /**
+ * Short rows are intentionally articulated as individual piano notes. Above
+ * that range, a single continuously tuned voice is both clearer during fast
+ * playback and dramatically cheaper for WebKit's native audio renderer.
+ */
+export function usesContinuousDenseTone(valueCount: number) {
+  return valueCount > PIANO_TONE_MAX_ARRAY_SIZE;
+}
+
+/**
+ * A completion output is safe to detach only after scheduling is finished and
+ * every one-shot voice has reported `ended`. This deliberately uses the audio
+ * graph's lifecycle rather than wall-clock time: AudioContext.currentTime can
+ * pause while a desktop webview is interrupted or its audio route changes.
+ */
+export function isCompletionSweepAudioFinished(
+  schedulingComplete: boolean,
+  pendingVoiceCount: number,
+) {
+  return schedulingComplete && pendingVoiceCount <= 0;
+}
+
+/**
  * The casino clips are small, uncompressed PCM WAV files. Parsing that tiny
  * format ourselves lets the app send their samples through the same Web Audio
  * output that already drives Sortscope's synthesized notes. In particular it
