@@ -1786,6 +1786,31 @@ input:focus-visible {
   box-shadow: inset -2px 0 0 var(--practice-run-color), 0 6px 16px rgba(4, 6, 24, 0.24);
 }
 
+/* Merge-style lessons show the run currently being worked. These brackets live
+   on the outer blocks rather than in the flex row, keeping every shared drop
+   target and drag measurement exactly where it was. */
+.practice-block--active-run-start::after,
+.practice-block--active-run-end::after {
+  position: absolute;
+  z-index: 3;
+  top: -8px;
+  bottom: -8px;
+  width: 4px;
+  border-radius: 999px;
+  background: #69e8ff;
+  box-shadow: 0 0 0 1px rgba(168, 247, 255, 0.6), 0 0 14px rgba(69, 218, 255, 0.9);
+  content: "";
+  pointer-events: none;
+}
+
+.practice-block--active-run-start::after {
+  left: -9px;
+}
+
+.practice-block--active-run-end::after {
+  right: -9px;
+}
+
 .practice-block:hover,
 .practice-block:focus-visible {
   border-color: #93e7f4;

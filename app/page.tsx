@@ -4226,6 +4226,15 @@ export default function Home() {
                       const isGroupStart = practiceGroup?.range[0] === index;
                       const isGroupEnd = practiceGroup?.range[1] === index;
                       const isPracticeWalkthroughComplete = practiceFinished;
+                      // Merge-style lessons can mark a multi-block run as active. Mark
+                      // only its outer edge blocks so CSS can draw a bracket without
+                      // adding elements to the shared drag/drop row.
+                      const isActiveMergeGroup =
+                        (algorithm === "powersort" || algorithm === "merge") &&
+                        !isPracticeWalkthroughComplete &&
+                        Boolean(practiceGroup?.active);
+                      const isActiveMergeGroupStart = isActiveMergeGroup && isGroupStart;
+                      const isActiveMergeGroupEnd = isActiveMergeGroup && isGroupEnd;
                       const isPartitionPivot =
                         !isPracticeWalkthroughComplete && isPartitionPractice && value === partitionPivot;
                       const isPartitionSettled =
@@ -4273,6 +4282,8 @@ export default function Home() {
                             (practiceGroup ? "practice-block--grouped practice-block--group-" + practiceGroup.tone + " " : "") +
                             (isGroupStart ? "practice-block--group-start " : "") +
                             (isGroupEnd ? "practice-block--group-end " : "") +
+                            (isActiveMergeGroupStart ? "practice-block--active-run-start " : "") +
+                            (isActiveMergeGroupEnd ? "practice-block--active-run-end " : "") +
                             (isPracticeWalkthroughComplete ? "practice-block--completed " : "") +
                             (isPartitionPivot ? "practice-block--partition-pivot " : "") +
                             (isPartitionSettled ? "practice-block--partition-settled " : "") +
