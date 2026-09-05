@@ -2900,6 +2900,12 @@ export default function Home() {
   const delay = isSelectionScan && !prefersReducedMotion
     ? Math.max(baseDelay, isLargeArray ? 24 : 70)
     : baseDelay;
+  const selectionScanBarDuration = isSelectionScan
+    ? Math.max(
+        1,
+        delay / Math.max(selectionScanRange!.end - selectionScanRange!.start, 1),
+      )
+    : 0;
   const shouldInterpolateDenseBars =
     isLargeArray &&
     !isBogo &&
@@ -2917,19 +2923,6 @@ export default function Home() {
         } as CSSProperties)
       : denseBarTransitionStyle;
   const activeBarTransitionStyle = barTransitionStyle;
-  const selectionScanStyle = isSelectionScan
-    ? ({
-        "--selection-scan-start": String(
-          ((selectionScanRange!.start + 0.5) / Math.max(visibleValues.length, 1)) * 100,
-        ) + "%",
-        "--selection-scan-width": String(
-          ((selectionScanRange!.end - selectionScanRange!.start - 1) /
-            Math.max(visibleValues.length, 1)) *
-            100,
-        ) + "%",
-        "--selection-scan-duration": String(delay) + "ms",
-      } as CSSProperties)
-    : undefined;
   const progress =
     runState === "complete"
       ? 100
@@ -5562,7 +5555,6 @@ export default function Home() {
                   "bars " +
                   (isLargeArray ? "bars--dense " : "") +
                   (algorithm === "merge" || algorithm === "powersort" ? "bars--merge " : "") +
-                  (isSelectionScan ? "bars--selection-scanning " : "") +
                   (shouldInterpolateMoves ? "bars--flip bars--flip-" + motionSlideStage + " " : "") +
                   (completionSweepActive && !prefersReducedMotion ? "bars--completion-sweeping " : "") +
                   (shouldInterpolateDenseBars ? "bars--smooth" : "")
@@ -5589,6 +5581,23 @@ export default function Home() {
                           "--completion-scan-duration": String(completionSweepStepDuration) + "ms",
                         } as CSSProperties)
                       : { height: String(height) + "%" };
+                  const selectionScanIndex =
+                    isSelectionScan &&
+                    index >= selectionScanRange!.start &&
+                    index < selectionScanRange!.end
+                      ? index - selectionScanRange!.start
+                      : null;
+                  const selectionScanBarStyle =
+                    selectionScanIndex === null
+                      ? undefined
+                      : ({
+                          "--selection-bar-scan-delay": String(
+                            Math.round(selectionScanIndex * selectionScanBarDuration),
+                          ) + "ms",
+                          "--selection-bar-scan-duration": String(
+                            Math.max(1, Math.round(selectionScanBarDuration * 1.15)),
+                          ) + "ms",
+                        } as CSSProperties);
                   return (
                     <div
                       className="bar-slot"
@@ -5614,6 +5623,13 @@ export default function Home() {
                         }
                         style={completionScanStyle}
                       >
+                        {selectionScanBarStyle && (
+                          <span
+                            key={"selection-scan-" + currentStep.pass + "-" + index}
+                            className="bar__selection-scan"
+                            style={selectionScanBarStyle}
+                          />
+                        )}
                         {arraySize <= 24 && (
                           <span className="bar__value">{item.isGap ? "gap" : item.value}</span>
                         )}
@@ -5621,11 +5637,6 @@ export default function Home() {
                     </div>
                   );
                 })}
-                {isSelectionScan && (
-                  <span className="selection-scan" style={selectionScanStyle}>
-                    <span className="selection-scan__line" />
-                  </span>
-                )}
               </div>
               <div className="axis-labels" aria-hidden="true">
                 <span>lower values</span>
@@ -5679,7 +5690,7 @@ export default function Home() {
                   <>
                     <span><i className="legend__swatch legend__swatch--idle" />unsorted</span>
                     <span><i className="legend__swatch legend__swatch--key" />next position</span>
-                    <span><i className="legend__swatch legend__swatch--compare" />minimum search</span>
+                    <span><i className="legend__swatch legend__swatch--pivot" />scanning value</span>
                     <span><i className="legend__swatch legend__swatch--sorted" />selected minimum</span>
                   </>
                 ) : algorithm === "heap" ? (

@@ -527,6 +527,11 @@ button:disabled {
    use the freed space as a purposeful three-row dashboard. */
 .controls--bogo {
   display: grid;
+  /* The action cluster shares this grid with the numeric controls. Query its
+     actual available width instead of guessing from the viewport: at tablet
+     widths the timer column can otherwise leave the primary action collapsed
+     to an unusably narrow sliver. */
+  container: bogo-controls / inline-size;
   grid-template-columns: repeat(12, minmax(0, 1fr));
   align-items: end;
   justify-content: stretch;
@@ -572,10 +577,25 @@ button:disabled {
   min-width: 0;
   margin-left: 0;
   display: grid;
-  grid-template-areas: "primary secondary reset sound";
-  grid-template-columns: minmax(0, 1fr) minmax(118px, 1.12fr) auto minmax(116px, 156px);
+  /* Reserve the paused-only secondary action without letting it squeeze the
+     always-available Start button. This two-row layout stays identical while
+     running, paused, and ready, so the controls do not jump between states. */
+  grid-template-areas:
+    "primary secondary"
+    "reset sound";
+  grid-template-columns: minmax(128px, 1fr) minmax(116px, 1fr);
   align-items: end;
   gap: 8px;
+}
+
+/* When the Bogo control grid itself is narrow, give the action cluster its
+   own full row. This covers the two-column deck around the 839 px view shown
+   above without depending on a browser zoom level or a particular viewport. */
+@container bogo-controls (max-width: 650px) {
+  .controls--bogo > .button-row--bogo {
+    grid-column: 1 / -1;
+    grid-row: auto;
+  }
 }
 
 .controls--bogo .sound-volume {
@@ -1017,7 +1037,9 @@ input[type="range"]:disabled {
 
 .button-row--bogo > .button--primary {
   grid-area: primary;
-  min-width: 0;
+  width: 100%;
+  min-width: 128px;
+  min-height: 42px;
   white-space: nowrap;
 }
 
@@ -1467,55 +1489,39 @@ input:focus-visible {
   transform: translateY(-4px);
 }
 
-/* Selection sort scans the untouched tail before its one placement. Keep the
-   scanner independent of individual bars so it crosses the entire working
-   range without adding comparison frames or disturbing the bars' layout. */
-.bars--selection-scanning {
-  isolation: isolate;
-}
-
-.selection-scan {
+/* Selection Sort keeps one compact visual scan per pass so its real O(n²)
+   work remains correctly counted without rendering hundreds of bookkeeping
+   frames. The orange overlay walks across the actual bars instead of drawing
+   a detached scan line, keeping the search readable at normal array sizes. */
+.bar__selection-scan {
   position: absolute;
-  z-index: 4;
-  top: 0;
-  bottom: 0;
-  left: var(--selection-scan-start, 0%);
-  width: var(--selection-scan-width, 100%);
-  min-width: 2px;
+  z-index: 1;
+  inset: -1px -1px 0;
+  border-radius: inherit;
+  background: linear-gradient(180deg, #ffd59a, #ef8a39);
+  box-shadow: 0 0 22px rgba(255, 162, 73, 0.44);
+  opacity: 0;
   pointer-events: none;
+  animation: selection-bar-scan var(--selection-bar-scan-duration, 72ms) linear var(--selection-bar-scan-delay, 0ms) both;
 }
 
-.selection-scan__line {
-  position: absolute;
-  top: 0;
-  bottom: 0;
-  left: 0;
-  width: 3px;
-  border-radius: 999px;
-  background: linear-gradient(180deg, rgba(255, 246, 183, 0.28), #ffe881 14%, #f5b94f 86%, rgba(245, 185, 79, 0.22));
-  box-shadow: 0 0 16px rgba(255, 213, 103, 0.8), 0 0 34px rgba(255, 196, 76, 0.25);
-  animation: selection-scan-sweep var(--selection-scan-duration, 260ms) linear both;
+.bars--dense .bar__selection-scan {
+  box-shadow: none;
 }
 
-.bars--dense .selection-scan__line {
-  width: 2px;
-  box-shadow: 0 0 9px rgba(255, 213, 103, 0.9);
-}
-
-@keyframes selection-scan-sweep {
-  0% {
-    left: 0;
-    opacity: 0.35;
+@keyframes selection-bar-scan {
+  0%,
+  12% {
+    opacity: 0;
   }
 
-  8%,
-  88% {
+  30%,
+  74% {
     opacity: 1;
   }
 
   100% {
-    left: 100%;
-    opacity: 0.45;
+    opacity: 0;
   }
 }
 
