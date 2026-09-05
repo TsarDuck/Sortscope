@@ -158,6 +158,7 @@ type BenchmarkAlgorithm = (typeof BENCHMARK_ALGORITHMS)[number]["key"];
 type BenchmarkWork = Record<BenchmarkAlgorithm, number>;
 const BOGO_MIN_ATTEMPTS = 1;
 const BOGO_STANDARD_MAX_ATTEMPTS = 999_999_999;
+const BOGO_ESTIMATED_SHUFFLES_PER_SECOND = 100_000;
 const INITIAL_VALUES = [
   17, 5, 22, 8, 19, 3, 14, 24, 1, 12, 7, 20, 10, 23, 4, 16, 9, 21, 2, 18,
   6, 15, 11, 13,
@@ -206,6 +207,44 @@ function getTheoreticalWork(
       // Merge or Heap. This is an illustrative growth shape, not a timing.
       return 3.1 * n * logN + 2 * n;
   }
+}
+
+function getBogoExpectedShuffles(size: number) {
+  let possibilities = 1;
+
+  for (let value = 2; value <= size; value += 1) {
+    possibilities *= value;
+  }
+
+  return possibilities;
+}
+
+function formatBogoShuffleEstimate(shuffles: number) {
+  if (shuffles < 1_000_000) return Math.round(shuffles).toLocaleString("en-US");
+
+  const exponent = Math.floor(Math.log10(shuffles));
+  const leading = shuffles / 10 ** exponent;
+  const digits = leading >= 100 ? 0 : leading >= 10 ? 1 : 2;
+  return "≈ " + leading.toFixed(digits) + " × 10^" + exponent;
+}
+
+function formatBogoExpectedTime(shuffles: number) {
+  const seconds = shuffles / BOGO_ESTIMATED_SHUFFLES_PER_SECOND;
+  if (seconds < 1) return "under a second";
+
+  const units = [
+    { seconds: 365.25 * 24 * 60 * 60, singular: "year", plural: "years" },
+    { seconds: 24 * 60 * 60, singular: "day", plural: "days" },
+    { seconds: 60 * 60, singular: "hour", plural: "hours" },
+    { seconds: 60, singular: "minute", plural: "minutes" },
+    { seconds: 1, singular: "second", plural: "seconds" },
+  ];
+  const unit = units.find((candidate) => seconds >= candidate.seconds) ?? units.at(-1)!;
+  const amount = seconds / unit.seconds;
+  const rounded =
+    amount >= 100 ? Math.round(amount) : amount >= 10 ? Math.round(amount * 10) / 10 : Math.round(amount * 100) / 100;
+
+  return rounded.toLocaleString("en-US") + " " + (rounded === 1 ? unit.singular : unit.plural);
 }
 
 type AlgorithmInsight = {
@@ -1259,6 +1298,8 @@ export default function Home() {
   const isBogo = algorithm === "bogo";
   const bogoAttemptMaximum = BOGO_STANDARD_MAX_ATTEMPTS;
   const bogoSliderStep = 1;
+  const bogoExpectedShuffles = isBogo ? getBogoExpectedShuffles(arraySize) : 0;
+  const bogoExpectedTime = isBogo ? formatBogoExpectedTime(bogoExpectedShuffles) : "";
   const soundEnabled = soundVolume > 0;
   const algorithmDetails = ALGORITHM_DETAILS[algorithm];
   const practiceSteps = algorithmDetails.practice;
@@ -2655,6 +2696,15 @@ export default function Home() {
                         </small>
                       </span>
                     </label>
+                    <aside className="bogo-runtime-estimate" aria-live="polite">
+                      <span>EXPECTED LUCK</span>
+                      <strong>{bogoExpectedTime}</strong>
+                      <small>
+                        One sorted order in {formatBogoShuffleEstimate(bogoExpectedShuffles)} shuffles on average,
+                        modeled at {BOGO_ESTIMATED_SHUFFLES_PER_SECOND.toLocaleString("en-US")} shuffles per second.
+                        Your browser can be slower or faster.
+                      </small>
+                    </aside>
                   </>
                 )}
               </div>

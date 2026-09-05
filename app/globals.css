@@ -366,6 +366,37 @@ button:disabled {
   opacity: 0.56;
 }
 
+.bogo-runtime-estimate {
+  display: grid;
+  gap: 3px;
+  padding: 11px 12px;
+  border: 1px solid rgba(255, 202, 105, 0.35);
+  border-radius: 10px;
+  background: linear-gradient(135deg, rgba(109, 77, 38, 0.28), rgba(63, 43, 48, 0.34));
+  box-shadow: inset 0 1px rgba(255, 231, 174, 0.06);
+}
+
+.bogo-runtime-estimate > span {
+  color: #e8bf73;
+  font-size: 0.57rem;
+  font-weight: 850;
+  letter-spacing: 0.12em;
+}
+
+.bogo-runtime-estimate strong {
+  color: #fff0c7;
+  font-family: var(--font-display), serif;
+  font-size: 1.02rem;
+  line-height: 1.1;
+}
+
+.bogo-runtime-estimate small {
+  color: #d9c6a5;
+  font-size: 0.61rem;
+  font-weight: 650;
+  line-height: 1.35;
+}
+
 /* Give Chromium's built-in up/down controls a comfortably sized hit area. */
 .control-number::-webkit-inner-spin-button,
 .control-number::-webkit-outer-spin-button {
