@@ -1987,6 +1987,9 @@ export default function Home() {
     );
   }, [algorithm, practiceFinished, practiceGroups]);
   const algorithmLabel = algorithmDetails.label;
+  const learnTitle =
+    algorithmDetails.learnTitle.slice(0, 1).toLocaleLowerCase() +
+    algorithmDetails.learnTitle.slice(1);
   const stageLabel = algorithmDetails.stageLabel;
   const totalStages = isBogo
     ? bogoRunsUntilSolved
@@ -4598,7 +4601,7 @@ export default function Home() {
           <div className="learn-copy">
             <p className="eyebrow">{algorithmDetails.eyebrow}</p>
             <h2 id="learn-title">
-              <span className="learn-copy__algorithm-name">{algorithmLabel}</span>, {algorithmDetails.learnTitle}
+              <span className="learn-copy__algorithm-name">{algorithmLabel}</span>, {learnTitle}
             </h2>
             <div className="learn-copy__explanation">
               {algorithmDetails.learnCopy.map((paragraph) => (

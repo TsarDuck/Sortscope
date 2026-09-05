@@ -176,11 +176,11 @@ button:disabled {
   --hero-picker-control-size: clamp(44px, 4.6vw, 60px);
   --hero-picker-gap: clamp(7px, 1.45vw, 17px);
   position: relative;
-  display: flex;
+  display: grid;
+  grid-template-columns: var(--hero-picker-control-size) minmax(0, 720px) var(--hero-picker-control-size);
   align-items: center;
-  gap: var(--hero-picker-gap);
-  width: fit-content;
-  max-width: 100%;
+  column-gap: var(--hero-picker-gap);
+  width: min(100%, calc(720px + (var(--hero-picker-control-size) * 2) + (var(--hero-picker-gap) * 2)));
 }
 
 .hero__algorithm-picker-title {
@@ -283,7 +283,7 @@ button:disabled {
   position: absolute;
   z-index: 30;
   top: calc(100% + 15px);
-  left: 0;
+  left: calc(var(--hero-picker-control-size) + var(--hero-picker-gap));
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 7px;
@@ -3208,10 +3208,11 @@ input:focus-visible {
     --hero-picker-control-size: 42px;
     --hero-picker-gap: 7px;
     width: 100%;
+    grid-template-columns: var(--hero-picker-control-size) minmax(0, 1fr) var(--hero-picker-control-size);
   }
 
   .hero__algorithm-picker-title {
-    flex: 1 1 auto;
+    min-width: 0;
   }
 
   .hero__algorithm-picker-label {
