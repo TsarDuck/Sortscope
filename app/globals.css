@@ -80,9 +80,12 @@ button:disabled {
   outline: 0;
 }
 
+/* The welcome dialog is focused programmatically so keyboard users can enter
+   immediately. WebKitGTK treats that focus as focus-visible, which used to
+   draw a misleading cyan frame on first launch. The dialog itself already
+   gives the keyboard instruction, so keep its opening state visually calm. */
 .sortscope-intro:focus-visible .sortscope-intro__content {
-  outline: 2px solid var(--cyan);
-  outline-offset: 13px;
+  outline: 0;
 }
 
 .sortscope-intro__content {
@@ -707,7 +710,71 @@ button:disabled {
 }
 
 .control-field--arrangement {
+  position: relative;
   min-width: 178px;
+}
+
+/* Match the Control Room's native select to the custom dark field used by the
+   Efficiency Lab. In WebKitGTK the unstyled control can otherwise render with
+   a white platform surface and nearly-white text. */
+.control-field--arrangement select {
+  min-height: 42px;
+  padding: 0 40px 0 12px;
+  border-color: rgba(168, 182, 244, 0.36);
+  color: #edf1ff;
+  background:
+    linear-gradient(135deg, rgba(143, 126, 255, 0.16), rgba(89, 205, 237, 0.07)),
+    #121731;
+  box-shadow: inset 0 1px rgba(239, 242, 255, 0.06), 0 8px 22px rgba(5, 7, 23, 0.16);
+  color-scheme: dark;
+  appearance: none;
+  -webkit-appearance: none;
+  -moz-appearance: none;
+  cursor: pointer;
+  transition: border-color 160ms ease, background 160ms ease, box-shadow 160ms ease;
+}
+
+.control-field--arrangement::after {
+  position: absolute;
+  right: 15px;
+  bottom: 17px;
+  width: 7px;
+  height: 7px;
+  border-right: 2px solid #bdb7ff;
+  border-bottom: 2px solid #bdb7ff;
+  content: "";
+  pointer-events: none;
+  transform: rotate(45deg);
+  transition: border-color 160ms ease, transform 160ms ease;
+}
+
+.control-field--arrangement:hover select {
+  border-color: rgba(184, 198, 255, 0.68);
+  background:
+    linear-gradient(135deg, rgba(157, 140, 255, 0.22), rgba(103, 218, 246, 0.1)),
+    #151b39;
+  box-shadow: inset 0 1px rgba(246, 247, 255, 0.08), 0 10px 25px rgba(5, 7, 23, 0.22);
+}
+
+.control-field--arrangement:focus-within::after {
+  border-color: var(--cyan);
+  transform: translateY(1px) rotate(45deg);
+}
+
+.control-field--arrangement select:focus-visible {
+  border-color: rgba(111, 220, 245, 0.88);
+  box-shadow: inset 0 1px rgba(246, 250, 255, 0.11), 0 0 0 3px rgba(88, 217, 245, 0.18);
+}
+
+.control-field--arrangement select option,
+.control-field--arrangement select optgroup {
+  color: #edf1ff;
+  background-color: #121731;
+}
+
+.control-field--arrangement select option:checked {
+  color: #ffffff;
+  background-color: #2a3568;
 }
 
 .control-field--range {
@@ -866,8 +933,7 @@ button:disabled {
 }
 
 .bogo-unlimited-warning {
-  display: flex;
-  align-items: flex-start;
+  display: grid;
   gap: 9px;
   padding: 10px 11px;
   border: 1px solid rgba(255, 112, 126, 0.58);
@@ -875,6 +941,12 @@ button:disabled {
   color: #ffd3d9;
   background: linear-gradient(135deg, rgba(126, 40, 64, 0.42), rgba(87, 27, 52, 0.3));
   box-shadow: inset 0 1px rgba(255, 203, 212, 0.07);
+}
+
+.bogo-unlimited-warning__choice {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
   cursor: pointer;
 }
 
@@ -913,9 +985,66 @@ button:disabled {
 }
 
 .bogo-unlimited-warning--disabled,
+.bogo-unlimited-warning--disabled .bogo-unlimited-warning__choice,
 .bogo-unlimited-warning--disabled input {
   cursor: not-allowed;
   opacity: 0.56;
+}
+
+.bogo-unlimited-confirmation {
+  display: grid;
+  gap: 7px;
+  padding-top: 8px;
+  border-top: 1px solid rgba(255, 181, 193, 0.2);
+}
+
+.bogo-unlimited-confirmation p {
+  margin: 0;
+  color: #ffe0e5;
+  font-size: 0.66rem;
+  font-weight: 700;
+  line-height: 1.3;
+}
+
+.bogo-unlimited-confirmation > div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.bogo-unlimited-confirmation button {
+  min-height: 29px;
+  padding: 0 9px;
+  border: 1px solid rgba(255, 197, 207, 0.35);
+  border-radius: 6px;
+  color: #ffeef0;
+  background: rgba(27, 27, 52, 0.58);
+  font: inherit;
+  font-size: 0.62rem;
+  font-weight: 800;
+  letter-spacing: 0.035em;
+  cursor: pointer;
+  transition: border-color 150ms ease, background-color 150ms ease, transform 150ms ease;
+}
+
+.bogo-unlimited-confirmation button.bogo-unlimited-confirmation__confirm {
+  border-color: rgba(255, 142, 157, 0.8);
+  background: rgba(159, 45, 70, 0.5);
+}
+
+.bogo-unlimited-confirmation button:hover,
+.bogo-unlimited-confirmation button:focus-visible {
+  border-color: rgba(255, 221, 227, 0.88);
+  background: rgba(175, 61, 86, 0.64);
+}
+
+.bogo-unlimited-confirmation button:focus-visible {
+  outline: 2px solid var(--cyan);
+  outline-offset: 2px;
+}
+
+.bogo-unlimited-confirmation button:active {
+  transform: translateY(1px);
 }
 
 .bogo-runtime-estimate {
@@ -1583,6 +1712,13 @@ input:focus-visible {
 
 .held-key + .chart-stage {
   margin-top: 12px;
+}
+
+/* Keep Insertion Sort's key tray in the layout between passes. Hiding only
+   its paint prevents the graph and surrounding Control Room from jumping
+   whenever a key is stored or placed. */
+.held-key--reserved {
+  visibility: hidden;
 }
 
 .held-key span {

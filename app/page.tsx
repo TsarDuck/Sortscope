@@ -41,6 +41,7 @@ import {
   createSmallArrayPianoToneMap,
   decodePcmWav,
   getContinuousToneFrequency,
+  PIANO_TONE_MAX_ARRAY_SIZE,
   type DecodedPcmWav,
 } from "./lib/audio";
 import {
@@ -99,6 +100,15 @@ type AlgorithmCardTab = "walkthrough" | "python";
 type IntroPhase = "visible" | "exiting" | "hidden";
 type BogoPracticeCasinoSound = "entry" | "shuffle" | "fail" | "success";
 type WorkloadBarTransitionMap = Partial<Record<BenchmarkAlgorithm, number>>;
+type AudioContextConstructor = new () => AudioContext;
+
+// Older Apple WebKit hosts can expose the constructor under this prefixed
+// name. Tauri's macOS webview is modern today, but accepting both costs
+// nothing and keeps the sound engine portable across supported WKWebViews.
+type AudioContextWindow = Window &
+  typeof globalThis & {
+    webkitAudioContext?: AudioContextConstructor;
+  };
 
 type PracticeGroupTone = "cyan" | "violet" | "mint" | "gold";
 
@@ -200,6 +210,17 @@ const COMPLETION_SWEEP_MIN_DURATION = 425;
 const COMPLETION_SWEEP_MILLISECONDS_PER_BAR = 5;
 const COMPLETION_SWEEP_AUDIO_VISUAL_LEAD = 24;
 const COMPLETION_SWEEP_RELEASE_TAIL = 70;
+// Scheduling all 256 finish tones synchronously produces hundreds of Web
+// Audio nodes in one render turn. Keep a short look-ahead queue instead so
+// the sweep still plays one note per value without starving the visual frame.
+const COMPLETION_SWEEP_SCHEDULE_AHEAD_SECONDS = 0.12;
+const COMPLETION_SWEEP_SCHEDULE_INTERVAL = 45;
+const MAX_LIVE_TONE_SOURCES = 16;
+// A full React tree and 256 bar nodes cannot be repainted meaningfully more
+// than about 30 times per second on every desktop WebView. At the fastest
+// settings, advance several already-recorded algorithm steps per paint rather
+// than asking macOS/Linux/Windows to render a frame for every tiny mutation.
+const DENSE_PLAYBACK_FRAME_INTERVAL = 32;
 const BOGO_COMPLETION_SWEEP_DELAY = 720;
 // Keep the win message on screen long enough to read, then let its exit
 // animation finish before removing it from the DOM.
@@ -278,6 +299,9 @@ const BOGO_PRACTICE_CASINO_SOUNDS: Record<
 const BOGO_FAST_ESTIMATED_SHUFFLES_PER_SECOND = 2_500_000;
 const BOGO_RATE_SAMPLE_INTERVAL = 250;
 const BOGO_EXPECTED_RATE_FREEZE_AFTER = 2_500;
+// A fast Bogo run is deliberately CPU-heavy, but it must still return to the
+// desktop WebView often enough to paint and accept pause/reset input.
+const BOGO_FAST_BATCH_BUDGET_MILLISECONDS = 6;
 // Fast Bogo batches can execute several times between display refreshes. Keep
 // the simulation hot, but only snapshot its mutable session at a readable
 // cadence; each snapshot otherwise re-renders the entire teaching surface.
@@ -2211,6 +2235,7 @@ export default function Home() {
   const [bogoAttemptLimit, setBogoAttemptLimit] = useState(BOGO_MAX_ATTEMPTS);
   const [bogoAttemptInput, setBogoAttemptInput] = useState(String(BOGO_MAX_ATTEMPTS));
   const [bogoRunsUntilSolved, setBogoRunsUntilSolved] = useState(false);
+  const [bogoUnlimitedConfirmationOpen, setBogoUnlimitedConfirmationOpen] = useState(false);
   const [arrayArrangement, setArrayArrangement] = useState<ArrayArrangement>("random");
   const [benchmarkPattern, setBenchmarkPattern] =
     useState<BenchmarkPattern>("random");
@@ -2274,6 +2299,7 @@ export default function Home() {
   const introReturnFocusRef = useRef<HTMLElement | null>(null);
   const brandButtonRef = useRef<HTMLButtonElement | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
+  const audioGestureActivatorRef = useRef<(() => void) | null>(null);
   const speedRef = useRef(speed);
   // Native range controls own their drag behavior. Keep only the pointer ID
   // here so every end path can release our visual-adjustment state without
@@ -2285,8 +2311,10 @@ export default function Home() {
   const completionSweepStartedRef = useRef(false);
   const completionSweepStartTimerRef = useRef<number | null>(null);
   const completionSweepEndTimerRef = useRef<number | null>(null);
+  const completionSweepScheduleTimerRef = useRef<number | null>(null);
   const completionSweepRunRef = useRef(0);
   const completionSweepSourcesRef = useRef(new Set<OscillatorNode>());
+  const liveToneSourcesRef = useRef(new Set<OscillatorNode>());
   const motionBarElementsRef = useRef(new Map<string, HTMLDivElement>());
   const motionBarPositionsRef = useRef(new Map<string, number>());
   const motionBarTokensRef = useRef<string[]>([]);
@@ -2345,6 +2373,7 @@ export default function Home() {
   const practiceCompletionRef = useRef(false);
   const practiceCelebrationRunRef = useRef(0);
   const bogoSessionRef = useRef<BogoSession | null>(null);
+  const bogoUnlimitedConfirmationRef = useRef(false);
   const bogoRateSampleRef = useRef<{
     startedAt: number;
     startingAttempts: number;
@@ -2641,6 +2670,29 @@ export default function Home() {
     return () => window.cancelAnimationFrame(frame);
   }, [introPhase]);
 
+  // Prime Web Audio during the first genuine interaction instead of waiting
+  // for a later timer or render effect. That distinction matters in macOS
+  // WKWebView, which can otherwise leave an AudioContext suspended even
+  // though the sorting action itself was clicked. Capture phase makes this
+  // run before React's click handlers and covers both mouse/touch and keys.
+  useEffect(() => {
+    const activateFromGesture = () => {
+      if (soundVolumeRef.current <= 0) return;
+      try {
+        audioGestureActivatorRef.current?.();
+      } catch {
+        // Controls retain their visual behavior if a host has no audio output.
+      }
+    };
+
+    window.addEventListener("pointerdown", activateFromGesture, true);
+    window.addEventListener("keydown", activateFromGesture, true);
+    return () => {
+      window.removeEventListener("pointerdown", activateFromGesture, true);
+      window.removeEventListener("keydown", activateFromGesture, true);
+    };
+  }, []);
+
   useEffect(() => {
     return () => {
       if (introDismissTimerRef.current !== null) {
@@ -2803,6 +2855,16 @@ export default function Home() {
 
   const isRunning = runState === "running";
   const isLocked = isRunning || runState === "paused";
+  // Bogo's runner is intentionally CPU-bound while it is searching. Treat
+  // every Bogo configuration input as unavailable for the lifetime of an
+  // active session, including the small window before React has rendered the
+  // new `running` state. That keeps a stray number/checkbox event from
+  // reconfiguring a session that is already executing.
+  const hasActiveBogoSession =
+    isBogo && bogoSessionRef.current !== null && !bogoSessionRef.current.done;
+  const isBogoSessionLocked = isBogo && (isLocked || hasActiveBogoSession);
+  const isBogoConfigurationLocked =
+    isBogoSessionLocked || bogoUnlimitedConfirmationOpen;
 
   useEffect(() => {
     if (!isAlgorithmPickerOpen) return;
@@ -2876,10 +2938,10 @@ export default function Home() {
         16 + (highSpeedMinimumFrameDelay - 16) * highSpeedProgress,
       )
     : standardMinimumFrameDelay;
-  const bogoSlowMotionDelay =
-    isBogo && originalValues.length <= DEFAULT_ARRAY_SIZE
-      ? getBogoSlowMotionDelay(speed)
-      : 0;
+  // Bogo's maximum size is only 25. Do not silently turn a size-25 run into
+  // a maximum-speed busy loop: the speed control needs to keep its meaning at
+  // every supported Bogo size.
+  const bogoSlowMotionDelay = isBogo ? getBogoSlowMotionDelay(speed) : 0;
   const usesEvenMergePacing =
     algorithm === "merge" &&
     currentStep.phase !== "ready" &&
@@ -2898,6 +2960,12 @@ export default function Home() {
         ? motionSlideDuration + 100
       : Math.max(minimumFrameDelay, speedDelay / playbackDensity);
   const delay = baseDelay;
+  const densePlaybackStepStride =
+    !isBogo && isLargeArray && delay < DENSE_PLAYBACK_FRAME_INTERVAL
+      ? Math.max(1, Math.round(DENSE_PLAYBACK_FRAME_INTERVAL / Math.max(delay, 1)))
+      : 1;
+  const deterministicPlaybackDelay =
+    densePlaybackStepStride > 1 ? DENSE_PLAYBACK_FRAME_INTERVAL : delay;
   const shouldInterpolateDenseBars =
     isLargeArray &&
     !isBogo &&
@@ -2960,6 +3028,16 @@ export default function Home() {
     setBogoElapsedMilliseconds(0);
   }
 
+  function setBogoUnlimitedConfirmation(nextOpen: boolean) {
+    bogoUnlimitedConfirmationRef.current = nextOpen;
+    setBogoUnlimitedConfirmationOpen(nextOpen);
+  }
+
+  function hasActiveBogoSessionNow() {
+    const session = bogoSessionRef.current;
+    return isBogo && session !== null && !session.done;
+  }
+
   function getBogoActiveElapsedMilliseconds(now = performance.now()) {
     const stopwatch = bogoElapsedTimerRef.current;
     return (
@@ -3009,6 +3087,10 @@ export default function Home() {
   }
 
   function stopCompletionSweepSound() {
+    if (completionSweepScheduleTimerRef.current !== null) {
+      window.clearTimeout(completionSweepScheduleTimerRef.current);
+      completionSweepScheduleTimerRef.current = null;
+    }
     completionSweepSourcesRef.current.forEach((source) => {
       source.onended = null;
       try {
@@ -3030,7 +3112,7 @@ export default function Home() {
       const context = ensureAudioContext();
       void context.resume().then(() => {
         if (completionSweepRunRef.current !== sweepRun) return;
-        playCompletionSweepSound(sweepValues, duration);
+        playCompletionSweepSound(sweepValues, duration, sweepRun);
       }).catch(() => undefined);
     }
 
@@ -3043,16 +3125,60 @@ export default function Home() {
   }
 
   function ensureAudioContext() {
-    if (!audioContextRef.current) {
-      audioContextRef.current = new AudioContext();
+    let context = audioContextRef.current;
+
+    // A WebKit context can become `interrupted` when macOS changes audio
+    // routes, and a closed context can no longer be resumed. Recreate only
+    // the latter; every non-running live state gets a fresh resume request.
+    if (!context || context.state === "closed") {
+      const audioWindow = window as AudioContextWindow;
+      const AudioContextClass = audioWindow.AudioContext ?? audioWindow.webkitAudioContext;
+      if (!AudioContextClass) {
+        throw new Error("This webview does not provide Web Audio output.");
+      }
+      context = new AudioContextClass();
+      audioContextRef.current = context;
     }
 
-    if (audioContextRef.current.state === "suspended") {
-      void audioContextRef.current.resume();
+    if (context.state !== "running") {
+      void context.resume().catch(() => undefined);
     }
 
-    return audioContextRef.current;
+    return context;
   }
+
+  function activateAudioOutput() {
+    const context = ensureAudioContext();
+    if (context.state === "running") return context;
+
+    // WKWebView requires media to be initiated within a real gesture. Resume
+    // alone is not reliable in every Apple WebKit version, so enqueue a
+    // one-sample, zero-valued buffer in the same call stack. It is inaudible,
+    // creates no persistent source, and unlocks the normal synth/casino path
+    // before their asynchronous scheduling begins.
+    try {
+      const unlockSource = context.createBufferSource();
+      const sampleRate = Math.max(8_000, context.sampleRate || 44_100);
+      unlockSource.buffer = context.createBuffer(1, 1, sampleRate);
+      // The one-sample buffer is initialized to zero, so a direct connection
+      // is still inaudible while being less likely to be optimized away by a
+      // WebKit audio graph before it has fully activated.
+      unlockSource.connect(context.destination);
+      unlockSource.addEventListener("ended", () => {
+        unlockSource.disconnect();
+      }, { once: true });
+      unlockSource.start(context.currentTime);
+      unlockSource.stop(context.currentTime + 1 / sampleRate);
+    } catch {
+      // `resume()` below remains a useful fallback for hosts that reject a
+      // buffer until their output device is fully available.
+    }
+
+    void context.resume().catch(() => undefined);
+    return context;
+  }
+
+  audioGestureActivatorRef.current = activateAudioOutput;
 
   function playMusicalVoice(
     context: AudioContext,
@@ -3148,10 +3274,58 @@ export default function Home() {
     const peakGain = basePeakGain * (soundVolume / 100) ** 2.5;
     const frequency = getSortingToneFrequency(activeValue);
 
-    playMusicalVoice(context, now, frequency, targetDuration, peakGain);
+    // Two oscillators make up each full musical voice. A hard cap keeps a
+    // delayed Web Audio backend from accumulating work faster than it can
+    // render when a very fast sort emits many state changes in one frame.
+    if (liveToneSourcesRef.current.size + 2 > MAX_LIVE_TONE_SOURCES) return;
+    playMusicalVoice(
+      context,
+      now,
+      frequency,
+      targetDuration,
+      peakGain,
+      liveToneSourcesRef.current,
+    );
   }
 
-  function playCompletionSweepSound(sweepValues: number[], duration: number) {
+  function playCompactSweepVoice(
+    context: AudioContext,
+    startTime: number,
+    frequency: number,
+    targetDuration: number,
+    peakGain: number,
+  ) {
+    // Dense (26+ value) arrays use a single voiced oscillator per red bar.
+    // The bar-to-note mapping remains one-to-one, but this avoids creating the
+    // five-node reinforced voice graph hundreds of times in a single sweep.
+    const duration = Math.min(0.024, Math.max(0.007, targetDuration));
+    const attack = Math.min(0.003, duration * 0.28);
+    const oscillator = context.createOscillator();
+    const envelope = context.createGain();
+
+    oscillator.type = "triangle";
+    oscillator.frequency.setValueAtTime(frequency, startTime);
+    envelope.gain.setValueAtTime(0.0001, startTime);
+    envelope.gain.exponentialRampToValueAtTime(peakGain, startTime + attack);
+    envelope.gain.exponentialRampToValueAtTime(0.0001, startTime + duration);
+    oscillator.connect(envelope);
+    envelope.connect(context.destination);
+    completionSweepSourcesRef.current.add(oscillator);
+    oscillator.addEventListener("ended", () => {
+      completionSweepSourcesRef.current.delete(oscillator);
+      oscillator.disconnect();
+      envelope.disconnect();
+    }, { once: true });
+    oscillator.start(startTime);
+    oscillator.stop(startTime + duration + 0.004);
+    return duration;
+  }
+
+  function playCompletionSweepSound(
+    sweepValues: number[],
+    duration: number,
+    sweepRun: number,
+  ) {
     const context = audioContextRef.current;
     const volume = soundVolumeRef.current;
     if (!context || context.state !== "running" || volume <= 0) return;
@@ -3162,28 +3336,62 @@ export default function Home() {
     const spacing = duration / 1_000 / valuesToScan.length;
     const startTime = context.currentTime + COMPLETION_SWEEP_AUDIO_VISUAL_LEAD / 1_000;
     const liveImpactPeak = 0.2 * (volume / 100) ** 2.5;
+    const useCompactVoice = valuesToScan.length > PIANO_TONE_MAX_ARRAY_SIZE;
+    let nextIndex = 0;
 
-    // Each red completion bar gets a matching note at the center of its scan window.
-    // That keeps the verification sound count exactly aligned with the array.
-    valuesToScan.forEach((value, index) => {
-      const frequency = getSortingToneFrequency(value);
-      const requestedDuration = Math.min(0.052, Math.max(0.012, spacing * 0.9));
-      const actualVoiceDuration = Math.min(
-        0.12,
-        Math.max(requestedDuration, 4.5 / Math.max(frequency, 1)),
-      );
-      const overlap = Math.max(1, actualVoiceDuration / spacing);
-      const peakGain = liveImpactPeak / Math.sqrt(overlap);
+    const scheduleNextWindow = () => {
+      if (
+        completionSweepRunRef.current !== sweepRun ||
+        audioContextRef.current !== context ||
+        context.state !== "running"
+      ) {
+        return;
+      }
 
-      playMusicalVoice(
-        context,
-        startTime + (index + 0.5) * spacing,
-        frequency,
-        requestedDuration,
-        peakGain,
-        completionSweepSourcesRef.current,
-      );
-    });
+      const scheduleThrough = context.currentTime + COMPLETION_SWEEP_SCHEDULE_AHEAD_SECONDS;
+      while (nextIndex < valuesToScan.length) {
+        const noteTime = startTime + (nextIndex + 0.5) * spacing;
+        if (noteTime > scheduleThrough) break;
+
+        const value = valuesToScan[nextIndex] ?? 1;
+        const frequency = getSortingToneFrequency(value);
+        const requestedDuration = useCompactVoice
+          ? Math.min(0.024, Math.max(0.007, spacing * 1.25))
+          : Math.min(0.052, Math.max(0.012, spacing * 0.9));
+        const actualVoiceDuration = useCompactVoice
+          ? requestedDuration
+          : Math.min(0.12, Math.max(requestedDuration, 4.5 / Math.max(frequency, 1)));
+        const overlap = Math.max(1, actualVoiceDuration / spacing);
+        const peakGain = liveImpactPeak / Math.sqrt(overlap);
+
+        if (useCompactVoice) {
+          playCompactSweepVoice(context, noteTime, frequency, requestedDuration, peakGain);
+        } else {
+          playMusicalVoice(
+            context,
+            noteTime,
+            frequency,
+            requestedDuration,
+            peakGain,
+            completionSweepSourcesRef.current,
+          );
+        }
+        nextIndex += 1;
+      }
+
+      if (nextIndex < valuesToScan.length) {
+        completionSweepScheduleTimerRef.current = window.setTimeout(
+          scheduleNextWindow,
+          COMPLETION_SWEEP_SCHEDULE_INTERVAL,
+        );
+      } else {
+        completionSweepScheduleTimerRef.current = null;
+      }
+    };
+
+    // Each red completion bar still receives exactly one note. Only the
+    // allocation is windowed, keeping a max-size/high-speed finish responsive.
+    scheduleNextWindow();
   }
 
   function playBogoShuffleTexture(attempt: number) {
@@ -3201,7 +3409,15 @@ export default function Home() {
     // markedly quieter than the rest of the visualizer.
     const frequency = 293.66 + motion * 340;
     const peakGain = 0.2 * (soundVolume / 100) ** 2.5;
-    playMusicalVoice(context, now, frequency, 0.075, peakGain);
+    if (liveToneSourcesRef.current.size + 2 > MAX_LIVE_TONE_SOURCES) return;
+    playMusicalVoice(
+      context,
+      now,
+      frequency,
+      0.075,
+      peakGain,
+      liveToneSourcesRef.current,
+    );
   }
 
   function playBogoVictorySound() {
@@ -3333,7 +3549,20 @@ export default function Home() {
 
     let cancelled = false;
     let timer: number | undefined;
+    let animationFrame: number | undefined;
     let nextVisualUpdateAt = 0;
+
+    const scheduleNextBatch = () => {
+      if (bogoSlowMotionDelay > 0) {
+        timer = window.setTimeout(runBatch, bogoSlowMotionDelay);
+        return;
+      }
+
+      // `setTimeout(..., 0)` keeps the main thread continuously occupied in
+      // WebKit/WKWebView. A frame boundary preserves high-speed Bogo while
+      // giving the renderer and input queue a predictable turn each frame.
+      animationFrame = window.requestAnimationFrame(runBatch);
+    };
 
     const runBatch = () => {
       if (cancelled || bogoSessionRef.current !== session) return;
@@ -3341,7 +3570,7 @@ export default function Home() {
       if (bogoSlowMotionDelay > 0) {
         advanceBogoSession(session);
       } else {
-        const deadline = performance.now() + 8;
+        const deadline = performance.now() + BOGO_FAST_BATCH_BUDGET_MILLISECONDS;
         do {
           advanceBogoSession(session);
         } while (!session.done && performance.now() < deadline);
@@ -3399,13 +3628,14 @@ export default function Home() {
         return;
       }
 
-      timer = window.setTimeout(runBatch, bogoSlowMotionDelay);
+      scheduleNextBatch();
     };
 
-    timer = window.setTimeout(runBatch, 0);
+    scheduleNextBatch();
     return () => {
       cancelled = true;
       if (timer !== undefined) window.clearTimeout(timer);
+      if (animationFrame !== undefined) window.cancelAnimationFrame(animationFrame);
     };
   }, [bogoModeledShuffleRate, bogoSlowMotionDelay, isBogo, runState]);
 
@@ -3445,20 +3675,33 @@ export default function Home() {
     if (isBogo || runState !== "running" || steps.length === 0) return;
 
     const timer = window.setTimeout(() => {
-      const nextIndex = stepIndex + 1;
-      if (nextIndex >= steps.length) {
+      if (stepIndex >= steps.length - 1) {
         setRunState("complete");
         return;
       }
 
+      // Dense arrays at maximum speed may have a large number of compact
+      // snapshots. Batch those logical steps into a single display frame; the
+      // final snapshot, counters, and completion sequence remain exact.
+      const nextIndex = Math.min(
+        steps.length - 1,
+        stepIndex + densePlaybackStepStride,
+      );
       setStepIndex(nextIndex);
       if (nextIndex === steps.length - 1) {
         setRunState("complete");
       }
-    }, delay);
+    }, deterministicPlaybackDelay);
 
     return () => window.clearTimeout(timer);
-  }, [delay, isBogo, runState, stepIndex, steps]);
+  }, [
+    densePlaybackStepStride,
+    deterministicPlaybackDelay,
+    isBogo,
+    runState,
+    stepIndex,
+    steps,
+  ]);
 
   function createNewArray(
     size = arraySize,
@@ -3466,6 +3709,7 @@ export default function Home() {
   ) {
     resetCompletionSweep();
     resetBogoElapsedTimer();
+    setBogoUnlimitedConfirmation(false);
     const nextValues = makeArrayForArrangement(size, arrangement);
     setBogoCelebrationPhase("hidden");
     bogoSessionRef.current = null;
@@ -3489,6 +3733,7 @@ export default function Home() {
   function resetArray() {
     resetCompletionSweep();
     resetBogoElapsedTimer();
+    setBogoUnlimitedConfirmation(false);
     setBogoCelebrationPhase("hidden");
     bogoSessionRef.current = null;
     bogoRateSampleRef.current = null;
@@ -3501,7 +3746,7 @@ export default function Home() {
   }
 
   function handleSoundVolumeChange(nextVolume: number) {
-    if (nextVolume > 0 && soundVolume === 0) ensureAudioContext();
+    if (nextVolume > 0 && soundVolume === 0) activateAudioOutput();
     setSoundVolume(nextVolume);
   }
 
@@ -3687,7 +3932,7 @@ export default function Home() {
       // Open/resume synchronously from the click that invoked this function.
       // That preserves the browser's user-activation requirement even if the
       // local clip finishes fetching a moment later.
-      const context = ensureAudioContext();
+      const context = activateAudioOutput();
 
       // Protect the disabled lesson from an unavailable local asset or output
       // device. Once a buffer starts, this watchdog is cleared and can never
@@ -4625,6 +4870,7 @@ export default function Home() {
     setAlgorithmCardTab("walkthrough");
     resetCompletionSweep();
     resetBogoElapsedTimer();
+    setBogoUnlimitedConfirmation(false);
     setBogoCelebrationPhase("hidden");
     bogoSessionRef.current = null;
     bogoRateSampleRef.current = null;
@@ -4651,12 +4897,18 @@ export default function Home() {
   }
 
   function handlePrimaryAction(startWithNewArray = false) {
+    // An unlimited-run confirmation is setup UI, not an implicit instruction
+    // to begin searching. Ignore a queued click as well as disabling the
+    // visible button below so this is safe across desktop WebViews.
+    if (isBogo && (bogoUnlimitedConfirmationOpen || bogoUnlimitedConfirmationRef.current)) return;
+
     if (!startWithNewArray && runState === "running") {
       setRunState("paused");
       return;
     }
 
     if (!startWithNewArray && runState === "paused") {
+      if (soundEnabled) activateAudioOutput();
       if (isBogo && bogoSessionRef.current) {
         bogoRateSampleRef.current = {
           startedAt: performance.now(),
@@ -4680,7 +4932,7 @@ export default function Home() {
       setOriginalValues(sortValues);
     }
 
-    const audioContext = soundEnabled ? ensureAudioContext() : null;
+    const audioContext = soundEnabled ? activateAudioOutput() : null;
     resetCompletionSweep();
     resetBogoElapsedTimer();
     setBogoCelebrationPhase("hidden");
@@ -4749,7 +5001,13 @@ export default function Home() {
   }
 
   function handleArraySizeChange(nextSize: number) {
+    if (isBogoConfigurationLocked || hasActiveBogoSessionNow()) return;
+
     const clampedSize = Math.min(maximumArraySize, Math.max(minimumArraySize, Math.round(nextSize)));
+    if (clampedSize === arraySize) {
+      setArraySizeInput(String(clampedSize));
+      return;
+    }
     setArraySize(clampedSize);
     setArraySizeInput(String(clampedSize));
     createNewArray(clampedSize);
@@ -4906,6 +5164,8 @@ export default function Home() {
   }
 
   function handleBogoAttemptLimitChange(nextLimit: number) {
+    if (isBogoConfigurationLocked || hasActiveBogoSessionNow()) return;
+
     const clampedLimit = Math.min(
       bogoAttemptMaximum,
       Math.max(BOGO_MIN_ATTEMPTS, Math.round(nextLimit)),
@@ -4924,15 +5184,43 @@ export default function Home() {
   }
 
   function handleBogoRunsUntilSolvedChange(checked: boolean) {
+    if (isBogoSessionLocked || hasActiveBogoSessionNow()) return;
+
     if (!checked) {
+      if (!bogoRunsUntilSolved) return;
       setBogoRunsUntilSolved(false);
+      // Changing the cap is a setup action, never a request to keep running
+      // the previous session. Clear the session synchronously through the
+      // regular reset path so no queued Bogo batch can continue.
+      resetArray();
       return;
     }
 
-    const confirmed = window.confirm(
-      "Let Bogo Sort run until it solves?\n\nThis removes the shuffle cap. It may run until the sun explodes (or until you pause or reset it).",
-    );
-    setBogoRunsUntilSolved(confirmed);
+    if (bogoRunsUntilSolved || bogoUnlimitedConfirmationRef.current) return;
+    // Native `window.confirm` is suppressed by some desktop WebViews. Keep
+    // this confirmation in the app so Windows, Linux, and macOS all expose
+    // the same deliberate setup-only decision.
+    setBogoUnlimitedConfirmation(true);
+  }
+
+  function confirmBogoRunsUntilSolved() {
+    if (
+      !bogoUnlimitedConfirmationRef.current ||
+      isBogoSessionLocked ||
+      hasActiveBogoSessionNow()
+    ) {
+      return;
+    }
+
+    setBogoRunsUntilSolved(true);
+    // This is only a configuration change for the *next* Start sorting click.
+    // Resetting also clears any stale session references before the checkbox
+    // can affect a future run.
+    resetArray();
+  }
+
+  function cancelBogoRunsUntilSolvedConfirmation() {
+    setBogoUnlimitedConfirmation(false);
   }
 
   function handleWorkloadBarAlgorithmVisibilityToggle(nextAlgorithm: BenchmarkAlgorithm) {
@@ -5045,6 +5333,17 @@ export default function Home() {
 
   function dismissIntro() {
     if (introPhaseRef.current !== "visible") return;
+
+    // The welcome screen is commonly the first click in the app. Prime audio
+    // right here as well as in the global gesture listener so an exceptionally
+    // fast first click can still unlock WKWebView before later sorting sounds.
+    if (soundVolumeRef.current > 0) {
+      try {
+        activateAudioOutput();
+      } catch {
+        // The intro remains usable when a host has no output device.
+      }
+    }
 
     // A fresh click through the first-run screen has no opener to restore.
     // Return to the logo in that case rather than leaving focus on a node that
@@ -5371,7 +5670,7 @@ export default function Home() {
                           onKeyDown={(event) => {
                             if (event.key === "Enter") event.currentTarget.blur();
                           }}
-                          disabled={isLocked || bogoRunsUntilSolved}
+                          disabled={isBogoConfigurationLocked || bogoRunsUntilSolved}
                           aria-label="Maximum Bogo Sort shuffles exact value"
                         />
                           <span className="control-number-stepper__buttons">
@@ -5380,7 +5679,7 @@ export default function Home() {
                               type="button"
                               onPointerDown={(event) => event.preventDefault()}
                               onClick={() => handleBogoAttemptLimitChange(bogoAttemptLimit + bogoSliderStep)}
-                              disabled={isLocked || bogoRunsUntilSolved || bogoAttemptLimit >= bogoAttemptMaximum}
+                              disabled={isBogoConfigurationLocked || bogoRunsUntilSolved || bogoAttemptLimit >= bogoAttemptMaximum}
                               aria-label="Increase maximum Bogo Sort shuffles"
                             >
                               <span aria-hidden="true" />
@@ -5390,7 +5689,7 @@ export default function Home() {
                               type="button"
                               onPointerDown={(event) => event.preventDefault()}
                               onClick={() => handleBogoAttemptLimitChange(bogoAttemptLimit - bogoSliderStep)}
-                              disabled={isLocked || bogoRunsUntilSolved || bogoAttemptLimit <= BOGO_MIN_ATTEMPTS}
+                              disabled={isBogoConfigurationLocked || bogoRunsUntilSolved || bogoAttemptLimit <= BOGO_MIN_ATTEMPTS}
                               aria-label="Decrease maximum Bogo Sort shuffles"
                             >
                               <span aria-hidden="true" />
@@ -5405,34 +5704,64 @@ export default function Home() {
                         step={bogoSliderStep}
                         value={bogoAttemptLimit}
                         onChange={(event) => handleBogoAttemptLimitChange(Number(event.target.value))}
-                        disabled={isLocked || bogoRunsUntilSolved}
+                        disabled={isBogoConfigurationLocked || bogoRunsUntilSolved}
                         aria-label="Maximum Bogo Sort shuffles"
                       />
                     </div>
-                    <label
-                      htmlFor="bogo-runs-until-solved"
-                      aria-label="Let Bogo Sort run until solved"
+                    <div
                       className={
                         "bogo-unlimited-warning " +
                         (bogoRunsUntilSolved ? "bogo-unlimited-warning--armed " : "") +
-                        (isLocked ? "bogo-unlimited-warning--disabled" : "")
+                        (isBogoSessionLocked ? "bogo-unlimited-warning--disabled" : "")
                       }
                     >
-                      <input
-                        id="bogo-runs-until-solved"
-                        type="checkbox"
-                        checked={bogoRunsUntilSolved}
-                        onChange={(event) => handleBogoRunsUntilSolvedChange(event.target.checked)}
-                        disabled={isLocked}
-                        aria-describedby="bogo-unlimited-warning-note"
-                      />
-                      <span>
-                        <strong>Let it run until solved</strong>
-                        <small id="bogo-unlimited-warning-note">
-                          Warning: May run until the sun explodes.
-                        </small>
-                      </span>
-                    </label>
+                      <label
+                        className="bogo-unlimited-warning__choice"
+                        htmlFor="bogo-runs-until-solved"
+                        aria-label="Let Bogo Sort run until solved"
+                      >
+                        <input
+                          id="bogo-runs-until-solved"
+                          type="checkbox"
+                          checked={bogoRunsUntilSolved}
+                          onChange={(event) => handleBogoRunsUntilSolvedChange(event.target.checked)}
+                          disabled={isBogoConfigurationLocked}
+                          aria-label="Let Bogo Sort run until solved"
+                          aria-describedby="bogo-unlimited-warning-note"
+                        />
+                        <span>
+                          <strong>Let it run until solved</strong>
+                          <small id="bogo-unlimited-warning-note">
+                            Warning: May run until the sun explodes.
+                          </small>
+                        </span>
+                      </label>
+                      {bogoUnlimitedConfirmationOpen && (
+                        <div
+                          className="bogo-unlimited-confirmation"
+                          role="group"
+                          aria-label="Confirm unlimited Bogo Sort runs"
+                        >
+                          <p>Remove the shuffle cap for the next run?</p>
+                          <div>
+                            <button
+                              className="bogo-unlimited-confirmation__confirm"
+                              type="button"
+                              onClick={confirmBogoRunsUntilSolved}
+                            >
+                              Enable unlimited
+                            </button>
+                            <button
+                              className="bogo-unlimited-confirmation__cancel"
+                              type="button"
+                              onClick={cancelBogoRunsUntilSolvedConfirmation}
+                            >
+                              Cancel
+                            </button>
+                          </div>
+                        </div>
+                      )}
+                    </div>
                   </>
                 )}
 
@@ -5460,6 +5789,7 @@ export default function Home() {
                       onKeyDown={(event) => {
                         if (event.key === "Enter") event.currentTarget.blur();
                       }}
+                      disabled={isBogoConfigurationLocked}
                       aria-label="Array size exact value"
                     />
                     <span className="control-number-stepper__buttons">
@@ -5468,7 +5798,7 @@ export default function Home() {
                         type="button"
                         onPointerDown={(event) => event.preventDefault()}
                         onClick={() => handleArraySizeChange(arraySize + 1)}
-                        disabled={arraySize >= maximumArraySize}
+                        disabled={isBogoConfigurationLocked || arraySize >= maximumArraySize}
                         aria-label="Increase array size"
                       >
                         <span aria-hidden="true" />
@@ -5478,7 +5808,7 @@ export default function Home() {
                         type="button"
                         onPointerDown={(event) => event.preventDefault()}
                         onClick={() => handleArraySizeChange(arraySize - 1)}
-                        disabled={arraySize <= minimumArraySize}
+                        disabled={isBogoConfigurationLocked || arraySize <= minimumArraySize}
                         aria-label="Decrease array size"
                       >
                         <span aria-hidden="true" />
@@ -5493,6 +5823,7 @@ export default function Home() {
                   step="1"
                   value={arraySize}
                   onChange={(event) => handleArraySizeChange(Number(event.target.value))}
+                  disabled={isBogoConfigurationLocked}
                   aria-label="Array size"
                 />
               </div>
@@ -5579,7 +5910,12 @@ export default function Home() {
               </div>
 
               <div className={"button-row " + (isBogo ? "button-row--bogo" : "")}>
-                <button className="button button--primary" type="button" onClick={() => handlePrimaryAction()}>
+                <button
+                  className="button button--primary"
+                  type="button"
+                  onClick={() => handlePrimaryAction()}
+                  disabled={isBogo && bogoUnlimitedConfirmationOpen}
+                >
                   <span className={"button-pulse " + (runState === "running" ? "button-pulse--active" : "")} aria-hidden="true" />
                   {primaryLabel}
                 </button>
@@ -5632,11 +5968,23 @@ export default function Home() {
               </div>
             </div>
 
-            {algorithm === "insertion" && currentStep.key !== null && currentStep.gapIndex !== null && (
-              <div className="held-key" aria-hidden="true">
+            {algorithm === "insertion" && (
+              <div
+                className={
+                  "held-key " +
+                  (currentStep.key !== null && currentStep.gapIndex !== null
+                    ? ""
+                    : "held-key--reserved")
+                }
+                aria-hidden="true"
+              >
                 <span>stored key</span>
-                <strong>{currentStep.key}</strong>
-                <em>gap at slot {currentStep.gapIndex + 1}</em>
+                <strong>{currentStep.key ?? ""}</strong>
+                <em>
+                  {currentStep.gapIndex === null
+                    ? "gap ready for the next key"
+                    : "gap at slot " + (currentStep.gapIndex + 1)}
+                </em>
               </div>
             )}
             <div className="chart-stage" role="img" aria-label={"Array values: " + displayValues + ". " + currentStep.message}>
