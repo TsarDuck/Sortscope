@@ -301,7 +301,8 @@ const BOGO_RATE_SAMPLE_INTERVAL = 250;
 const BOGO_EXPECTED_RATE_FREEZE_AFTER = 2_500;
 // A fast Bogo run is deliberately CPU-heavy, but it must still return to the
 // desktop WebView often enough to paint and accept pause/reset input.
-const BOGO_FAST_BATCH_BUDGET_MILLISECONDS = 6;
+const BOGO_FAST_BATCH_BUDGET_MILLISECONDS = 8;
+const BOGO_FAST_COOPERATIVE_YIELD_MILLISECONDS = 34;
 // Fast Bogo batches can execute several times between display refreshes. Keep
 // the simulation hot, but only snapshot its mutable session at a readable
 // cadence; each snapshot otherwise re-renders the entire teaching surface.
@@ -3102,6 +3103,18 @@ export default function Home() {
     completionSweepSourcesRef.current.clear();
   }
 
+  function stopLiveSortingToneSound() {
+    liveToneSourcesRef.current.forEach((source) => {
+      source.onended = null;
+      try {
+        source.stop();
+      } catch {
+        // A source that already ended cannot contribute any more work.
+      }
+    });
+    liveToneSourcesRef.current.clear();
+  }
+
   function startCompletionSweep(sweepValues: number[], duration: number) {
     stopCompletionSweepSound();
     const sweepRun = completionSweepRunRef.current + 1;
@@ -3254,6 +3267,9 @@ export default function Home() {
     const context = audioContextRef.current;
     if (!context || context.state !== "running" || step.values.length === 0) return;
 
+    const volume = soundVolumeRef.current;
+    if (volume <= 0) return;
+
     const now = context.currentTime;
     const cooldown = isLargeArray ? 0.045 : 0.028;
     if (now - lastToneTimeRef.current < cooldown) return;
@@ -3271,7 +3287,7 @@ export default function Home() {
       step.phase === "merge";
     const targetDuration = isImpact ? 0.052 : 0.034;
     const basePeakGain = isImpact ? 0.2 : 0.14;
-    const peakGain = basePeakGain * (soundVolume / 100) ** 2.5;
+    const peakGain = basePeakGain * (volume / 100) ** 2.5;
     const frequency = getSortingToneFrequency(activeValue);
 
     // Two oscillators make up each full musical voice. A hard cap keeps a
@@ -3343,7 +3359,8 @@ export default function Home() {
       if (
         completionSweepRunRef.current !== sweepRun ||
         audioContextRef.current !== context ||
-        context.state !== "running"
+        context.state !== "running" ||
+        soundVolumeRef.current <= 0
       ) {
         return;
       }
@@ -3396,7 +3413,8 @@ export default function Home() {
 
   function playBogoShuffleTexture(attempt: number) {
     const context = audioContextRef.current;
-    if (!context || context.state !== "running" || soundVolume <= 0) return;
+    const volume = soundVolumeRef.current;
+    if (!context || context.state !== "running" || volume <= 0) return;
 
     const now = context.currentTime;
     if (now - lastBogoTextureTimeRef.current < 0.13) return;
@@ -3408,7 +3426,7 @@ export default function Home() {
     // one-oscillator bandpass texture was being attenuated enough to sound
     // markedly quieter than the rest of the visualizer.
     const frequency = 293.66 + motion * 340;
-    const peakGain = 0.2 * (soundVolume / 100) ** 2.5;
+    const peakGain = 0.2 * (volume / 100) ** 2.5;
     if (liveToneSourcesRef.current.size + 2 > MAX_LIVE_TONE_SOURCES) return;
     playMusicalVoice(
       context,
@@ -3551,6 +3569,16 @@ export default function Home() {
     let timer: number | undefined;
     let animationFrame: number | undefined;
     let nextVisualUpdateAt = 0;
+    let nextCooperativeYieldAt = performance.now();
+
+    const isInputPending = () => {
+      if (typeof navigator === "undefined") return false;
+
+      const scheduling = (navigator as Navigator & {
+        scheduling?: { isInputPending?: () => boolean };
+      }).scheduling;
+      return scheduling?.isInputPending?.() ?? false;
+    };
 
     const scheduleNextBatch = () => {
       if (bogoSlowMotionDelay > 0) {
@@ -3558,10 +3586,21 @@ export default function Home() {
         return;
       }
 
-      // `setTimeout(..., 0)` keeps the main thread continuously occupied in
-      // WebKit/WKWebView. A frame boundary preserves high-speed Bogo while
-      // giving the renderer and input queue a predictable turn each frame.
-      animationFrame = window.requestAnimationFrame(runBatch);
+      const now = performance.now();
+      if (isInputPending() || now >= nextCooperativeYieldAt) {
+        // Browser timers let this runner use more than one small CPU slice per
+        // rendered frame, which materially improves Bogo throughput. Every
+        // short burst still ends at a frame boundary (or earlier when Chromium
+        // reports queued input), keeping the desktop UI responsive.
+        animationFrame = window.requestAnimationFrame(() => {
+          nextCooperativeYieldAt =
+            performance.now() + BOGO_FAST_COOPERATIVE_YIELD_MILLISECONDS;
+          runBatch();
+        });
+        return;
+      }
+
+      timer = window.setTimeout(runBatch, 0);
     };
 
     const runBatch = () => {
@@ -3746,7 +3785,16 @@ export default function Home() {
   }
 
   function handleSoundVolumeChange(nextVolume: number) {
-    if (nextVolume > 0 && soundVolume === 0) activateAudioOutput();
+    // Keep asynchronous interval/sweep callbacks in sync immediately; waiting
+    // for React to repaint can leave one more high-speed tone queued after a
+    // person has muted the visualizer.
+    soundVolumeRef.current = nextVolume;
+    if (nextVolume <= 0) {
+      stopCompletionSweepSound();
+      stopLiveSortingToneSound();
+    } else if (soundVolume === 0) {
+      activateAudioOutput();
+    }
     setSoundVolume(nextVolume);
   }
 

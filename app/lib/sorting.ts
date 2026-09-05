@@ -621,10 +621,23 @@ export function advanceBogoSession(
   session.writes += random === undefined
     ? shuffleInPlaceWithMathRandom(session.values)
     : shuffleInPlace(session.values, random);
-  const check = countSortedCheck(session.values);
-  session.comparisons += check.comparisons;
 
-  if (check.sorted) {
+  // This is the live runner's hottest path. Keep the initial-session helper
+  // allocation-friendly, but avoid allocating a `{ sorted, comparisons }`
+  // result for every single shuffle. The comparison accounting remains
+  // identical: stop at the first descending adjacent pair.
+  let comparisons = 0;
+  let sorted = true;
+  for (let index = 1; index < session.values.length; index += 1) {
+    comparisons += 1;
+    if (session.values[index - 1] > session.values[index]) {
+      sorted = false;
+      break;
+    }
+  }
+  session.comparisons += comparisons;
+
+  if (sorted) {
     session.done = true;
     return;
   }
