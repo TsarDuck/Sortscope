@@ -2844,6 +2844,14 @@ input:focus-visible {
   animation: bogo-celebration-pop 420ms cubic-bezier(.19, 1.45, .35, 1) both;
 }
 
+.bogo-celebration--fading .bogo-confetti {
+  animation: bogo-celebration-fade-out 560ms ease-out both;
+}
+
+.bogo-celebration--fading .bogo-celebration__message {
+  animation: bogo-celebration-fade-out 560ms cubic-bezier(.22, .61, .36, 1) both;
+}
+
 .bogo-celebration__message span,
 .bogo-celebration__message strong {
   display: block;
@@ -2892,6 +2900,18 @@ input:focus-visible {
   to {
     opacity: 1;
     transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes bogo-celebration-fade-out {
+  from {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+
+  to {
+    opacity: 0;
+    transform: translateY(-8px) scale(0.97);
   }
 }
 

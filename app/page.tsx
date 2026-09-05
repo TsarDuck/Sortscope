@@ -172,6 +172,10 @@ const COMPLETION_SWEEP_MILLISECONDS_PER_BAR = 5;
 const COMPLETION_SWEEP_AUDIO_VISUAL_LEAD = 24;
 const COMPLETION_SWEEP_RELEASE_TAIL = 70;
 const BOGO_COMPLETION_SWEEP_DELAY = 720;
+// Keep the win message on screen long enough to read, then let its exit
+// animation finish before removing it from the DOM.
+const BOGO_CELEBRATION_VISIBLE_DURATION = 4_800;
+const BOGO_CELEBRATION_FADE_DURATION = 560;
 const THEORY_BENCHMARK_SIZES = [256, 1_024, 4_096, 16_384, 65_536, 262_144, 1_048_576];
 const BENCHMARK_ALGORITHMS = [
   { key: "bubble", label: "Bubble sort", className: "bubble" },
@@ -1645,7 +1649,9 @@ export default function Home() {
     "calibrating" | "measured" | "modeled"
   >("calibrating");
   const [bogoElapsedMilliseconds, setBogoElapsedMilliseconds] = useState(0);
-  const [bogoCelebration, setBogoCelebration] = useState(false);
+  const [bogoCelebrationPhase, setBogoCelebrationPhase] = useState<
+    "hidden" | "visible" | "fading"
+  >("hidden");
   const [completionSweepActive, setCompletionSweepActive] = useState(false);
   const [soundVolume, setSoundVolume] = useState(50);
   const [practiceStepIndex, setPracticeStepIndex] = useState(0);
@@ -1952,10 +1958,22 @@ export default function Home() {
     }
 
     if (soundEnabled) playBogoVictorySound();
-    setBogoCelebration(true);
-    const timer = window.setTimeout(() => setBogoCelebration(false), 4800);
-    return () => window.clearTimeout(timer);
-  }, [currentStep.phase, isBogo, runState]);
+    setBogoCelebrationPhase("visible");
+    const celebrationFadeDuration = prefersReducedMotion ? 0 : BOGO_CELEBRATION_FADE_DURATION;
+    const fadeTimer = window.setTimeout(
+      () => setBogoCelebrationPhase("fading"),
+      BOGO_CELEBRATION_VISIBLE_DURATION,
+    );
+    const unmountTimer = window.setTimeout(
+      () => setBogoCelebrationPhase("hidden"),
+      BOGO_CELEBRATION_VISIBLE_DURATION + celebrationFadeDuration,
+    );
+
+    return () => {
+      window.clearTimeout(fadeTimer);
+      window.clearTimeout(unmountTimer);
+    };
+  }, [currentStep.phase, isBogo, prefersReducedMotion, runState]);
 
   useEffect(() => {
     const hasFinishedSorting = runState === "complete" && currentStep.phase === "complete";
@@ -2654,7 +2672,7 @@ export default function Home() {
     resetCompletionSweep();
     resetBogoElapsedTimer();
     const nextValues = makeRandomArray(size);
-    setBogoCelebration(false);
+    setBogoCelebrationPhase("hidden");
     bogoSessionRef.current = null;
     bogoRateSampleRef.current = null;
     setBogoLiveStep(null);
@@ -2669,7 +2687,7 @@ export default function Home() {
   function resetArray() {
     resetCompletionSweep();
     resetBogoElapsedTimer();
-    setBogoCelebration(false);
+    setBogoCelebrationPhase("hidden");
     bogoSessionRef.current = null;
     bogoRateSampleRef.current = null;
     setBogoLiveStep(null);
@@ -3095,7 +3113,7 @@ export default function Home() {
   function handleAlgorithmChange(nextAlgorithm: AlgorithmId) {
     resetCompletionSweep();
     resetBogoElapsedTimer();
-    setBogoCelebration(false);
+    setBogoCelebrationPhase("hidden");
     bogoSessionRef.current = null;
     bogoRateSampleRef.current = null;
     setBogoLiveStep(null);
@@ -3151,7 +3169,7 @@ export default function Home() {
     const audioContext = soundEnabled ? ensureAudioContext() : null;
     resetCompletionSweep();
     resetBogoElapsedTimer();
-    setBogoCelebration(false);
+    setBogoCelebrationPhase("hidden");
     if (algorithm === "bogo") {
       if (audioContext) {
         // Start one texture in the click gesture. Fast Bogo batches can finish
@@ -3516,9 +3534,13 @@ export default function Home() {
     <main className="sortlab-app">
       <div className="page-glow page-glow--one" aria-hidden="true" />
       <div className="page-glow page-glow--two" aria-hidden="true" />
-      {bogoCelebration && (
+      {bogoCelebrationPhase !== "hidden" && (
         <div
-          className={"bogo-celebration " + (prefersReducedMotion ? "bogo-celebration--reduced" : "")}
+          className={
+            "bogo-celebration " +
+            (bogoCelebrationPhase === "fading" ? "bogo-celebration--fading " : "") +
+            (prefersReducedMotion ? "bogo-celebration--reduced" : "")
+          }
           role="status"
           aria-live="polite"
         >
