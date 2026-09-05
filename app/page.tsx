@@ -1988,9 +1988,6 @@ export default function Home() {
     );
   }, [algorithm, practiceFinished, practiceGroups]);
   const algorithmLabel = algorithmDetails.label;
-  const learnTitle =
-    algorithmDetails.learnTitle.slice(0, 1).toLocaleLowerCase() +
-    algorithmDetails.learnTitle.slice(1);
   const stageLabel = algorithmDetails.stageLabel;
   const totalStages = isBogo
     ? bogoRunsUntilSolved
@@ -2269,10 +2266,14 @@ export default function Home() {
   const playbackDensity = isBogo ? 48 : 1;
   // Use the internal 1–200 playback range for deterministic sorts, while the
   // visible control remains a simple 1–100% scale.
-  const speedDelay =
-    playbackSpeed <= 100
-      ? Math.round(4 + 716 * (1 - (playbackSpeed - 1) / 99) ** 1.3)
-      : Math.max(1, Math.round(4 * (1 - (playbackSpeed - 100) / (MAX_SPEED - 100)) ** 2));
+  // Shape one continuous curve across the full internal 1–200 range. The
+  // former two-piece curve had already collapsed to the frame-delay floor by
+  // 51%, so the visible 51–100% half of the control could barely affect the
+  // actual runner. Keeping the curve continuous preserves the deliberately
+  // slow lower half while giving every faster value a distinct cadence.
+  const speedDelay = Math.round(
+    4 + 716 * (1 - (playbackSpeed - 1) / (MAX_SPEED - 1)) ** 1.3,
+  );
   // Non-Bogo runs share the same animation floor through the deliberately
   // slow first half of the dial. This keeps a lower speed meaningfully slow
   // regardless of array size instead of making short rows race ahead.
@@ -3264,7 +3265,11 @@ export default function Home() {
       setPracticeFeedback(
         "Gamble " + String(nextAttempts) + " was not sorted. One order out of 24 wins—try again.",
       );
-      playBogoPracticeCasinoSound("fail", () => setBogoPracticeBusy(false));
+      // The cards have already landed, so a failed gamble should not make the
+      // learner wait through its whole sting before trying again. A following
+      // gamble clears this one-shot player before it starts the next shuffle.
+      setBogoPracticeBusy(false);
+      playBogoPracticeCasinoSound("fail", () => undefined);
     }, () => {
       if (bogoPracticeRollRunRef.current !== rollRun) return;
       setBogoPracticeRolling(true);
@@ -4196,6 +4201,32 @@ export default function Home() {
             )}
 
             <div className={"controls " + (isBogo ? "controls--bogo" : "")} aria-label="Visualizer controls">
+              {isBogo && (
+                <aside className="bogo-runtime-estimate" aria-live="polite">
+                  <span>EXPECTED AVERAGE</span>
+                  <strong>{bogoExpectedTime}</strong>
+                  <small>
+                    One sorted order in {formatBogoShuffleEstimate(bogoExpectedShuffles)} shuffles on average. {" "}
+                    {bogoExpectedRateSource === "measured"
+                      ? "Locked from the first 2.5 seconds at " + formatBogoShuffleRate(bogoExpectedShuffleRate) + "."
+                      : bogoExpectedRateSource === "modeled"
+                        ? "This run ended before calibration, so this estimate is locked to the start-up model at " + formatBogoShuffleRate(bogoExpectedShuffleRate) + "."
+                        : runState === "paused"
+                          ? "Calibration is paused with the run and locks after 2.5 seconds of active time."
+                          : runState === "running"
+                            ? "Calibrating the first 2.5 seconds at a provisional " + formatBogoShuffleRate(bogoExpectedShuffleRate) + "."
+                            : "At " + speed + "% speed, the runner is modeled at " + formatBogoShuffleRate(bogoExpectedShuffleRate) + ". It locks after the first 2.5 seconds of a run."}{" "}
+                    Individual runs can be much luckier or unluckier.
+                  </small>
+                  {runState === "complete" && currentStep.phase === "complete" && currentStep.pass > 0 && (
+                    <small className="bogo-runtime-estimate__result">
+                      This run found it after {currentStep.pass.toLocaleString("en-US")} shuffle
+                      {currentStep.pass === 1 ? "" : "s"}.
+                    </small>
+                  )}
+                </aside>
+              )}
+
               <label className="control-field control-field--arrangement">
                 <span className="control-label">Starting arrangement</span>
                 <select
@@ -4265,29 +4296,6 @@ export default function Home() {
                         </small>
                       </span>
                     </label>
-                    <aside className="bogo-runtime-estimate" aria-live="polite">
-                      <span>EXPECTED AVERAGE</span>
-                      <strong>{bogoExpectedTime}</strong>
-                      <small>
-                        One sorted order in {formatBogoShuffleEstimate(bogoExpectedShuffles)} shuffles on average. {" "}
-                        {bogoExpectedRateSource === "measured"
-                          ? "Locked from the first 2.5 seconds at " + formatBogoShuffleRate(bogoExpectedShuffleRate) + "."
-                          : bogoExpectedRateSource === "modeled"
-                            ? "This run ended before calibration, so this estimate is locked to the start-up model at " + formatBogoShuffleRate(bogoExpectedShuffleRate) + "."
-                            : runState === "paused"
-                              ? "Calibration is paused with the run and locks after 2.5 seconds of active time."
-                              : runState === "running"
-                                ? "Calibrating the first 2.5 seconds at a provisional " + formatBogoShuffleRate(bogoExpectedShuffleRate) + "."
-                                : "At " + speed + "% speed, the runner is modeled at " + formatBogoShuffleRate(bogoExpectedShuffleRate) + ". It locks after the first 2.5 seconds of a run."}{" "}
-                        Individual runs can be much luckier or unluckier.
-                      </small>
-                      {runState === "complete" && currentStep.phase === "complete" && currentStep.pass > 0 && (
-                        <small className="bogo-runtime-estimate__result">
-                          This run found it after {currentStep.pass.toLocaleString("en-US")} shuffle
-                          {currentStep.pass === 1 ? "" : "s"}.
-                        </small>
-                      )}
-                    </aside>
                   </>
                 )}
 
@@ -4612,7 +4620,9 @@ export default function Home() {
           <div className="learn-copy">
             <p className="eyebrow">{algorithmDetails.eyebrow}</p>
             <h2 id="learn-title">
-              <span className="learn-copy__algorithm-name">{algorithmLabel}</span>, {learnTitle}
+              <span className="learn-copy__algorithm-name">{algorithmLabel}</span>
+              <span className="learn-copy__title-divider" aria-hidden="true" />
+              {algorithmDetails.learnTitle}
             </h2>
             <div className="learn-copy__explanation">
               {algorithmDetails.learnCopy.map((paragraph) => (
@@ -4727,9 +4737,7 @@ export default function Home() {
                       : "Lucky sorted order found"
                     : bogoPracticeRolling
                       ? "Cards are rolling through fresh orders"
-                      : bogoPracticeBusy
-                        ? "Waiting for the casino sound to finish"
-                        : "One sorted order out of 24 possible rows"}
+                      : "One sorted order out of 24 possible rows"}
                 </small>
               </div>
             )}
@@ -5030,7 +5038,7 @@ export default function Home() {
                       </button>
                     )}
                     <span className="sr-only" id="bogo-practice-gamble-help">
-                      Each gamble rolls during the shuffle sound, then plays a result sound. The button remains unavailable until both sounds have finished.
+                      Each gamble rolls during the shuffle sound, then plays a result sound. After a failed shuffle lands, you can gamble again immediately; starting again stops the previous failure sound.
                     </span>
                   </>
                 ) : null

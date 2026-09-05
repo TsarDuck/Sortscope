@@ -651,6 +651,7 @@ button:disabled {
 }
 
 .bogo-runtime-estimate {
+  flex: 0 0 100%;
   display: grid;
   gap: 3px;
   padding: 11px 12px;
@@ -1449,6 +1450,15 @@ input:focus-visible {
 
 .learn-copy__algorithm-name {
   color: #b7afff;
+}
+
+.learn-copy__title-divider {
+  display: inline-block;
+  height: 0.78em;
+  margin: 0 0.24em;
+  border-left: 0.055em solid rgba(183, 175, 255, 0.62);
+  transform: translateY(0.06em);
+  vertical-align: 0.02em;
 }
 
 .learn-copy__explanation {
