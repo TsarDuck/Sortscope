@@ -38,6 +38,12 @@ jobs:
           - label: Linux x64
             platform: ubuntu-22.04
             args: --bundles appimage
+          - label: macOS Apple Silicon
+            platform: macos-latest
+            args: --bundles dmg --target aarch64-apple-darwin
+          - label: macOS Intel
+            platform: macos-latest
+            args: --bundles dmg --target x86_64-apple-darwin
     steps:
       - uses: actions/checkout@v4
       - name: Install Linux desktop build dependencies
@@ -50,10 +56,16 @@ jobs:
           node-version: 22
           cache: npm
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          # Tauri's documented macOS matrix installs both release targets.
+          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
       - uses: swatinem/rust-cache@v2
         with:
           workspaces: ./src-tauri -> target
       - run: npm ci
+      - name: Enable ad-hoc macOS signing
+        if: matrix.platform == 'macos-latest'
+        run: echo "APPLE_SIGNING_IDENTITY=-" >> "$GITHUB_ENV"
       - uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -61,7 +73,8 @@ jobs:
           tagName: v__VERSION__
           releaseName: Sortscope v__VERSION__
           releaseBody: |
-            Download the Windows setup file on Windows, or the AppImage on Linux.
+            Download the Windows setup file on Windows, the AppImage on Linux,
+            or the macOS DMG that matches your Mac's processor.
             The app works fully offline after installation.
           releaseDraft: false
           prerelease: false
