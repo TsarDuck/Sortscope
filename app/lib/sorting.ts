@@ -13,6 +13,7 @@ export type AlgorithmId =
 export type StepPhase =
   | "ready"
   | "select"
+  | "scan"
   | "compare"
   | "shift"
   | "insert"
@@ -47,6 +48,12 @@ export type SortStep = {
    * or its proof that a pivot has been permanently placed.
    */
   visualSettled?: number[];
+  /**
+   * The pivot currently driving a Quick Sort partition. This is visual state
+   * only: it lets the renderer keep the pivot visible even when its value is
+   * already sitting in a final-looking slot.
+   */
+  pivotIndex?: number;
   rangeStart?: number;
   rangeEnd?: number;
   /** Powersort's tree depth for the boundary currently being scheduled. */
@@ -128,10 +135,12 @@ export function buildInsertionSteps(
   for (let i = 1; i < values.length; i += 1) {
     const key = values[i];
     let j = i - 1;
-    // During a shift the in-place working array temporarily contains a
-    // duplicate while `key` is held aside. This visual-only index tells the
-    // renderer where that held key belongs until the write below resolves it.
-    let heldKeyGapIndex: number | null = null;
+    // The implementation keeps the copied key in the working array until the
+    // final write, while the visual model lifts it out immediately. The gap
+    // begins at the key's old slot and travels left as larger values shift
+    // right, so the learner can follow the actual insertion mechanism.
+    let heldKeyGapIndex = i;
+    let compactShiftCount = 0;
 
     steps.push({
       values: [...values],
@@ -141,11 +150,13 @@ export function buildInsertionSteps(
       comparing: null,
       shifting: null,
       inserting: null,
-      gapIndex: null,
+      gapIndex: heldKeyGapIndex,
       sortedCount: i,
       comparisons,
       writes,
-      message: "Pass " + i + ": select " + key + " as the key.",
+      message:
+        "Pass " + i + ": store " + key + " as the key and open a gap at position " +
+        (i + 1) + ".",
     });
 
     while (j >= 0) {
@@ -172,6 +183,7 @@ export function buildInsertionSteps(
       values[j + 1] = values[j];
       writes += 1;
       heldKeyGapIndex = j;
+      compactShiftCount += 1;
       if (!compactFrames) {
         steps.push({
           values: [...values],
@@ -185,11 +197,41 @@ export function buildInsertionSteps(
           sortedCount: i,
           comparisons,
           writes,
-          message: values[j] + " shifts right to make room for " + key + ".",
+          message:
+            values[j] +
+            " shifts right; the open gap moves to position " +
+            (heldKeyGapIndex + 1) +
+            ".",
         });
       }
 
       j -= 1;
+    }
+
+    // Compact timelines must still include a post-shift frame. Without it a
+    // dense array appears to move the held key directly into its destination.
+    if (compactFrames && compactShiftCount > 0) {
+      steps.push({
+        values: [...values],
+        pass: i,
+        phase: "shift",
+        key,
+        comparing: null,
+        shifting: j + 1,
+        inserting: null,
+        gapIndex: heldKeyGapIndex,
+        sortedCount: i,
+        comparisons,
+        writes,
+        message:
+          "Shift " +
+          compactShiftCount +
+          " larger " +
+          (compactShiftCount === 1 ? "value" : "values") +
+          " right; the open gap is now at position " +
+          (heldKeyGapIndex + 1) +
+          ".",
+      });
     }
 
     values[j + 1] = key;
@@ -206,7 +248,7 @@ export function buildInsertionSteps(
       sortedCount: i + 1,
       comparisons,
       writes,
-      message: "Insert " + key + " into position " + (j + 1) + ".",
+      message: "Place stored key " + key + " into the gap at position " + (j + 1) + ".",
     });
   }
 
@@ -242,6 +284,7 @@ type StepDetails = Pick<
       | "gapIndex"
       | "sortedCount"
       | "settled"
+      | "pivotIndex"
       | "rangeStart"
       | "rangeEnd"
       | "nodePower"
@@ -292,7 +335,6 @@ export function buildSelectionSteps(source: number[]): SortStep[] {
   const steps = [createInitialStep(source, "selection")];
   const values = [...source];
   const settled = new Set<number>();
-  const compactFrames = values.length > COMPACT_FRAME_THRESHOLD;
   let comparisons = 0;
   let writes = 0;
 
@@ -313,41 +355,31 @@ export function buildSelectionSteps(source: number[]): SortStep[] {
       }),
     );
 
+    // A selection pass compares the entire unsorted tail before it can make
+    // its single placement. Represent that search as one visual-only scan
+    // frame rather than a dense stream of almost identical snapshots. The
+    // real comparisons are still counted below, so this metadata never
+    // changes the algorithm's work totals.
+    steps.push(
+      makeStep(values, {
+        pass,
+        phase: "scan",
+        key: values[start],
+        inserting: start,
+        rangeStart: start,
+        rangeEnd: values.length,
+        comparisons,
+        writes,
+        settled: getSettledIndices(settled),
+        message: "Scan every remaining value to find the next smallest one.",
+      }),
+    );
+
     for (let scan = start + 1; scan < values.length; scan += 1) {
       comparisons += 1;
-      if (!compactFrames) {
-        steps.push(
-          makeStep(values, {
-            pass,
-            phase: "compare",
-            comparing: scan,
-            shifting: minimum,
-            inserting: start,
-            comparisons,
-            writes,
-            settled: getSettledIndices(settled),
-            message: "Compare the next value with the current minimum.",
-          }),
-        );
-      }
 
       if (values[scan] < values[minimum]) {
         minimum = scan;
-        if (!compactFrames) {
-          steps.push(
-            makeStep(values, {
-              pass,
-              phase: "select",
-              comparing: scan,
-              inserting: start,
-              key: values[minimum],
-              comparisons,
-              writes,
-              settled: getSettledIndices(settled),
-              message: values[minimum] + " is the new smallest remaining value.",
-            }),
-          );
-        }
       }
     }
 
@@ -1017,6 +1049,7 @@ export function buildQuickSortSteps(source: number[]): SortStep[] {
         phase: "select",
         key: pivot,
         inserting: high,
+        pivotIndex: high,
         comparisons,
         writes,
         settled: getSettledIndices(settled),
@@ -1034,6 +1067,7 @@ export function buildQuickSortSteps(source: number[]): SortStep[] {
             key: pivot,
             comparing: scan,
             shifting: store,
+            pivotIndex: high,
             comparisons,
             writes,
             settled: getSettledIndices(settled),
@@ -1054,6 +1088,7 @@ export function buildQuickSortSteps(source: number[]): SortStep[] {
                 key: pivot,
                 comparing: scan,
                 shifting: store,
+                pivotIndex: high,
                 comparisons,
                 writes,
                 settled: getSettledIndices(settled),
@@ -1077,6 +1112,7 @@ export function buildQuickSortSteps(source: number[]): SortStep[] {
         phase: "insert",
         key: pivot,
         inserting: store,
+        pivotIndex: store,
         comparisons,
         writes,
         settled: getSettledIndices(settled),

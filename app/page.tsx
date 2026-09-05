@@ -78,6 +78,7 @@ type RunState = "ready" | "running" | "paused" | "complete";
 type StepPhase =
   | "ready"
   | "select"
+  | "scan"
   | "compare"
   | "shift"
   | "insert"
@@ -97,6 +98,7 @@ type BenchmarkTab = "table" | "bars";
 type AlgorithmCardTab = "walkthrough" | "python";
 type IntroPhase = "visible" | "exiting" | "hidden";
 type BogoPracticeCasinoSound = "entry" | "shuffle" | "fail" | "success";
+type WorkloadBarTransitionMap = Partial<Record<BenchmarkAlgorithm, number>>;
 
 type PracticeGroupTone = "cyan" | "violet" | "mint" | "gold";
 
@@ -162,6 +164,8 @@ type SortStep = {
   message: string;
   settled?: number[];
   visualSettled?: number[];
+  /** The current Quick Sort pivot's array slot for renderer-only emphasis. */
+  pivotIndex?: number;
   rangeStart?: number;
   rangeEnd?: number;
   nodePower?: number;
@@ -178,8 +182,12 @@ const AUDIBLE_PHASES: StepPhase[] = [
   "shuffle",
 ];
 
+// The initial Bogo demo should be small enough to understand at a glance.
+// Keep DEFAULT_ARRAY_SIZE separate because it also marks the point where a
+// number of visual and pacing optimizations begin.
+const INITIAL_ARRAY_SIZE = 4;
 const DEFAULT_ARRAY_SIZE = 24;
-const DEFAULT_SPEED = 62;
+const DEFAULT_SPEED = 50;
 // The interface stays on a familiar 1–100% scale while deterministic sorts
 // keep the wider playback range that makes the top end feel responsive.
 const MAX_SPEED = 200;
@@ -248,9 +256,9 @@ const BOGO_STANDARD_MAX_ATTEMPTS = 999_999_999;
 const BOGO_PRACTICE_INITIAL_VALUES = [4, 2, 1, 3];
 const BOGO_PRACTICE_ROLL_INTERVAL = 52;
 // The supplied casino clips are mastered a little hotter than the synthesized
-// sort tones. Play them at 58% of the selected master volume at every slider
+// sort tones. Play them at 35% of the selected master volume at every slider
 // setting, while preserving the slider's full 0–100% behavior.
-const BOGO_PRACTICE_CASINO_GAIN = 0.58;
+const BOGO_PRACTICE_CASINO_GAIN = 0.35;
 // Native media can take a moment to begin under load. Once a clip has actually
 // started, it is always allowed to reach its own `ended` event; this watchdog
 // only gives a genuinely unavailable player a graceful, timed visual fallback.
@@ -273,10 +281,7 @@ const BOGO_EXPECTED_RATE_FREEZE_AFTER = 2_500;
 // A small buffer makes a direct block drop forgiving without swallowing the
 // dedicated gap that sits between adjacent blocks.
 const PRACTICE_DIRECT_DROP_HIT_SLOP = 8;
-const INITIAL_VALUES = [
-  17, 5, 22, 8, 19, 3, 14, 24, 1, 12, 7, 20, 10, 23, 4, 16, 9, 21, 2, 18,
-  6, 15, 11, 13,
-];
+const INITIAL_VALUES = [4, 2, 1, 3];
 const BOGO_CONFETTI_COLORS = ["#ffe98e", "#a9f2be", "#8ee6ff", "#cbb8ff", "#ff9fba", "#ffbd82"];
 const BOGO_CONFETTI = Array.from({ length: 64 }, (_, index) => ({
   id: index,
@@ -1832,11 +1837,12 @@ function buildInsertionSteps(source: number[]): SortStep[] {
   for (let i = 1; i < values.length; i += 1) {
     const key = values[i];
     let j = i - 1;
-    // `values` intentionally keeps the copied value at the key's old slot
-    // while a real insertion pass shifts items right. Keep the visual hole
-    // alongside that working representation so a following compare frame can
-    // draw the held key there instead of momentarily showing a duplicate.
-    let heldKeyGapIndex: number | null = null;
+    // The implementation keeps the copied key in the working array until the
+    // final write, but the visual model lifts it out immediately. That gives
+    // the learner a real empty slot to follow as each larger value shifts
+    // right, rather than making the key appear to teleport into place.
+    let heldKeyGapIndex = i;
+    let compactShiftCount = 0;
 
     steps.push({
       values: [...values],
@@ -1846,11 +1852,13 @@ function buildInsertionSteps(source: number[]): SortStep[] {
       comparing: null,
       shifting: null,
       inserting: null,
-      gapIndex: null,
+      gapIndex: heldKeyGapIndex,
       sortedCount: i,
       comparisons,
       writes,
-      message: "Pass " + i + ": select " + key + " as the key.",
+      message:
+        "Pass " + i + ": store " + key + " as the key and open a gap at position " +
+        (i + 1) + ".",
     });
 
     while (j >= 0) {
@@ -1877,6 +1885,7 @@ function buildInsertionSteps(source: number[]): SortStep[] {
       values[j + 1] = values[j];
       writes += 1;
       heldKeyGapIndex = j;
+      compactShiftCount += 1;
       if (!useCompactFrames) {
         steps.push({
           values: [...values],
@@ -1890,11 +1899,42 @@ function buildInsertionSteps(source: number[]): SortStep[] {
           sortedCount: i,
           comparisons,
           writes,
-          message: values[j] + " shifts right to make room for " + key + ".",
+          message:
+            values[j] +
+            " shifts right; the open gap moves to position " +
+            (heldKeyGapIndex + 1) +
+            ".",
         });
       }
 
       j -= 1;
+    }
+
+    // Dense arrays still need to teach the key-and-gap motion. Keep their
+    // compact timeline bounded, but retain one post-shift frame before the
+    // placement frame so a long pass can never look like a direct teleport.
+    if (useCompactFrames && compactShiftCount > 0) {
+      steps.push({
+        values: [...values],
+        pass: i,
+        phase: "shift",
+        key,
+        comparing: null,
+        shifting: j + 1,
+        inserting: null,
+        gapIndex: heldKeyGapIndex,
+        sortedCount: i,
+        comparisons,
+        writes,
+        message:
+          "Shift " +
+          compactShiftCount +
+          " larger " +
+          (compactShiftCount === 1 ? "value" : "values") +
+          " right; the open gap is now at position " +
+          (heldKeyGapIndex + 1) +
+          ".",
+      });
     }
 
     values[j + 1] = key;
@@ -1911,7 +1951,7 @@ function buildInsertionSteps(source: number[]): SortStep[] {
       sortedCount: i + 1,
       comparisons,
       writes,
-      message: "Insert " + key + " into position " + (j + 1) + ".",
+      message: "Place stored key " + key + " into the gap at position " + (j + 1) + ".",
     });
   }
 
@@ -1961,6 +2001,10 @@ function getBarClass(
 
   if (algorithm === "quick" || algorithm === "pdq") {
     if (step.phase === "complete") return "bar--sorted";
+    // Quick Sort's active pivot must outrank a final-looking or already
+    // certified position. That makes a partition's current anchor legible
+    // even on a row where the pivot happens to be sitting in sorted order.
+    if (algorithm === "quick" && index === step.pivotIndex) return "bar--pivot";
     // A settled pivot is in its final index. Keep that proof visible at every
     // array size while the active pivot and swaps show the current partition.
     if (step.settled?.includes(index) || step.visualSettled?.includes(index)) {
@@ -2044,6 +2088,7 @@ function getBarClass(
 
   if (algorithm === "selection") {
     if (step.phase === "complete" || step.settled?.includes(index)) return "bar--sorted";
+    if (step.phase === "scan" && index === step.inserting) return "bar--key";
     if (step.phase === "swap" && (index === step.comparing || index === step.shifting)) {
       return "bar--swap";
     }
@@ -2054,8 +2099,12 @@ function getBarClass(
 
   if (algorithm === "heap") {
     if (step.phase === "complete" || step.settled?.includes(index)) return "bar--sorted";
-    if (step.phase === "heapify" && (index === step.comparing || index === step.shifting)) {
-      return "bar--heap";
+    if (step.phase === "heapify") {
+      // In a sift-down frame `comparing` is the current parent/root and
+      // `shifting` is its chosen child. Keeping those roles distinct matters
+      // most on compact rows where there is little contextual space.
+      if (index === step.comparing) return "bar--key";
+      if (index === step.shifting) return "bar--heap";
     }
     if (step.phase === "swap" && (index === step.comparing || index === step.shifting)) {
       return "bar--swap";
@@ -2085,13 +2134,16 @@ function getRenderedBarItems(step: SortStep): RenderedBarItem[] {
 
   return step.values.map((value, index) => {
     const isGap = index === step.gapIndex && step.key !== null;
-    const shownValue = isGap ? step.key! : value;
-    const occurrence = occurrences.get(shownValue) ?? 0;
-    occurrences.set(shownValue, occurrence + 1);
+    // A gap takes the held key's identity so FLIP can animate the same item
+    // across right shifts and its final placement. Its rendered height stays
+    // empty, however—the key itself is visibly stored in the tray above.
+    const identityValue = isGap ? step.key! : value;
+    const occurrence = occurrences.get(identityValue) ?? 0;
+    occurrences.set(identityValue, occurrence + 1);
 
     return {
-      value: shownValue,
-      token: String(shownValue) + ":" + String(occurrence),
+      value: isGap ? 0 : value,
+      token: String(identityValue) + ":" + String(occurrence),
       isGap,
     };
   });
@@ -2107,6 +2159,7 @@ function getPhaseLabel(phase: StepPhase) {
   const labels: Record<StepPhase, string> = {
     ready: "Ready",
     select: "Select key",
+    scan: "Scan for minimum",
     compare: "Compare",
     shift: "Shift right",
     insert: "Insert key",
@@ -2130,8 +2183,8 @@ export default function Home() {
   const [algorithm, setAlgorithm] = useState<AlgorithmId>("bogo");
   const [isAlgorithmPickerOpen, setIsAlgorithmPickerOpen] = useState(false);
   const [algorithmCardTab, setAlgorithmCardTab] = useState<AlgorithmCardTab>("walkthrough");
-  const [arraySize, setArraySize] = useState(DEFAULT_ARRAY_SIZE);
-  const [arraySizeInput, setArraySizeInput] = useState(String(DEFAULT_ARRAY_SIZE));
+  const [arraySize, setArraySize] = useState(INITIAL_ARRAY_SIZE);
+  const [arraySizeInput, setArraySizeInput] = useState(String(INITIAL_ARRAY_SIZE));
   const [speed, setSpeed] = useState(DEFAULT_SPEED);
   const [speedInput, setSpeedInput] = useState(String(DEFAULT_SPEED));
   // The runner should react to every speed input immediately, but the FLIP
@@ -2149,6 +2202,13 @@ export default function Home() {
   const [visibleWorkloadBarAlgorithms, setVisibleWorkloadBarAlgorithms] = useState(
     () => ({ ...DEFAULT_WORKLOAD_BAR_ALGORITHM_VISIBILITY }),
   );
+  // Keep a deselected bar mounted just long enough to play its exit motion.
+  // The number is a per-action generation, so a quick off/on/off sequence
+  // can never let an older animation remove the newest row.
+  const [exitingWorkloadBarAlgorithms, setExitingWorkloadBarAlgorithms] =
+    useState<WorkloadBarTransitionMap>({});
+  const [enteringWorkloadBarAlgorithms, setEnteringWorkloadBarAlgorithms] =
+    useState<WorkloadBarTransitionMap>({});
   const [workloadBarSize, setWorkloadBarSize] = useState(65_536);
   const [originalValues, setOriginalValues] = useState(INITIAL_VALUES);
   const [values, setValues] = useState(INITIAL_VALUES);
@@ -2191,6 +2251,12 @@ export default function Home() {
   const [practiceUndoPending, setPracticeUndoPending] = useState(false);
   const introOverlayRef = useRef<HTMLDivElement | null>(null);
   const introDismissTimerRef = useRef<number | null>(null);
+  // Keep the modal transition state synchronous with pointer events. React
+  // state intentionally paints the phase, while this ref prevents a second
+  // click during the fade from leaking through to the page underneath.
+  const introPhaseRef = useRef<IntroPhase>("visible");
+  const introReturnFocusRef = useRef<HTMLElement | null>(null);
+  const brandButtonRef = useRef<HTMLButtonElement | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const speedRef = useRef(speed);
   const soundVolumeRef = useRef(soundVolume);
@@ -2249,6 +2315,7 @@ export default function Home() {
   const bogoPracticeCasinoActionRef = useRef(0);
   const bogoPracticeRollIntervalRef = useRef<number | null>(null);
   const bogoPracticeRollRunRef = useRef(0);
+  const workloadBarTransitionRunRef = useRef(0);
   // Completion can be reached by a final scripted move or the global sorted
   // row check. This guard makes those paths share one celebration and one
   // victory tone instead of occasionally firing twice in the same gesture.
@@ -2439,8 +2506,39 @@ export default function Home() {
         .sort((left, right) => right.work - left.work),
     [visibleWorkloadBarAlgorithms, workloadBarEntry],
   );
-  const workloadBarMaximum = Math.max(1, ...workloadBarRows.map((row) => row.work));
-  const workloadBarFastest = Math.max(1, workloadBarRows.at(-1)?.work ?? 1);
+  const renderedWorkloadBarRows = useMemo(
+    () =>
+      BENCHMARK_ALGORITHMS
+        .filter(
+          (benchmarkAlgorithm) =>
+            visibleWorkloadBarAlgorithms[benchmarkAlgorithm.key] ||
+            exitingWorkloadBarAlgorithms[benchmarkAlgorithm.key] !== undefined,
+        )
+        .map((benchmarkAlgorithm) => ({
+          ...benchmarkAlgorithm,
+          color: BENCHMARK_COLORS[benchmarkAlgorithm.key],
+          work: workloadBarEntry?.work[benchmarkAlgorithm.key] ?? 0,
+          exitTransitionId: exitingWorkloadBarAlgorithms[benchmarkAlgorithm.key],
+          enterTransitionId: enteringWorkloadBarAlgorithms[benchmarkAlgorithm.key],
+        }))
+        .sort((left, right) => right.work - left.work),
+    [
+      enteringWorkloadBarAlgorithms,
+      exitingWorkloadBarAlgorithms,
+      visibleWorkloadBarAlgorithms,
+      workloadBarEntry,
+    ],
+  );
+  const workloadBarMaximum = Math.max(
+    1,
+    ...renderedWorkloadBarRows.map((row) => row.work),
+  );
+  const workloadBarFastest = Math.max(
+    1,
+    ...(workloadBarRows.length ? workloadBarRows : renderedWorkloadBarRows).map(
+      (row) => row.work,
+    ),
+  );
 
   const currentStep = useMemo(
     () =>
@@ -2451,6 +2549,18 @@ export default function Home() {
   );
   const visibleValues = currentStep.values;
   const renderedBarItems = getRenderedBarItems(currentStep);
+  const selectionScanRange =
+    algorithm === "selection" &&
+    currentStep.phase === "scan" &&
+    currentStep.rangeStart !== undefined &&
+    currentStep.rangeEnd !== undefined
+      ? {
+          start: Math.max(0, currentStep.rangeStart),
+          end: Math.min(visibleValues.length, currentStep.rangeEnd),
+        }
+      : null;
+  const isSelectionScan =
+    selectionScanRange !== null && selectionScanRange.end > selectionScanRange.start;
   const completionSweepDuration = getCompletionSweepDuration(renderedBarItems.length);
   const completionSweepStepDuration = completionSweepDuration / Math.max(renderedBarItems.length, 1);
   const previousVisualStep = !isBogo && stepIndex > 0 ? steps[stepIndex - 1] : null;
@@ -2483,6 +2593,7 @@ export default function Home() {
   useLayoutEffect(() => {
     try {
       if (window.sessionStorage.getItem(SORTSCOPE_INTRO_SESSION_KEY) === "seen") {
+        introPhaseRef.current = "hidden";
         setIntroPhase("hidden");
       }
     } catch {
@@ -2491,10 +2602,46 @@ export default function Home() {
     }
   }, []);
 
+  // Keep the page beneath the fixed welcome screen stationary. This guarantees
+  // that re-entering through the logo and then dismissing the overlay returns
+  // to the actual page top rather than a background scroll position changed by
+  // a wheel or touch gesture while the screen was open.
+  useLayoutEffect(() => {
+    if (introPhase === "hidden") return;
+
+    const root = document.documentElement;
+    const body = document.body;
+    const previousRootOverflow = root.style.overflow;
+    const previousBodyOverflow = body.style.overflow;
+    root.style.overflow = "hidden";
+    body.style.overflow = "hidden";
+
+    return () => {
+      root.style.overflow = previousRootOverflow;
+      body.style.overflow = previousBodyOverflow;
+    };
+  }, [introPhase]);
+
   useEffect(() => {
     if (introPhase !== "visible") return;
 
     const frame = window.requestAnimationFrame(() => introOverlayRef.current?.focus());
+    return () => window.cancelAnimationFrame(frame);
+  }, [introPhase]);
+
+  // A modal should not leave keyboard focus on its removed container. The
+  // header mark is both the opener and a dependable return point after the
+  // first welcome screen.
+  useEffect(() => {
+    if (introPhase !== "hidden") return;
+
+    const returnTarget = introReturnFocusRef.current;
+    introReturnFocusRef.current = null;
+    if (!returnTarget) return;
+
+    const frame = window.requestAnimationFrame(() => {
+      if (returnTarget.isConnected) returnTarget.focus();
+    });
     return () => window.cancelAnimationFrame(frame);
   }, [introPhase]);
 
@@ -2737,7 +2884,7 @@ export default function Home() {
   const mergeSlowdown = 1 - (speed - 1) / (DISPLAY_SPEED_MAX - 1);
   const mergePassDuration = Math.round(600 + 6_000 * mergeSlowdown ** 1.5);
   const mergeFramesInCurrentPass = mergePassFrameCounts.get(currentStep.pass) ?? 1;
-  const delay = prefersReducedMotion
+  const baseDelay = prefersReducedMotion
     ? 18
     : usesEvenMergePacing
       ? Math.max(minimumFrameDelay, mergePassDuration / mergeFramesInCurrentPass)
@@ -2747,6 +2894,12 @@ export default function Home() {
       : isSafeVisualMove && !isAdjustingSpeedControl
         ? motionSlideDuration + 100
       : Math.max(minimumFrameDelay, speedDelay / playbackDensity);
+  // A scan has to remain readable at the fast end of the control. This does
+  // not change comparison accounting—it only gives the visual sweep long
+  // enough to traverse the unsorted tail before the placement frame.
+  const delay = isSelectionScan && !prefersReducedMotion
+    ? Math.max(baseDelay, isLargeArray ? 24 : 70)
+    : baseDelay;
   const shouldInterpolateDenseBars =
     isLargeArray &&
     !isBogo &&
@@ -2764,6 +2917,19 @@ export default function Home() {
         } as CSSProperties)
       : denseBarTransitionStyle;
   const activeBarTransitionStyle = barTransitionStyle;
+  const selectionScanStyle = isSelectionScan
+    ? ({
+        "--selection-scan-start": String(
+          ((selectionScanRange!.start + 0.5) / Math.max(visibleValues.length, 1)) * 100,
+        ) + "%",
+        "--selection-scan-width": String(
+          ((selectionScanRange!.end - selectionScanRange!.start - 1) /
+            Math.max(visibleValues.length, 1)) *
+            100,
+        ) + "%",
+        "--selection-scan-duration": String(delay) + "ms",
+      } as CSSProperties)
+    : undefined;
   const progress =
     runState === "complete"
       ? 100
@@ -2774,7 +2940,9 @@ export default function Home() {
       : steps.length > 1
         ? Math.round((stepIndex / (steps.length - 1)) * 100)
         : 0;
-  const displayValues = visibleValues.join(", ");
+  const displayValues = renderedBarItems
+    .map((item) => (item.isGap ? "open gap" : String(item.value)))
+    .join(", ");
   const largestValue = Math.max(...originalValues, 1);
   const liveStatus =
     currentStep.phase === "limited"
@@ -4686,14 +4854,120 @@ export default function Home() {
   }
 
   function handleWorkloadBarAlgorithmVisibilityToggle(nextAlgorithm: BenchmarkAlgorithm) {
+    const nextTransitionId = workloadBarTransitionRunRef.current + 1;
+    workloadBarTransitionRunRef.current = nextTransitionId;
+
     setVisibleWorkloadBarAlgorithms((current) => ({
       ...current,
       [nextAlgorithm]: !current[nextAlgorithm],
     }));
+
+    if (visibleWorkloadBarAlgorithms[nextAlgorithm]) {
+      setEnteringWorkloadBarAlgorithms((current) => {
+        if (current[nextAlgorithm] === undefined) return current;
+        const next = { ...current };
+        delete next[nextAlgorithm];
+        return next;
+      });
+      setExitingWorkloadBarAlgorithms((current) => ({
+        ...current,
+        [nextAlgorithm]: nextTransitionId,
+      }));
+      return;
+    }
+
+    setExitingWorkloadBarAlgorithms((current) => {
+      if (current[nextAlgorithm] === undefined) return current;
+      const next = { ...current };
+      delete next[nextAlgorithm];
+      return next;
+    });
+    setEnteringWorkloadBarAlgorithms((current) => ({
+      ...current,
+      [nextAlgorithm]: nextTransitionId,
+    }));
+  }
+
+  function handleWorkloadBarRowAnimationEnd(
+    nextAlgorithm: BenchmarkAlgorithm,
+    transitionId: number,
+    phase: "entering" | "exiting",
+  ) {
+    if (phase === "exiting") {
+      setExitingWorkloadBarAlgorithms((current) => {
+        if (current[nextAlgorithm] !== transitionId) return current;
+        const next = { ...current };
+        delete next[nextAlgorithm];
+        return next;
+      });
+      return;
+    }
+
+    setEnteringWorkloadBarAlgorithms((current) => {
+      if (current[nextAlgorithm] !== transitionId) return current;
+      const next = { ...current };
+      delete next[nextAlgorithm];
+      return next;
+    });
+  }
+
+  function setIntroPhaseImmediately(nextPhase: IntroPhase) {
+    introPhaseRef.current = nextPhase;
+    setIntroPhase(nextPhase);
+  }
+
+  function clearIntroDismissTimer() {
+    if (introDismissTimerRef.current === null) return;
+    window.clearTimeout(introDismissTimerRef.current);
+    introDismissTimerRef.current = null;
+  }
+
+  function resetViewportForIntro() {
+    // The former logo anchor navigated to #visualizer, which could leave an
+    // in-page scroll target behind after the welcome overlay was reopened.
+    // Replace the hash rather than assigning location so no extra history
+    // entry or native anchor jump is introduced.
+    if (window.location.hash) {
+      try {
+        window.history.replaceState(
+          window.history.state,
+          "",
+          window.location.pathname + window.location.search,
+        );
+      } catch {
+        // A restrictive embedded browser can reject history writes. The
+        // viewport reset below still returns the person to the true top.
+      }
+    }
+
+    // `html` normally has smooth scrolling enabled. Override it for this one
+    // reset so closing the welcome screen cannot reveal an in-flight scroll.
+    const root = document.documentElement;
+    const previousScrollBehavior = root.style.scrollBehavior;
+    root.style.scrollBehavior = "auto";
+    window.scrollTo(0, 0);
+    root.style.scrollBehavior = previousScrollBehavior;
+    // These fallbacks cover browsers that keep the scrolling element on body
+    // rather than documentElement.
+    document.documentElement.scrollTop = 0;
+    document.body.scrollTop = 0;
+  }
+
+  function reopenIntro(returnFocusTarget: HTMLElement | null) {
+    clearIntroDismissTimer();
+    introReturnFocusRef.current = returnFocusTarget ?? brandButtonRef.current;
+    setIsAlgorithmPickerOpen(false);
+    resetViewportForIntro();
+    setIntroPhaseImmediately("visible");
   }
 
   function dismissIntro() {
-    if (introPhase !== "visible") return;
+    if (introPhaseRef.current !== "visible") return;
+
+    // A fresh click through the first-run screen has no opener to restore.
+    // Return to the logo in that case rather than leaving focus on a node that
+    // will disappear when the overlay unmounts.
+    introReturnFocusRef.current ??= brandButtonRef.current;
 
     try {
       window.sessionStorage.setItem(SORTSCOPE_INTRO_SESSION_KEY, "seen");
@@ -4704,18 +4978,27 @@ export default function Home() {
     const reduceMotionNow =
       prefersReducedMotion || window.matchMedia("(prefers-reduced-motion: reduce)").matches;
     if (reduceMotionNow) {
-      setIntroPhase("hidden");
+      setIntroPhaseImmediately("hidden");
       return;
     }
 
-    setIntroPhase("exiting");
+    setIntroPhaseImmediately("exiting");
     introDismissTimerRef.current = window.setTimeout(() => {
       introDismissTimerRef.current = null;
-      setIntroPhase("hidden");
+      if (introPhaseRef.current !== "exiting") return;
+      setIntroPhaseImmediately("hidden");
     }, SORTSCOPE_INTRO_EXIT_DURATION);
   }
 
   function handleIntroKeyDown(event: ReactKeyboardEvent<HTMLDivElement>) {
+    if (event.key === "Tab") {
+      // The dialog has one click-anywhere action rather than internal form
+      // controls, so keep Tab from falling through to page controls behind it.
+      event.preventDefault();
+      introOverlayRef.current?.focus();
+      return;
+    }
+
     if (event.key === "Enter" || event.key === " " || event.key === "Spacebar" || event.key === "Escape") {
       event.preventDefault();
       dismissIntro();
@@ -4753,7 +5036,7 @@ export default function Home() {
             <p className="sortscope-intro__eyebrow">SORTING, MADE VISIBLE</p>
             <h1 id="sortscope-intro-title">Sortscope</h1>
             <p id="sortscope-intro-description" className="sortscope-intro__description">
-              Choose a sorting algorithm, watch each move, and try the rule for yourself.
+              A hands on deep dive into the world of sorting algorithms.
             </p>
             <p id="sortscope-intro-invitation" className="sortscope-intro__invitation">
               <span>Click or tap anywhere to enter</span>
@@ -4824,10 +5107,16 @@ export default function Home() {
 
       <div className="shell">
         <header className="site-header">
-          <a className="brand" href="#visualizer" aria-label="Sortscope visualizer">
+          <button
+            ref={brandButtonRef}
+            className="brand"
+            type="button"
+            onClick={(event) => reopenIntro(event.currentTarget)}
+            aria-label="Return to the Sortscope welcome screen"
+          >
             <span className="brand-mark" aria-hidden="true" />
             <span>sortscope</span>
-          </a>
+          </button>
           <div className="header-note">
             <span className="header-note__dot" aria-hidden="true" />
             algorithm study tool
@@ -4980,9 +5269,10 @@ export default function Home() {
 
               {isBogo && (
                 <>
-                    <label className="control-field control-field--range bogo-attempt-limit">
+                    <div className="control-field control-field--range bogo-attempt-limit">
                       <span className="control-label">
                       Max shuffles (up to 999,999,999)
+                        <span className="control-number-stepper control-number-stepper--bogo">
                         <input
                           className="control-number control-number--bogo"
                           type="number"
@@ -4998,6 +5288,29 @@ export default function Home() {
                           disabled={isLocked || bogoRunsUntilSolved}
                           aria-label="Maximum Bogo Sort shuffles exact value"
                         />
+                          <span className="control-number-stepper__buttons">
+                            <button
+                              className="control-number-stepper__button control-number-stepper__button--up"
+                              type="button"
+                              onPointerDown={(event) => event.preventDefault()}
+                              onClick={() => handleBogoAttemptLimitChange(bogoAttemptLimit + bogoSliderStep)}
+                              disabled={isLocked || bogoRunsUntilSolved || bogoAttemptLimit >= bogoAttemptMaximum}
+                              aria-label="Increase maximum Bogo Sort shuffles"
+                            >
+                              <span aria-hidden="true" />
+                            </button>
+                            <button
+                              className="control-number-stepper__button control-number-stepper__button--down"
+                              type="button"
+                              onPointerDown={(event) => event.preventDefault()}
+                              onClick={() => handleBogoAttemptLimitChange(bogoAttemptLimit - bogoSliderStep)}
+                              disabled={isLocked || bogoRunsUntilSolved || bogoAttemptLimit <= BOGO_MIN_ATTEMPTS}
+                              aria-label="Decrease maximum Bogo Sort shuffles"
+                            >
+                              <span aria-hidden="true" />
+                            </button>
+                          </span>
+                        </span>
                       </span>
                       <input
                         type="range"
@@ -5009,8 +5322,10 @@ export default function Home() {
                         disabled={isLocked || bogoRunsUntilSolved}
                         aria-label="Maximum Bogo Sort shuffles"
                       />
-                    </label>
+                    </div>
                     <label
+                      htmlFor="bogo-runs-until-solved"
+                      aria-label="Let Bogo Sort run until solved"
                       className={
                         "bogo-unlimited-warning " +
                         (bogoRunsUntilSolved ? "bogo-unlimited-warning--armed " : "") +
@@ -5018,6 +5333,7 @@ export default function Home() {
                       }
                     >
                       <input
+                        id="bogo-runs-until-solved"
                         type="checkbox"
                         checked={bogoRunsUntilSolved}
                         onChange={(event) => handleBogoRunsUntilSolvedChange(event.target.checked)}
@@ -5027,14 +5343,14 @@ export default function Home() {
                       <span>
                         <strong>Let it run until solved</strong>
                         <small id="bogo-unlimited-warning-note">
-                          Warning: no cap — may run until the sun explodes.
+                          Warning: May run until the sun explodes.
                         </small>
                       </span>
                     </label>
                   </>
                 )}
 
-              <label
+              <div
                 className={
                   "control-field control-field--range control-field--array-size " +
                   (isBogo ? "control-field--array-size-bogo" : "")
@@ -5045,20 +5361,44 @@ export default function Home() {
                     Array size
                     {isBogo && <small>Max {BOGO_MAX_ARRAY_SIZE}</small>}
                   </span>
-                  <input
-                    className={"control-number " + (isBogo ? "control-number--bogo-array" : "")}
-                    type="number"
-                    min={minimumArraySize}
-                    max={maximumArraySize}
-                    step="1"
-                    value={arraySizeInput}
-                    onChange={(event) => handleArraySizeInputChange(event.target.value)}
-                    onBlur={normalizeArraySizeInput}
-                    onKeyDown={(event) => {
-                      if (event.key === "Enter") event.currentTarget.blur();
-                    }}
-                    aria-label="Array size exact value"
-                  />
+                  <span className="control-number-stepper">
+                    <input
+                      className={"control-number " + (isBogo ? "control-number--bogo-array" : "")}
+                      type="number"
+                      min={minimumArraySize}
+                      max={maximumArraySize}
+                      step="1"
+                      value={arraySizeInput}
+                      onChange={(event) => handleArraySizeInputChange(event.target.value)}
+                      onBlur={normalizeArraySizeInput}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter") event.currentTarget.blur();
+                      }}
+                      aria-label="Array size exact value"
+                    />
+                    <span className="control-number-stepper__buttons">
+                      <button
+                        className="control-number-stepper__button control-number-stepper__button--up"
+                        type="button"
+                        onPointerDown={(event) => event.preventDefault()}
+                        onClick={() => handleArraySizeChange(arraySize + 1)}
+                        disabled={arraySize >= maximumArraySize}
+                        aria-label="Increase array size"
+                      >
+                        <span aria-hidden="true" />
+                      </button>
+                      <button
+                        className="control-number-stepper__button control-number-stepper__button--down"
+                        type="button"
+                        onPointerDown={(event) => event.preventDefault()}
+                        onClick={() => handleArraySizeChange(arraySize - 1)}
+                        disabled={arraySize <= minimumArraySize}
+                        aria-label="Decrease array size"
+                      >
+                        <span aria-hidden="true" />
+                      </button>
+                    </span>
+                  </span>
                 </span>
                 <input
                   type="range"
@@ -5069,9 +5409,9 @@ export default function Home() {
                   onChange={(event) => handleArraySizeChange(Number(event.target.value))}
                   aria-label="Array size"
                 />
-              </label>
+              </div>
 
-              <label className="control-field control-field--range">
+              <div className="control-field control-field--range">
                 <span className="control-label">
                   <span className="control-label__name">
                     Speed
@@ -5079,24 +5419,48 @@ export default function Home() {
                   {prefersReducedMotion ? (
                     <strong>instant</strong>
                   ) : (
-                    <input
-                      className="control-number"
-                      type="number"
-                      min="1"
-                      max={maximumSpeed}
-                      step="1"
-                      value={speedInput}
-                      onChange={(event) => handleSpeedInputChange(event.target.value)}
-                      onFocus={beginSpeedVisualAdjustment}
-                      onBlur={() => {
-                        normalizeSpeedInput();
-                        finishSpeedVisualAdjustment();
-                      }}
-                      onKeyDown={(event) => {
-                        if (event.key === "Enter") event.currentTarget.blur();
-                      }}
-                      aria-label="Animation speed exact percent"
-                    />
+                    <span className="control-number-stepper">
+                      <input
+                        className="control-number"
+                        type="number"
+                        min="1"
+                        max={maximumSpeed}
+                        step="1"
+                        value={speedInput}
+                        onChange={(event) => handleSpeedInputChange(event.target.value)}
+                        onFocus={beginSpeedVisualAdjustment}
+                        onBlur={() => {
+                          normalizeSpeedInput();
+                          finishSpeedVisualAdjustment();
+                        }}
+                        onKeyDown={(event) => {
+                          if (event.key === "Enter") event.currentTarget.blur();
+                        }}
+                        aria-label="Animation speed exact percent"
+                      />
+                      <span className="control-number-stepper__buttons">
+                        <button
+                          className="control-number-stepper__button control-number-stepper__button--up"
+                          type="button"
+                          onPointerDown={(event) => event.preventDefault()}
+                          onClick={() => handleSpeedChange(speed + 1)}
+                          disabled={speed >= maximumSpeed}
+                          aria-label="Increase animation speed"
+                        >
+                          <span aria-hidden="true" />
+                        </button>
+                        <button
+                          className="control-number-stepper__button control-number-stepper__button--down"
+                          type="button"
+                          onPointerDown={(event) => event.preventDefault()}
+                          onClick={() => handleSpeedChange(speed - 1)}
+                          disabled={speed <= 1}
+                          aria-label="Decrease animation speed"
+                        >
+                          <span aria-hidden="true" />
+                        </button>
+                      </span>
+                    </span>
                   )}
                 </span>
                 <input
@@ -5128,17 +5492,29 @@ export default function Home() {
                   }}
                   aria-label="Animation speed"
                 />
-              </label>
+              </div>
 
               <div className={"button-row " + (isBogo ? "button-row--bogo" : "")}>
                 <button className="button button--primary" type="button" onClick={() => handlePrimaryAction()}>
                   <span className={"button-pulse " + (runState === "running" ? "button-pulse--active" : "")} aria-hidden="true" />
                   {primaryLabel}
                 </button>
-                {runState === "paused" && (
-                  <button className="button button--secondary button--sort-new-array" type="button" onClick={() => handlePrimaryAction(true)}>
-                    Sort new array
-                  </button>
+                {isBogo ? (
+                  <span className="button-row__secondary-slot">
+                    {runState === "paused" ? (
+                      <button className="button button--secondary button--sort-new-array" type="button" onClick={() => handlePrimaryAction(true)}>
+                        Sort new array
+                      </button>
+                    ) : (
+                      <span aria-hidden="true" />
+                    )}
+                  </span>
+                ) : (
+                  runState === "paused" && (
+                    <button className="button button--secondary button--sort-new-array" type="button" onClick={() => handlePrimaryAction(true)}>
+                      Sort new array
+                    </button>
+                  )
                 )}
                 <button className="text-button" type="button" onClick={resetArray}>
                   Reset
@@ -5172,10 +5548,11 @@ export default function Home() {
               </div>
             </div>
 
-            {algorithm === "insertion" && currentStep.phase === "shift" && currentStep.key !== null && (
+            {algorithm === "insertion" && currentStep.key !== null && currentStep.gapIndex !== null && (
               <div className="held-key" aria-hidden="true">
-                <span>holding key</span>
+                <span>stored key</span>
                 <strong>{currentStep.key}</strong>
+                <em>gap at slot {currentStep.gapIndex + 1}</em>
               </div>
             )}
             <div className="chart-stage" role="img" aria-label={"Array values: " + displayValues + ". " + currentStep.message}>
@@ -5185,6 +5562,7 @@ export default function Home() {
                   "bars " +
                   (isLargeArray ? "bars--dense " : "") +
                   (algorithm === "merge" || algorithm === "powersort" ? "bars--merge " : "") +
+                  (isSelectionScan ? "bars--selection-scanning " : "") +
                   (shouldInterpolateMoves ? "bars--flip bars--flip-" + motionSlideStage + " " : "") +
                   (completionSweepActive && !prefersReducedMotion ? "bars--completion-sweeping " : "") +
                   (shouldInterpolateDenseBars ? "bars--smooth" : "")
@@ -5243,6 +5621,11 @@ export default function Home() {
                     </div>
                   );
                 })}
+                {isSelectionScan && (
+                  <span className="selection-scan" style={selectionScanStyle}>
+                    <span className="selection-scan__line" />
+                  </span>
+                )}
               </div>
               <div className="axis-labels" aria-hidden="true">
                 <span>lower values</span>
@@ -5274,7 +5657,7 @@ export default function Home() {
                 ) : algorithm === "quick" || algorithm === "pdq" ? (
                   <>
                     <span><i className="legend__swatch legend__swatch--idle" />active range</span>
-                    <span><i className="legend__swatch legend__swatch--key" />pivot</span>
+                    <span><i className={"legend__swatch " + (algorithm === "quick" ? "legend__swatch--pivot" : "legend__swatch--key")} />pivot</span>
                     <span><i className="legend__swatch legend__swatch--swap" />partition swap</span>
                     <span><i className="legend__swatch legend__swatch--sorted" />{algorithm === "pdq" ? "safe position" : "placed pivot"}</span>
                   </>
@@ -6090,7 +6473,11 @@ export default function Home() {
                 }
               >
                 <div className="workload-bars__scale">
-                  <span>Highest selected workload</span>
+                  <span>
+                    {workloadBarRows.length
+                      ? "Highest selected workload"
+                      : "Removing selected workload"}
+                  </span>
                   <strong>{formatCount(workloadBarMaximum)}</strong>
                   <p>
                     {benchmarkPattern === "random"
@@ -6101,9 +6488,9 @@ export default function Home() {
                   </p>
                 </div>
 
-                {workloadBarRows.length ? (
+                {renderedWorkloadBarRows.length ? (
                   <ol className="workload-bars__list">
-                    {workloadBarRows.map((row) => {
+                    {renderedWorkloadBarRows.map((row) => {
                       const ratio = row.work / workloadBarMaximum;
                       const multiplier = row.work / workloadBarFastest;
                       const relativeLabel =
@@ -6114,27 +6501,55 @@ export default function Home() {
                       return (
                         <li
                           key={row.key}
-                          className="workload-bar-row"
-                          style={{ "--workload-bar-color": row.color } as CSSProperties}
+                          className={
+                            "workload-bar-row-presence " +
+                            (row.exitTransitionId !== undefined
+                              ? "workload-bar-row-presence--exiting"
+                              : row.enterTransitionId !== undefined
+                                ? "workload-bar-row-presence--entering"
+                                : "")
+                          }
+                          aria-hidden={row.exitTransitionId !== undefined || undefined}
+                          onAnimationEnd={(event) => {
+                            if (event.currentTarget !== event.target) return;
+                            if (row.exitTransitionId !== undefined) {
+                              handleWorkloadBarRowAnimationEnd(
+                                row.key,
+                                row.exitTransitionId,
+                                "exiting",
+                              );
+                            } else if (row.enterTransitionId !== undefined) {
+                              handleWorkloadBarRowAnimationEnd(
+                                row.key,
+                                row.enterTransitionId,
+                                "entering",
+                              );
+                            }
+                          }}
                         >
-                          <div className="workload-bar-row__heading">
-                            <span>
-                              <i className={"benchmark-legend__swatch benchmark-legend__swatch--" + row.className} />
-                              {row.label}
-                            </span>
-                            <strong>{formatCount(row.work)}</strong>
-                          </div>
                           <div
-                            className="workload-bar-row__track"
-                            role="progressbar"
-                            aria-label={row.label + ": " + formatCount(row.work) + " modeled work, " + relativeLabel}
-                            aria-valuemin={0}
-                            aria-valuemax={Math.round(workloadBarMaximum)}
-                            aria-valuenow={Math.round(row.work)}
+                            className="workload-bar-row"
+                            style={{ "--workload-bar-color": row.color } as CSSProperties}
                           >
-                            <b style={{ width: String(ratio * 100) + "%" }} />
+                            <div className="workload-bar-row__heading">
+                              <span>
+                                <i className={"benchmark-legend__swatch benchmark-legend__swatch--" + row.className} />
+                                {row.label}
+                              </span>
+                              <strong>{formatCount(row.work)}</strong>
+                            </div>
+                            <div
+                              className="workload-bar-row__track"
+                              role="progressbar"
+                              aria-label={row.label + ": " + formatCount(row.work) + " modeled work, " + relativeLabel}
+                              aria-valuemin={0}
+                              aria-valuemax={Math.round(workloadBarMaximum)}
+                              aria-valuenow={Math.round(row.work)}
+                            >
+                              <b style={{ width: String(ratio * 100) + "%" }} />
+                            </div>
+                            <small>{relativeLabel}</small>
                           </div>
-                          <small>{relativeLabel}</small>
                         </li>
                       );
                     })}

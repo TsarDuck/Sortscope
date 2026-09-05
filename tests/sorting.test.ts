@@ -41,22 +41,34 @@ test("insertion sort finishes in numeric order without mutating its source", () 
   assert.equal(steps.at(-1)?.writes, 4);
 });
 
-test("insertion sort keeps every visual frame a permutation while its key is held", () => {
+test("insertion sort keeps a held key and moving gap consistent in every visual frame", () => {
   const source = [1, 4, 3, 2];
   const expectedValues = [...source].sort((left, right) => left - right);
   const steps = buildInsertionSteps(source);
 
   // The second comparison in this pass happens after 4 was copied right, so
-  // the raw in-place array is intentionally [1, 4, 4, 2]. The visual gap
-  // metadata must keep the held 3 visible in its proper temporary position.
+  // the raw in-place array is intentionally [1, 4, 4, 2]. The renderer takes
+  // the stored key out of its gap slot; the row plus that held key must still
+  // describe one complete permutation.
   assert.ok(steps.some((step) => step.phase === "compare" && step.gapIndex !== null));
+  assert.ok(steps.some((step) => step.phase === "select" && step.gapIndex !== null));
+  assert.ok(steps.some((step) => step.phase === "shift" && step.gapIndex !== null));
 
   for (const step of steps) {
-    const renderedValues = step.values.map((value, index) =>
-      index === step.gapIndex && step.key !== null ? step.key : value,
-    );
+    const renderedValues = step.values.filter((_, index) => index !== step.gapIndex);
+    if (step.gapIndex !== null && step.key !== null) renderedValues.push(step.key);
     assert.deepEqual([...renderedValues].sort((left, right) => left - right), expectedValues);
   }
+});
+
+test("compact insertion frames show a shift before placing a stored key", () => {
+  const steps = buildInsertionSteps([4, 3, 2, 1], true);
+  const firstShift = steps.findIndex((step) => step.phase === "shift");
+  const firstInsert = steps.findIndex((step) => step.phase === "insert");
+
+  assert.ok(firstShift >= 0);
+  assert.ok(firstInsert > firstShift);
+  assert.notEqual(steps[firstShift]?.gapIndex, null);
 });
 
 test("bubble, cocktail, selection, heap, quick, PDQ, merge, and Powersort finish in numeric order without mutating the source", () => {
@@ -85,6 +97,23 @@ test("bubble, cocktail, selection, heap, quick, PDQ, merge, and Powersort finish
       assert.equal(steps.at(-1)?.phase, "complete");
     }
   }
+});
+
+test("selection sort exposes one visual scan for each open position without inflating work", () => {
+  const source = [6, 2, 5, 1, 4, 3];
+  const steps = buildSelectionSteps(source);
+  const scans = steps.filter((step) => step.phase === "scan");
+  const metrics = analyzeSelectionSort(source);
+
+  assert.equal(scans.length, source.length - 1);
+  for (const [index, step] of scans.entries()) {
+    assert.equal(step.rangeStart, index);
+    assert.equal(step.rangeEnd, source.length);
+    assert.equal(step.inserting, index);
+  }
+  assert.equal(steps.at(-1)?.comparisons, metrics.comparisons);
+  assert.equal(steps.at(-1)?.writes, metrics.writes);
+  assert.ok(buildSelectionSteps(Array.from({ length: 256 }, (_, index) => 256 - index)).length < 800);
 });
 
 test("dense cocktail and merge frames keep their visual focus scoped", () => {
@@ -220,6 +249,40 @@ test("quick sort marks in-place values for rendering without changing its work t
   assert.deepEqual(finalStep?.visualSettled, [0, 1, 2, 3, 4]);
   assert.equal(finalStep?.comparisons, metrics.comparisons);
   assert.equal(finalStep?.writes, metrics.writes);
+});
+
+test("quick sort keeps an explicit active pivot above final-position visual hints", () => {
+  const source = [3, 1, 2, 4, 5];
+  const steps = buildQuickSortSteps(source);
+  const firstPartition = steps.find((step) => step.phase === "select");
+  const pivotFrames = steps.filter((step) => step.pivotIndex !== undefined);
+
+  // 5 already sits in its final slot. It still needs to read as the pivot
+  // while its partition is active, rather than disappearing into the green
+  // final-position hint.
+  assert.equal(firstPartition?.pivotIndex, 4);
+  assert.ok(firstPartition?.visualSettled?.includes(firstPartition.pivotIndex ?? -1));
+
+  assert.ok(pivotFrames.length > 0);
+  for (const step of pivotFrames) {
+    assert.equal(step.values[step.pivotIndex!], step.key);
+  }
+});
+
+test("small heap traces identify a parent and its chosen child separately", () => {
+  const steps = buildHeapSortSteps([1, 2, 3, 4]);
+  const siftFrames = steps.filter(
+    (step) =>
+      step.phase === "heapify" &&
+      step.comparing !== null &&
+      step.shifting !== null,
+  );
+
+  assert.ok(siftFrames.length > 0);
+  for (const step of siftFrames) {
+    assert.notEqual(step.comparing, step.shifting);
+    assert.ok(step.values[step.comparing!] < step.values[step.shifting!]);
+  }
 });
 
 test("PDQ sort keeps its visual hints separate from its counted work", () => {
