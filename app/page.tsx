@@ -118,12 +118,15 @@ const AUDIBLE_PHASES: StepPhase[] = [
 
 const DEFAULT_ARRAY_SIZE = 24;
 const DEFAULT_SPEED = 62;
+// The interface stays on a familiar 1–100% scale while deterministic sorts
+// keep the wider playback range that makes the top end feel responsive.
 const MAX_SPEED = 200;
+const DISPLAY_SPEED_MAX = 100;
 const BOGO_MAX_ARRAY_SIZE = 24;
 // A dense, bar-only verification scan needs enough time for the eye to read
 // the order, but not so much that a 256-value finish becomes its own scene.
-const COMPLETION_SWEEP_MIN_DURATION = 850;
-const COMPLETION_SWEEP_MILLISECONDS_PER_BAR = 10;
+const COMPLETION_SWEEP_MIN_DURATION = 425;
+const COMPLETION_SWEEP_MILLISECONDS_PER_BAR = 5;
 const COMPLETION_SWEEP_AUDIO_VISUAL_LEAD = 24;
 const COMPLETION_SWEEP_RELEASE_TAIL = 70;
 const BOGO_COMPLETION_SWEEP_DELAY = 720;
@@ -213,6 +216,13 @@ function getCompletionSweepDuration(valueCount: number) {
   return Math.max(
     COMPLETION_SWEEP_MIN_DURATION,
     Math.max(valueCount, 1) * COMPLETION_SWEEP_MILLISECONDS_PER_BAR,
+  );
+}
+
+function getPlaybackSpeed(speedPercent: number) {
+  const clampedPercent = Math.min(DISPLAY_SPEED_MAX, Math.max(1, Math.round(speedPercent)));
+  return Math.round(
+    1 + ((clampedPercent - 1) * (MAX_SPEED - 1)) / (DISPLAY_SPEED_MAX - 1),
   );
 }
 
@@ -1505,6 +1515,7 @@ export default function Home() {
   soundVolumeRef.current = soundVolume;
   const prefersReducedMotion = usePrefersReducedMotion();
   const isBogo = algorithm === "bogo";
+  const playbackSpeed = isBogo ? speed : getPlaybackSpeed(speed);
   const bogoAttemptMaximum = BOGO_STANDARD_MAX_ATTEMPTS;
   const bogoSliderStep = 1;
   const bogoExpectedShuffles = isBogo ? getBogoExpectedShuffles(arraySize) : 0;
@@ -1559,9 +1570,7 @@ export default function Home() {
         : Math.max(originalValues.length - 1, 0);
   const minimumArraySize = 4;
   const maximumArraySize = isBogo ? BOGO_MAX_ARRAY_SIZE : 256;
-  // Bogo reaches its CPU-batched ceiling at 100; the extra visualizer range
-  // is useful only for deterministic animation playback.
-  const maximumSpeed = isBogo ? 100 : MAX_SPEED;
+  const maximumSpeed = DISPLAY_SPEED_MAX;
   const benchmarkData = useMemo(
     () =>
       BENCHMARK_SIZES.map((size) => {
@@ -1830,21 +1839,21 @@ export default function Home() {
   const isLocked = isRunning || runState === "paused";
   const isLargeArray = originalValues.length > DEFAULT_ARRAY_SIZE;
   const playbackDensity = isBogo ? 48 : 1;
-  // Keep the low end readable, make the familiar 100 setting a little faster
-  // than it used to be, then reserve 101–200 for a controlled turbo range.
+  // Use the internal 1–200 playback range for deterministic sorts, while the
+  // visible control remains a simple 1–100% scale.
   const speedDelay =
-    speed <= 100
-      ? Math.round(4 + 716 * (1 - (speed - 1) / 99) ** 1.3)
-      : Math.max(1, Math.round(4 * (1 - (speed - 100) / (MAX_SPEED - 100)) ** 2));
+    playbackSpeed <= 100
+      ? Math.round(4 + 716 * (1 - (playbackSpeed - 1) / 99) ** 1.3)
+      : Math.max(1, Math.round(4 * (1 - (playbackSpeed - 100) / (MAX_SPEED - 100)) ** 2));
   const minimumFrameDelay = isLargeArray && !isBogo
-    ? speed > 100
+    ? playbackSpeed > 100
       ? 8
-      : speed === 100
+      : playbackSpeed === 100
         ? 10
         : 16
-    : speed > 100
+    : playbackSpeed > 100
       ? 2
-      : speed === 100
+      : playbackSpeed === 100
         ? 3
         : 7;
   const bogoSlowMotionDelay =
@@ -1855,7 +1864,7 @@ export default function Home() {
     algorithm === "merge" &&
     currentStep.phase !== "ready" &&
     currentStep.phase !== "complete";
-  const mergeSlowdown = 1 - (speed - 1) / 99;
+  const mergeSlowdown = 1 - (speed - 1) / (DISPLAY_SPEED_MAX - 1);
   const mergePassDuration = Math.round(600 + 6_000 * mergeSlowdown ** 1.5);
   const mergeFramesInCurrentPass = mergePassFrameCounts.get(currentStep.pass) ?? 1;
   const delay = prefersReducedMotion
@@ -2717,10 +2726,6 @@ export default function Home() {
     const nextValues =
       nextArraySize === arraySize ? [...originalValues] : makeRandomArray(nextArraySize);
     setAlgorithm(nextAlgorithm);
-    if (nextAlgorithm === "bogo" && speed > 100) {
-      setSpeed(100);
-      setSpeedInput("100");
-    }
     if (nextArraySize !== arraySize) {
       setArraySize(nextArraySize);
       setArraySizeInput(String(nextArraySize));
@@ -3180,7 +3185,10 @@ export default function Home() {
 
               <label className="control-field control-field--range">
                 <span className="control-label">
-                  Speed
+                  <span className="control-label__name">
+                    Speed
+                    <small>Percent</small>
+                  </span>
                   {prefersReducedMotion ? (
                     <strong>instant</strong>
                   ) : (
