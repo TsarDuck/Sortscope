@@ -227,18 +227,18 @@ const BOGO_PRACTICE_ROLL_INTERVAL = 52;
 // sort tones. Play them at 88% of the selected master volume at every slider
 // setting, while preserving the slider's full 0–100% behavior.
 const BOGO_PRACTICE_CASINO_GAIN = 0.88;
-// These fallbacks deliberately run a little past the bundled clip lengths.
-// `ended` normally resolves the interaction first; the timeout only prevents
-// a missing or stalled media event from trapping the lesson behind a disabled
-// button.
+// Native media can take a moment to begin under load. Once a clip has actually
+// started, it is always allowed to reach its own `ended` event; this watchdog
+// only gives a genuinely unavailable player a graceful, timed visual fallback.
+const BOGO_PRACTICE_CASINO_STARTUP_TIMEOUT = 12_000;
 const BOGO_PRACTICE_CASINO_SOUNDS: Record<
   BogoPracticeCasinoSound,
-  { source: string; fallbackDuration: number }
+  { source: string; silentDuration: number }
 > = {
-  entry: { source: "/audio/bogo-casino-gambling.wav", fallbackDuration: 1_800 },
-  shuffle: { source: "/audio/bogo-casino-shuffle.wav", fallbackDuration: 700 },
-  fail: { source: "/audio/bogo-casino-fail.wav", fallbackDuration: 1_500 },
-  success: { source: "/audio/bogo-casino-success.wav", fallbackDuration: 2_200 },
+  entry: { source: "/audio/bogo-casino-gambling.wav", silentDuration: 1_800 },
+  shuffle: { source: "/audio/bogo-casino-shuffle.wav", silentDuration: 700 },
+  fail: { source: "/audio/bogo-casino-fail.wav", silentDuration: 1_500 },
+  success: { source: "/audio/bogo-casino-success.wav", silentDuration: 2_200 },
 };
 // At the top end, the live runner works in short CPU batches. This is a
 // deliberately conservative pre-run model; the page replaces it with the
@@ -1847,8 +1847,8 @@ export default function Home() {
   const practiceCelebrationFadeTimerRef = useRef<number | null>(null);
   const practiceCelebrationUnmountTimerRef = useRef<number | null>(null);
   const bogoPracticeAudioRef = useRef<HTMLAudioElement | null>(null);
-  const bogoPracticeEntryAudioRef = useRef<HTMLAudioElement | null>(null);
-  const bogoPracticeAudioFallbackTimerRef = useRef<number | null>(null);
+  const bogoPracticePreloadAudioRef = useRef<HTMLAudioElement[]>([]);
+  const bogoPracticeAudioTimerRef = useRef<number | null>(null);
   const bogoPracticeAudioRunRef = useRef(0);
   const bogoPracticeRollIntervalRef = useRef<number | null>(null);
   const bogoPracticeRollRunRef = useRef(0);
@@ -2618,26 +2618,28 @@ export default function Home() {
     };
   }, []);
 
-  // Keep the entry clip fetched and ready before a person presses the casino
-  // button. `load()` fetches/prepares media only; playback still begins solely
-  // from the later user click in `beginBogoPracticeCasino`.
+  // Keep every casino clip fetched and ready before a person presses a button.
+  // `load()` fetches/prepares media only; playback still begins solely from a
+  // later user click, but a late network response cannot steal time from the
+  // clip's actual playback window.
   useEffect(() => {
-    const entryAudio = new Audio(BOGO_PRACTICE_CASINO_SOUNDS.entry.source);
-    entryAudio.autoplay = false;
-    entryAudio.loop = false;
-    entryAudio.preload = "auto";
-    entryAudio.load();
-    bogoPracticeEntryAudioRef.current = entryAudio;
+    const preloadAudio = Object.values(BOGO_PRACTICE_CASINO_SOUNDS).map(
+      ({ source }) => {
+        const audio = new Audio(source);
+        audio.autoplay = false;
+        audio.loop = false;
+        audio.preload = "auto";
+        audio.load();
+        return audio;
+      },
+    );
+    bogoPracticePreloadAudioRef.current = preloadAudio;
 
     return () => {
-      if (bogoPracticeEntryAudioRef.current === entryAudio) {
-        bogoPracticeEntryAudioRef.current = null;
+      if (bogoPracticePreloadAudioRef.current === preloadAudio) {
+        bogoPracticePreloadAudioRef.current = [];
       }
-      entryAudio.onended = null;
-      entryAudio.onerror = null;
-      entryAudio.pause();
-      entryAudio.removeAttribute("src");
-      entryAudio.load();
+      preloadAudio.forEach(releaseBogoPracticeAudio);
     };
   }, []);
 
@@ -2882,6 +2884,7 @@ export default function Home() {
     // before any next cue starts so an ended buffer can never emit a tail or
     // re-enter playback as the next state update lands.
     audio.onended = null;
+    audio.onplaying = null;
     audio.onerror = null;
     audio.loop = false;
     audio.pause();
@@ -2896,9 +2899,9 @@ export default function Home() {
 
   function clearBogoPracticeAudio() {
     bogoPracticeAudioRunRef.current += 1;
-    if (bogoPracticeAudioFallbackTimerRef.current !== null) {
-      window.clearTimeout(bogoPracticeAudioFallbackTimerRef.current);
-      bogoPracticeAudioFallbackTimerRef.current = null;
+    if (bogoPracticeAudioTimerRef.current !== null) {
+      window.clearTimeout(bogoPracticeAudioTimerRef.current);
+      bogoPracticeAudioTimerRef.current = null;
     }
 
     const audio = bogoPracticeAudioRef.current;
@@ -2925,22 +2928,34 @@ export default function Home() {
   function playBogoPracticeCasinoSound(
     sound: BogoPracticeCasinoSound,
     onSettled: () => void,
+    onStarted: () => void = () => undefined,
   ) {
     clearBogoPracticeAudio();
     const soundRun = bogoPracticeAudioRunRef.current + 1;
     bogoPracticeAudioRunRef.current = soundRun;
-    const { source, fallbackDuration } = BOGO_PRACTICE_CASINO_SOUNDS[sound];
+    const { source, silentDuration } = BOGO_PRACTICE_CASINO_SOUNDS[sound];
     let settled = false;
+    let playbackStarted = false;
+    let sequenceStarted = false;
 
     let activeAudio: HTMLAudioElement | null = null;
+
+    const clearAudioTimer = () => {
+      if (bogoPracticeAudioTimerRef.current === null) return;
+      window.clearTimeout(bogoPracticeAudioTimerRef.current);
+      bogoPracticeAudioTimerRef.current = null;
+    };
+
+    const startSequence = () => {
+      if (settled || sequenceStarted || bogoPracticeAudioRunRef.current !== soundRun) return;
+      sequenceStarted = true;
+      onStarted();
+    };
 
     const settle = () => {
       if (settled || bogoPracticeAudioRunRef.current !== soundRun) return;
       settled = true;
-      if (bogoPracticeAudioFallbackTimerRef.current !== null) {
-        window.clearTimeout(bogoPracticeAudioFallbackTimerRef.current);
-        bogoPracticeAudioFallbackTimerRef.current = null;
-      }
+      clearAudioTimer();
 
       if (activeAudio) {
         if (bogoPracticeAudioRef.current === activeAudio) {
@@ -2958,25 +2973,24 @@ export default function Home() {
       onSettled();
     };
 
-    const scheduleFallback = () => {
+    const scheduleTimedFallback = () => {
       if (
         settled ||
-        bogoPracticeAudioRunRef.current !== soundRun ||
-        bogoPracticeAudioFallbackTimerRef.current !== null
+        playbackStarted ||
+        bogoPracticeAudioRunRef.current !== soundRun
       ) {
         return;
       }
-      bogoPracticeAudioFallbackTimerRef.current = window.setTimeout(
-        settle,
-        fallbackDuration,
-      );
+      clearAudioTimer();
+      startSequence();
+      bogoPracticeAudioTimerRef.current = window.setTimeout(settle, silentDuration);
     };
 
     // A silent volume still preserves the same paced visual lesson; it simply
     // skips constructing a media player. Normal playback advances only from
     // `ended`; the timer is reserved for muted or failed media playback.
     if (soundVolumeRef.current > 0) {
-      // The entry element above prewarms the browser cache. Each actual cue
+      // The preload collection above warms the browser cache. Each actual cue
       // still gets its own one-shot player, avoiding stale end-buffer reuse
       // when a person opens the casino repeatedly.
       const audio = new Audio(source);
@@ -2991,11 +3005,38 @@ export default function Home() {
         Math.min(1, (soundVolumeRef.current / 100) * BOGO_PRACTICE_CASINO_GAIN),
       );
       audio.onended = settle;
-      audio.onerror = scheduleFallback;
+      // `playing` is the browser's proof that sound is actually flowing. The
+      // watchdog below is cleared here, and no duration timer is allowed to
+      // interrupt the cue after this point—even if it briefly buffers.
+      audio.onplaying = () => {
+        if (bogoPracticeAudioRunRef.current !== soundRun || settled) return;
+        playbackStarted = true;
+        clearAudioTimer();
+        startSequence();
+      };
+      audio.onerror = () => {
+        // A media error after `playing` is a genuine aborted cue rather than a
+        // slow start. Release the lock instead of leaving the lesson stranded;
+        // a healthy clip never takes this path and remains governed by `ended`.
+        if (playbackStarted) {
+          settle();
+          return;
+        }
+        scheduleTimedFallback();
+      };
       bogoPracticeAudioRef.current = audio;
-      void audio.play().catch(scheduleFallback);
+      // Protect the disabled lesson from a player that never begins at all.
+      // This is intentionally a startup-only watchdog: a healthy cue advances
+      // solely through `ended`, so a slow start can never cut it short.
+      bogoPracticeAudioTimerRef.current = window.setTimeout(
+        scheduleTimedFallback,
+        BOGO_PRACTICE_CASINO_STARTUP_TIMEOUT,
+      );
+      void audio.play().catch(scheduleTimedFallback);
     } else {
-      scheduleFallback();
+      // With sound muted there is no media event to await, so preserve the
+      // same readable pacing without constructing a silent player.
+      scheduleTimedFallback();
     }
   }
 
@@ -3125,9 +3166,8 @@ export default function Home() {
     clearBogoPracticeRoll();
     bogoPracticeRollRunRef.current = rollRun;
     setBogoPracticeBusy(true);
-    setBogoPracticeRolling(true);
     setBogoPracticeAttempts(nextAttempts);
-    setPracticeFeedback("Shuffling every possible order…");
+    setPracticeFeedback("The casino is dealing the next shuffle…");
 
     const rollValues = () => {
       if (bogoPracticeRollRunRef.current !== rollRun) return;
@@ -3137,11 +3177,6 @@ export default function Home() {
       setPracticeValues(shufflePracticeValues(BOGO_PRACTICE_INITIAL_VALUES));
     };
 
-    rollValues();
-    bogoPracticeRollIntervalRef.current = window.setInterval(
-      rollValues,
-      BOGO_PRACTICE_ROLL_INTERVAL,
-    );
     playBogoPracticeCasinoSound("shuffle", () => {
       if (bogoPracticeRollRunRef.current !== rollRun) return;
       clearBogoPracticeRoll();
@@ -3161,6 +3196,15 @@ export default function Home() {
         "Gamble " + String(nextAttempts) + " was not sorted. One order out of 24 wins—try again.",
       );
       playBogoPracticeCasinoSound("fail", () => setBogoPracticeBusy(false));
+    }, () => {
+      if (bogoPracticeRollRunRef.current !== rollRun) return;
+      setBogoPracticeRolling(true);
+      setPracticeFeedback("Shuffling every possible order…");
+      rollValues();
+      bogoPracticeRollIntervalRef.current = window.setInterval(
+        rollValues,
+        BOGO_PRACTICE_ROLL_INTERVAL,
+      );
     });
   }
 
@@ -3869,10 +3913,8 @@ export default function Home() {
 
         <section className="hero" aria-labelledby="page-title">
           <div>
-            <p className="eyebrow">SORTING, MADE VISIBLE</p>
-            <h1 id="page-title">
-              Watch each value
-              <span> find its place.</span>
+            <h1 id="page-title" className="hero__algorithm-title">
+              {algorithmLabel}
             </h1>
             <p className="hero-copy">{algorithmDetails.heroCopy}</p>
           </div>

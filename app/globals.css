@@ -171,8 +171,7 @@ button:disabled {
   line-height: 0.92;
 }
 
-.hero h1 span {
-  display: block;
+.hero__algorithm-title {
   color: #b7afff;
 }
 
