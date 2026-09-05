@@ -124,7 +124,6 @@ const BOGO_MAX_ARRAY_SIZE = 24;
 // the order, but not so much that a 256-value finish becomes its own scene.
 const COMPLETION_SWEEP_MIN_DURATION = 425;
 const COMPLETION_SWEEP_MILLISECONDS_PER_BAR = 5;
-const COMPLETION_SWEEP_REFERENCE_NOTE_COUNT = 22;
 const COMPLETION_SWEEP_AUDIO_VISUAL_LEAD = 24;
 const COMPLETION_SWEEP_RELEASE_TAIL = 70;
 const BOGO_COMPLETION_SWEEP_DELAY = 720;
@@ -243,18 +242,6 @@ function getCompletionSweepDuration(valueCount: number) {
   return Math.max(
     COMPLETION_SWEEP_MIN_DURATION,
     Math.max(valueCount, 1) * COMPLETION_SWEEP_MILLISECONDS_PER_BAR,
-  );
-}
-
-function getCompletionSweepNoteIndexes(valueCount: number) {
-  const count = Math.max(valueCount, 1);
-  const audibleCount = Math.min(count, COMPLETION_SWEEP_REFERENCE_NOTE_COUNT);
-  if (audibleCount === 1) return new Set([0]);
-
-  return new Set(
-    Array.from({ length: audibleCount }, (_, index) =>
-      Math.round((index * (count - 1)) / (audibleCount - 1)),
-    ),
   );
 }
 
@@ -2134,23 +2121,19 @@ export default function Home() {
     if (valuesToScan.length === 0) return;
 
     const spacing = duration / 1_000 / valuesToScan.length;
-    const audibleIndexes = getCompletionSweepNoteIndexes(valuesToScan.length);
-    const noteSpacing = duration / 1_000 / Math.max(audibleIndexes.size, 1);
     const startTime = context.currentTime + COMPLETION_SWEEP_AUDIO_VISUAL_LEAD / 1_000;
     const liveImpactPeak = 0.2 * (volume / 100) ** 2.5;
 
-    // The 22-value scan has the desired musical density. Larger rows keep that
-    // same number of evenly spaced notes while their visual scan still visits
-    // every bar, avoiding an increasingly noisy wall of overlapping voices.
+    // Each orange bar gets a matching note at the center of its scan window.
+    // That keeps the verification sound count exactly aligned with the array.
     valuesToScan.forEach((value, index) => {
-      if (!audibleIndexes.has(index)) return;
       const frequency = getSortingToneFrequency(value);
-      const requestedDuration = Math.min(0.052, Math.max(0.012, noteSpacing * 0.9));
+      const requestedDuration = Math.min(0.052, Math.max(0.012, spacing * 0.9));
       const actualVoiceDuration = Math.min(
         0.12,
         Math.max(requestedDuration, 4.5 / Math.max(frequency, 1)),
       );
-      const overlap = Math.max(1, actualVoiceDuration / noteSpacing);
+      const overlap = Math.max(1, actualVoiceDuration / spacing);
       const peakGain = liveImpactPeak / Math.sqrt(overlap);
 
       playMusicalVoice(
