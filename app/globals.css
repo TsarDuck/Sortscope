@@ -1146,8 +1146,8 @@ input:focus-visible {
 @keyframes completion-bar-scan {
   0%,
   84% {
-    background: linear-gradient(180deg, #ffe4ab, #ff9d43);
-    box-shadow: 0 0 22px rgba(255, 166, 71, 0.66);
+    background: linear-gradient(180deg, #ffd5db, #f0445b);
+    box-shadow: 0 0 22px rgba(246, 75, 96, 0.7);
     transform: translateY(-2px);
   }
 
@@ -1161,7 +1161,7 @@ input:focus-visible {
 @keyframes completion-bar-scan-dense {
   0%,
   84% {
-    background: linear-gradient(180deg, #ffe4ab, #ff9d43);
+    background: linear-gradient(180deg, #ffd5db, #f0445b);
     box-shadow: none;
   }
 
@@ -1449,6 +1449,8 @@ input:focus-visible {
 }
 
 .learn-copy__algorithm-name {
+  display: block;
+  margin-bottom: 0.2em;
   color: #b7afff;
 }
 
@@ -1941,6 +1943,114 @@ input:focus-visible {
 .practice-board:not(.practice-board--bogo) {
   min-height: 100px;
   padding: 20px;
+}
+
+/* Insertion Sort briefly holds the key outside the row while the larger left
+   values make room. The board keeps a real empty cell, never a duplicate key,
+   so the only available move reads exactly like the algorithm. */
+.practice-insertion-key-tray {
+  display: flex;
+  grid-column: 1 / -1;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  min-height: 66px;
+  padding: 8px 11px;
+  border: 1px solid rgba(255, 205, 93, 0.36);
+  border-radius: 11px;
+  background: linear-gradient(100deg, rgba(126, 77, 18, 0.2), rgba(54, 39, 101, 0.16));
+}
+
+.practice-insertion-key-tray__label {
+  color: #ffd76f;
+  font-size: 0.6rem;
+  font-weight: 900;
+  letter-spacing: 0.11em;
+}
+
+.practice-insertion-key-tray__key {
+  min-width: 60px;
+  min-height: 60px;
+  padding: 11px 14px;
+  border-radius: 11px;
+  font-size: 0.98rem;
+}
+
+.practice-insertion-key-tray__instruction {
+  color: #c8d0ec;
+  font-size: 0.71rem;
+  font-weight: 700;
+}
+
+.practice-board--prepared-insertion {
+  border-color: rgba(105, 232, 255, 0.46);
+  background:
+    linear-gradient(90deg, rgba(64, 184, 220, 0.07), transparent 42%),
+    rgba(7, 10, 27, 0.48);
+}
+
+.practice-block--insertion-shifted:disabled {
+  border-color: rgba(146, 218, 239, 0.5);
+  color: #e8f8ff;
+  background: linear-gradient(145deg, rgba(95, 164, 205, 0.34), rgba(63, 90, 168, 0.42));
+  box-shadow: 0 6px 16px rgba(4, 6, 24, 0.24);
+  cursor: default;
+  opacity: 1;
+}
+
+.practice-insertion-gap {
+  position: relative;
+  flex: 0 0 60px;
+  min-height: 60px;
+  padding: 8px 5px;
+  border: 2px dashed rgba(105, 232, 255, 0.9);
+  border-radius: 11px;
+  color: #b8f6ff;
+  background:
+    radial-gradient(circle at 50% 42%, rgba(108, 237, 255, 0.18), transparent 52%),
+    rgba(34, 86, 124, 0.22);
+  box-shadow: inset 0 0 0 1px rgba(149, 241, 255, 0.12), 0 0 16px rgba(74, 218, 246, 0.2);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 0.58rem;
+  font-weight: 900;
+  letter-spacing: 0.04em;
+  line-height: 1.12;
+  text-transform: uppercase;
+  cursor: pointer;
+  touch-action: none;
+  transition: transform 150ms ease, border-color 150ms ease, box-shadow 150ms ease, background 150ms ease;
+}
+
+.practice-insertion-gap::before {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  left: 8px;
+  height: 3px;
+  border-radius: 999px;
+  background: #6deaff;
+  box-shadow: 0 0 11px rgba(109, 234, 255, 0.86);
+  content: "";
+}
+
+.practice-insertion-gap:hover,
+.practice-insertion-gap:focus-visible,
+.practice-insertion-gap--ready {
+  border-color: #c4faff;
+  background:
+    radial-gradient(circle at 50% 42%, rgba(133, 244, 255, 0.28), transparent 54%),
+    rgba(39, 112, 151, 0.3);
+  box-shadow: inset 0 0 0 1px rgba(190, 250, 255, 0.22), 0 0 22px rgba(79, 225, 251, 0.32);
+  outline: 0;
+}
+
+.practice-insertion-gap--target {
+  border-color: #a7ffd0;
+  background:
+    radial-gradient(circle at 50% 42%, rgba(157, 255, 205, 0.3), transparent 55%),
+    rgba(42, 137, 104, 0.28);
+  box-shadow: inset 0 0 0 2px rgba(171, 255, 213, 0.24), 0 0 25px rgba(100, 241, 177, 0.45);
+  transform: scale(1.05);
 }
 
 .practice-bogo-entry {
@@ -3437,6 +3547,27 @@ input:focus-visible {
     padding: 10px 12px;
     border-radius: 10px;
     font-size: 0.92rem;
+  }
+
+  .practice-insertion-key-tray {
+    gap: 7px 10px;
+    min-height: 60px;
+    padding: 7px 9px;
+  }
+
+  .practice-insertion-key-tray__key,
+  .practice-insertion-gap {
+    flex-basis: 54px;
+    min-width: 54px;
+    min-height: 54px;
+    padding: 10px 12px;
+    border-radius: 10px;
+    font-size: 0.92rem;
+  }
+
+  .practice-insertion-gap {
+    padding: 7px 4px;
+    font-size: 0.54rem;
   }
 
   .practice-board:not(.practice-board--bogo) .practice-drop-slot {

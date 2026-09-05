@@ -84,52 +84,66 @@ export function applyPracticeMove(
   return nextValues;
 }
 
+export type PreparedInsertionKeyDrop = {
+  /** The exact empty row slot created by automatically shifting larger values. */
+  gapIndex: number;
+  /** The row after the key is held aside, with no duplicate values. */
+  slots: Array<number | null>;
+};
+
+function valuesMatch(left: readonly number[], right: readonly number[]) {
+  return left.length === right.length && left.every((value, index) => value === right[index]);
+}
+
 /**
- * Verify one literal insertion-sort shift for a hands-on lesson.
+ * Prepare a real insertion-sort teaching step.
  *
- * The yellow key may move exactly one neighboring place to the left. A direct
- * block drop may start on either member of that neighboring pair because a
- * swap has no direction, but a gap drop must carry the key itself into the
- * immediately preceding gap. This keeps the friendly shared drag controls
- * while preventing a merely helpful-looking unrelated swap from advancing an
- * insertion lesson.
+ * The key is held outside the row while every larger prefix value has already
+ * shifted right. The returned row therefore contains one genuine empty slot
+ * instead of temporarily drawing the key twice. A learner's only remaining
+ * action is to place that held key directly into the gap.
  */
-export function isAdjacentInsertionKeyMove(
+export function prepareInsertionKeyDrop(
+  values: readonly number[],
+  key: number,
+  targetValues: readonly number[],
+): PreparedInsertionKeyDrop | null {
+  if (values.length !== targetValues.length || values.length === 0) return null;
+
+  const sourceKeyIndex = values.indexOf(key);
+  const gapIndex = targetValues.indexOf(key);
+  if (sourceKeyIndex < 0 || gapIndex < 0 || sourceKeyIndex <= gapIndex) return null;
+
+  const valuesWithoutKey = values.filter((value) => value !== key);
+  const targetWithoutKey = targetValues.filter((value) => value !== key);
+  if (
+    valuesWithoutKey.length !== values.length - 1 ||
+    targetWithoutKey.length !== targetValues.length - 1 ||
+    !valuesMatch(valuesWithoutKey, targetWithoutKey)
+  ) {
+    return null;
+  }
+
+  const slots: Array<number | null> = [...valuesWithoutKey];
+  slots.splice(gapIndex, 0, null);
+  return { gapIndex, slots };
+}
+
+/**
+ * Accept only the one real completion of a prepared insertion step.
+ *
+ * This intentionally rejects partial neighbor swaps and arbitrary block
+ * rearrangements. The renderer has already shifted the larger values right;
+ * the held yellow key must land in the exact prepared gap.
+ */
+export function isPreparedInsertionKeyPlacement(
   previousValues: readonly number[],
   nextValues: readonly number[],
   key: number,
-  fromIndex: number,
-  toIndex: number,
-  mode: PracticeDropMode,
+  targetValues: readonly number[],
 ) {
-  const keyIndex = previousValues.indexOf(key);
-  const leftIndex = keyIndex - 1;
-  if (
-    keyIndex <= 0 ||
-    nextValues.length !== previousValues.length ||
-    nextValues.indexOf(key) !== leftIndex
-  ) {
-    return false;
-  }
-
-  const expectedValues = [...previousValues];
-  [expectedValues[leftIndex], expectedValues[keyIndex]] = [
-    expectedValues[keyIndex]!,
-    expectedValues[leftIndex]!,
-  ];
-  const reachesExpectedNeighborShift = expectedValues.every(
-    (value, index) => value === nextValues[index],
-  );
-  if (!reachesExpectedNeighborShift) return false;
-
-  if (mode === "swap") {
-    return (
-      (fromIndex === keyIndex && toIndex === leftIndex) ||
-      (fromIndex === leftIndex && toIndex === keyIndex)
-    );
-  }
-
-  return fromIndex === keyIndex && toIndex === leftIndex;
+  const prepared = prepareInsertionKeyDrop(previousValues, key, targetValues);
+  return prepared !== null && valuesMatch(nextValues, targetValues);
 }
 
 /**

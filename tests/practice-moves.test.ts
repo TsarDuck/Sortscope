@@ -3,9 +3,10 @@ import test from "node:test";
 import {
   applyPracticeMove,
   getPracticeTargetScore,
-  isAdjacentInsertionKeyMove,
+  isPreparedInsertionKeyPlacement,
   isPracticeRowFinished,
   isPracticeMoveProgress,
+  prepareInsertionKeyDrop,
   resolvePracticeDropTarget,
   shufflePracticeValues,
 } from "../app/lib/practice";
@@ -38,24 +39,31 @@ test("dropping back into the source gap leaves the row unchanged", () => {
   assert.deepEqual(applyPracticeMove([1, 2, 3, 4], 2, 2, "swap"), [1, 2, 3, 4]);
 });
 
-test("an insertion lesson accepts only the highlighted key's next adjacent left shift", () => {
+test("an insertion lesson prepares a single gap and accepts only the direct key placement", () => {
   const start = [4, 5, 1, 2, 3, 6];
-  const onePlaceLeft = [4, 1, 5, 2, 3, 6];
+  const target = [1, 4, 5, 2, 3, 6];
+  const prepared = prepareInsertionKeyDrop(start, 1, target);
 
-  // A direct neighboring swap is naturally direction-independent, so either
-  // block may be picked up. Both produce the key's same one-slot-left state.
-  assert.equal(isAdjacentInsertionKeyMove(start, onePlaceLeft, 1, 2, 1, "swap"), true);
-  assert.equal(isAdjacentInsertionKeyMove(start, onePlaceLeft, 1, 1, 2, "swap"), true);
+  assert.deepEqual(prepared, {
+    gapIndex: 0,
+    slots: [null, 4, 5, 2, 3, 6],
+  });
+  assert.equal(isPreparedInsertionKeyPlacement(start, target, 1, target), true);
 
-  // A gap move is an insertion operation, so the yellow key itself must be
-  // the item dropped into the immediately preceding gap.
-  assert.equal(isAdjacentInsertionKeyMove(start, onePlaceLeft, 1, 2, 1, "insert"), true);
-  assert.equal(isAdjacentInsertionKeyMove(start, onePlaceLeft, 1, 1, 3, "insert"), false);
-
-  const jumpedKey = applyPracticeMove(start, 2, 0, "insert");
+  const partialNeighborShift = [4, 1, 5, 2, 3, 6];
   const unrelatedSwap = applyPracticeMove(start, 0, 1, "swap");
-  assert.equal(isAdjacentInsertionKeyMove(start, jumpedKey, 1, 2, 0, "insert"), false);
-  assert.equal(isAdjacentInsertionKeyMove(start, unrelatedSwap, 1, 0, 1, "swap"), false);
+  assert.equal(isPreparedInsertionKeyPlacement(start, partialNeighborShift, 1, target), false);
+  assert.equal(isPreparedInsertionKeyPlacement(start, unrelatedSwap, 1, target), false);
+  assert.equal(prepareInsertionKeyDrop(target, 1, target), null);
+
+  assert.deepEqual(
+    prepareInsertionKeyDrop([1, 4, 5, 2, 3, 6], 2, [1, 2, 4, 5, 3, 6]),
+    { gapIndex: 1, slots: [1, null, 4, 5, 3, 6] },
+  );
+  assert.deepEqual(
+    prepareInsertionKeyDrop([1, 2, 4, 5, 3, 6], 3, [1, 2, 3, 4, 5, 6]),
+    { gapIndex: 2, slots: [1, 2, null, 4, 5, 6] },
+  );
 });
 
 test("a fully ordered practice row must still be the lesson's original permutation", () => {

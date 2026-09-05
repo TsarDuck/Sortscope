@@ -28,9 +28,10 @@ import {
 } from "./lib/sorting";
 import {
   applyPracticeMove,
-  isAdjacentInsertionKeyMove,
+  isPreparedInsertionKeyPlacement,
   isPracticeRowFinished,
   isPracticeMoveProgress,
+  prepareInsertionKeyDrop,
   resolvePracticeDropTarget,
   shufflePracticeValues,
   type PracticeDropMode,
@@ -460,7 +461,7 @@ const ALGORITHM_DETAILS: Record<AlgorithmId, AlgorithmDetails> = {
     stageLabel: "pass",
     stageDescription: "key placement",
     eyebrow: "THE BIG IDEA",
-    learnTitle: "Like sorting cards in your hand.",
+    learnTitle: "Like sorting cards in your hand",
     learnCopy: [
       "Insertion sort keeps the left side of the row sorted at all times. It then takes the next value from the unsorted side—the key—and finds where that key belongs in the sorted side.",
       "Instead of swapping the key over and over, it shifts every larger value one place right to open a gap. The key drops into that gap. Because the left side was sorted before and the key is inserted in the right spot, the left side is still sorted afterward.",
@@ -479,7 +480,7 @@ const ALGORITHM_DETAILS: Record<AlgorithmId, AlgorithmDetails> = {
       { values: "[3, 4, 5 | 1]", detail: "Repeat for 4; the sorted prefix grows by one value every pass." },
     ],
     benefits: [
-      { title: "Excellent when nearly ordered", copy: "It leaves the sorted left side alone and shifts only the values that are genuinely out of place." },
+      { title: "Excellent when nearly ordered", copy: "It leaves the sorted left side alone and shifts only the values that are out of place." },
       { title: "Small and stable", copy: "It works in the original row and keeps equal values in their original order." },
     ],
     tradeoffs: [
@@ -488,58 +489,31 @@ const ALGORITHM_DETAILS: Record<AlgorithmId, AlgorithmDetails> = {
     ],
     practice: [
       {
-        prompt: "5 is already in place. The first moving yellow key is 1; slide it one place left through 5.",
+        prompt: "Hold 1 as the key. 4 and 5 shift right automatically—drop 1 into the open gap.",
         start: [4, 5, 1, 2, 3, 6],
-        target: [4, 1, 5, 2, 3, 6],
-        insertingKey: 1,
-        activeRange: [1, 2],
-        validation: "exact",
-        hint: "Move the yellow 1 exactly one neighboring place left: drop it into the gap just before 5, or swap that neighboring pair.",
-      },
-      {
-        prompt: "Keep the same yellow key, 1, moving one more place left through 4.",
-        start: [4, 1, 5, 2, 3, 6],
         target: [1, 4, 5, 2, 3, 6],
         insertingKey: 1,
-        activeRange: [0, 1],
+        activeRange: [0, 2],
         validation: "exact",
-        hint: "1 still belongs before its immediate left neighbor, 4. Move it one slot left—do not jump across the row.",
+        hint: "The automatic shifts opened the first slot. Place the held yellow 1 directly into that gap.",
       },
       {
-        prompt: "Now the next yellow key is 2. Slide it one place left through 5.",
+        prompt: "Now hold 2 as the key. 4 and 5 shift right automatically—place 2 in its open gap.",
         start: [1, 4, 5, 2, 3, 6],
-        target: [1, 4, 2, 5, 3, 6],
-        insertingKey: 2,
-        activeRange: [2, 3],
-        validation: "exact",
-        hint: "2 belongs immediately before 5, so make this one neighboring move.",
-      },
-      {
-        prompt: "Keep the same yellow key, 2, moving one more place left through 4.",
-        start: [1, 4, 2, 5, 3, 6],
         target: [1, 2, 4, 5, 3, 6],
         insertingKey: 2,
-        activeRange: [1, 2],
+        activeRange: [1, 3],
         validation: "exact",
-        hint: "2 now belongs before its immediate left neighbor, 4. Move it one slot left—do not jump across the row.",
+        hint: "2 belongs after 1. The shifted 4 and 5 leave one glowing gap exactly there.",
       },
       {
-        prompt: "The final moving yellow key is 3. Slide it one place left through 5.",
+        prompt: "Finish with 3 as the key. 4 and 5 shift right automatically; drop 3 into the last open gap.",
         start: [1, 2, 4, 5, 3, 6],
-        target: [1, 2, 4, 3, 5, 6],
-        insertingKey: 3,
-        activeRange: [3, 4],
-        validation: "exact",
-        hint: "3 advances only one neighboring slot at a time. First move it through 5.",
-      },
-      {
-        prompt: "Finish the insertion: slide 3 one last place left through 4.",
-        start: [1, 2, 4, 3, 5, 6],
         target: [1, 2, 3, 4, 5, 6],
         insertingKey: 3,
-        activeRange: [2, 3],
+        activeRange: [2, 4],
         validation: "exact",
-        hint: "3 now fits directly before 4. One neighboring move completes the sorted prefix and the row.",
+        hint: "The only empty slot is between 2 and 4. Drop the held yellow 3 there to finish the row.",
       },
     ],
   },
@@ -551,7 +525,7 @@ const ALGORITHM_DETAILS: Record<AlgorithmId, AlgorithmDetails> = {
     stageLabel: "pass",
     stageDescription: "rightward neighbor sweep",
     eyebrow: "THE BIG IDEA",
-    learnTitle: "Let one large value rise at a time.",
+    learnTitle: "Let one large value rise at a time",
     learnCopy: [
       "Bubble sort walks from left to right, looking at one neighboring pair at a time. If the pair is backwards, it swaps them. A large value can therefore keep trading places with its next neighbor and travel toward the right edge in one pass.",
       "After a full pass, the largest value that was still unsorted must be at the far right, so it never needs to be checked again. The next pass stops one position earlier. Bubble sort is simple and easy to see, but it repeats many neighbor comparisons on large rows.",
@@ -637,7 +611,7 @@ const ALGORITHM_DETAILS: Record<AlgorithmId, AlgorithmDetails> = {
     stageLabel: "sweep",
     stageDescription: "forward or backward pass",
     eyebrow: "THE BIG IDEA",
-    learnTitle: "Shake it like a Polaroid picture.",
+    learnTitle: "Shake it like a Polaroid picture",
     learnCopy: [
       "Cocktail sort is bubble sort in two directions. On a forward sweep it compares neighbors from left to right and swaps a pair when the left value is larger. Large values therefore drift toward the right edge.",
       "It then turns around. The backward sweep compares neighbors from right to left, letting small values drift toward the left edge. After a forward and backward pair, both outer edges are more settled, so later sweeps only need to inspect the middle.",
@@ -723,7 +697,7 @@ const ALGORITHM_DETAILS: Record<AlgorithmId, AlgorithmDetails> = {
     stageLabel: "selection",
     stageDescription: "minimum placement",
     eyebrow: "THE BIG IDEA",
-    learnTitle: "Choose the next spot deliberately.",
+    learnTitle: "Choose the next spot deliberately",
     learnCopy: [
       "Selection sort divides the row into a finished left section and an unsorted right section. For each open position on the left, it scans every remaining value to find the smallest one.",
       "Only after the full scan does it place that minimum in the open position. That means it usually performs very few placements—about one per position—but it still performs many comparisons because it repeatedly searches the rest of the row.",
@@ -784,7 +758,7 @@ const ALGORITHM_DETAILS: Record<AlgorithmId, AlgorithmDetails> = {
     stageLabel: "heap pass",
     stageDescription: "heap extraction",
     eyebrow: "THE BIG IDEA",
-    learnTitle: "Keep the largest value on top.",
+    learnTitle: "Keep the largest value on top",
     learnCopy: [
       "Heap sort treats the row like a compact binary tree. In a max heap, every parent is at least as large as either of its children, so the root at the far left is always the largest active value.",
       "First it rearranges the row into that heap shape. Then it moves the root to the far right, where that largest value is final. A new root may now be too small, so it is sifted downward until the heap rule is restored. The active heap shrinks by one each time.",
@@ -877,7 +851,7 @@ const ALGORITHM_DETAILS: Record<AlgorithmId, AlgorithmDetails> = {
     stageLabel: "partition",
     stageDescription: "pivot placement",
     eyebrow: "THE BIG IDEA",
-    learnTitle: "Put pivots in their final places.",
+    learnTitle: "Put pivots in their final places",
     learnCopy: [
       "Quick sort first chooses a pivot—this visualizer uses the rightmost value. Leave the pivot parked there for a moment and scan only the values before it. Keep an imaginary smaller-values area at the left edge: when you find a value no larger than the pivot, move it into the next open spot in that area.",
       "For [4, 1, 3 | 2], the pivot is 2. 4 is too large, so it remains on the future right side. 1 is small enough, so it moves into the smaller-values area. Then place 2 directly after that area: [1, 2 | 4, 3]. The pivot is now final; repeat the same tiny job only inside the left and right ranges.",
@@ -986,7 +960,7 @@ const ALGORITHM_DETAILS: Record<AlgorithmId, AlgorithmDetails> = {
     stageLabel: "adaptive partition",
     stageDescription: "pivot choice and safety check",
     eyebrow: "THE BIG IDEA",
-    learnTitle: "Find order in the chaos.",
+    learnTitle: "Find order in the chaos",
     learnCopy: [
       "PDQ sort stands for pattern-defeating quicksort. Like Quick Sort, it divides a row around a pivot. The difference is that it watches for warning signs: a lopsided split, a row that is already almost ordered, or a repeating pattern that keeps tricking ordinary pivots.",
       "When a partition looks healthy, PDQ sort keeps the fast Quick Sort rhythm. When it sees trouble, it changes a few positions to break the pattern, uses tiny insertion-sort cleanups for short pieces, and has a Heap Sort safety fallback. It is designed to be quick in everyday data without risking Quick Sort's familiar worst-case slowdown.",
@@ -1107,7 +1081,7 @@ const ALGORITHM_DETAILS: Record<AlgorithmId, AlgorithmDetails> = {
     stageLabel: "merge pass",
     stageDescription: "run merging",
     eyebrow: "THE BIG IDEA",
-    learnTitle: "Combine sorted pieces.",
+    learnTitle: "Combine sorted pieces",
     learnCopy: [
       "Merge sort begins with a useful fact: a single value is already sorted. It repeatedly joins neighboring sorted runs into longer sorted runs, doubling the run size each pass.",
       "To merge two runs, compare their front values and write the smaller front value into a temporary output. Continue until one run is empty, then copy the remaining values from the other run. Because both inputs were sorted, each choice is safe and the combined run is sorted too.",
@@ -1222,7 +1196,7 @@ const ALGORITHM_DETAILS: Record<AlgorithmId, AlgorithmDetails> = {
     stageLabel: "run decision",
     stageDescription: "natural runs and merge order",
     eyebrow: "THE BIG IDEA",
-    learnTitle: "Build from the order that is already there.",
+    learnTitle: "Build from the order that is already there",
     learnCopy: [
       "Powersort begins by looking for natural runs: short stretches that are already rising, or falling stretches that can be turned around. Real data often contains these little pieces of order, even when the full row is not sorted.",
       "Instead of merging runs in a fixed left-to-right schedule, Powersort calculates how important each boundary is in a balanced merge tree. That lets it combine nearby runs in an order that keeps the total amount of copying close to the best possible for the runs it found.",
@@ -1372,7 +1346,7 @@ const ALGORITHM_DETAILS: Record<AlgorithmId, AlgorithmDetails> = {
     stageLabel: "shuffle",
     stageDescription: "random attempt",
     eyebrow: "CHAOS EXPERIMENT",
-    learnTitle: "Let chance do the sorting.",
+    learnTitle: "Let chance do the sorting",
     learnCopy: [
       "Bogo sort has no strategy for improving the row. It checks whether the row is sorted; if the answer is no, it produces a completely random new order and checks again.",
       "For n values there are n! possible orders, but only one is fully sorted. That means its odds collapse extremely quickly as n grows. The shuffle cap is not a shortcut to make Bogo practical—it simply stops the experiment before it can run forever.",
@@ -1831,6 +1805,8 @@ export default function Home() {
   const [practiceDragOffset, setPracticeDragOffset] = useState({ x: 0, y: 0 });
   const [practiceDropIndex, setPracticeDropIndex] = useState<number | null>(null);
   const [practiceDropMode, setPracticeDropMode] = useState<PracticeDropMode | null>(null);
+  const [insertionKeyHeld, setInsertionKeyHeld] = useState(true);
+  const [insertionKeySelected, setInsertionKeySelected] = useState(false);
   const [practiceSolved, setPracticeSolved] = useState(false);
   const [bogoPracticeEntered, setBogoPracticeEntered] = useState(false);
   const [bogoPracticeBusy, setBogoPracticeBusy] = useState(false);
@@ -1863,6 +1839,14 @@ export default function Home() {
     anchorX: number;
     anchorY: number;
     sourceOrigin: PracticeDropRegion;
+    moved: boolean;
+  } | null>(null);
+  const insertionKeyPointerRef = useRef<{
+    pointerId: number;
+    startX: number;
+    startY: number;
+    anchorX: number;
+    anchorY: number;
     moved: boolean;
   } | null>(null);
   // State paints the highlighted target, while this ref preserves the latest
@@ -1983,6 +1967,11 @@ export default function Home() {
   const isInsertionPractice =
     algorithm === "insertion" && currentPractice.insertingKey !== undefined;
   const insertionKey = isInsertionPractice ? currentPractice.insertingKey ?? null : null;
+  const preparedInsertionKeyDrop =
+    isInsertionPractice && !practiceFinished && insertionKeyHeld && insertionKey !== null
+      ? prepareInsertionKeyDrop(practiceValues, insertionKey, currentPractice.target)
+      : null;
+  const isPreparedInsertionPractice = preparedInsertionKeyDrop !== null;
   // Merge-family lessons use these position-based ranges to make the already
   // ordered runs visually explicit without changing the board's drag geometry.
   const practiceGroups = practiceFinished ? [] : currentPractice.groups ?? [];
@@ -2597,7 +2586,7 @@ export default function Home() {
     const startTime = context.currentTime + COMPLETION_SWEEP_AUDIO_VISUAL_LEAD / 1_000;
     const liveImpactPeak = 0.2 * (volume / 100) ** 2.5;
 
-    // Each orange bar gets a matching note at the center of its scan window.
+    // Each red completion bar gets a matching note at the center of its scan window.
     // That keeps the verification sound count exactly aligned with the array.
     valuesToScan.forEach((value, index) => {
       const frequency = getSortingToneFrequency(value);
@@ -3216,6 +3205,9 @@ export default function Home() {
     setPracticeDropIndex(null);
     setPracticeDropMode(null);
     practicePointerRef.current = null;
+    insertionKeyPointerRef.current = null;
+    setInsertionKeyHeld(false);
+    setInsertionKeySelected(false);
     practiceDropTargetRef.current = null;
     setPracticeSolved(true);
     setPracticeFeedback(completionFeedback);
@@ -3309,6 +3301,9 @@ export default function Home() {
     setPracticeDropIndex(null);
     setPracticeDropMode(null);
     practicePointerRef.current = null;
+    insertionKeyPointerRef.current = null;
+    setInsertionKeyHeld(nextAlgorithm === "insertion");
+    setInsertionKeySelected(false);
     practiceDropTargetRef.current = null;
     setPracticeSolved(false);
     setBogoPracticeEntered(false);
@@ -3365,26 +3360,13 @@ export default function Home() {
     toIndex: number,
     mode: PracticeDropMode,
   ): PracticeMoveResult {
-    // Insertion Sort's lesson is intentionally stricter than a generic
-    // "closer to sorted" puzzle. The highlighted key must make the one
-    // neighboring leftward shift prescribed by this step. Check it before
-    // the global sorted-row shortcut so a lucky unrelated swap cannot skip a
-    // key or teach the wrong rule.
-    if (
-      isInsertionPractice &&
-      (insertionKey === null ||
-        !isAdjacentInsertionKeyMove(
-          practiceValues,
-          nextValues,
-          insertionKey,
-          fromIndex,
-          toIndex,
-          mode,
-        ))
-    ) {
+    // The insertion walkthrough prepares the one correct gap by shifting its
+    // larger prefix values automatically. Generic swaps and row inserts are
+    // never part of that lesson; only the held yellow key may fill the gap.
+    if (isInsertionPractice) {
       setPracticeSolved(false);
       setPracticeFeedback(
-        "Only the yellow key's next one-place left shift counts here, so that move will slide back. Hint: " +
+        "The larger values have already shifted right. Pick up the held yellow key and place it in the glowing gap. Hint: " +
           currentPractice.hint,
       );
       return "wrong";
@@ -3476,8 +3458,170 @@ export default function Home() {
     setPracticeSelectedIndex(null);
   }
 
+  function placePreparedInsertionKey() {
+    if (
+      !isPreparedInsertionPractice ||
+      insertionKey === null ||
+      !isPreparedInsertionKeyPlacement(
+        practiceValues,
+        currentPractice.target,
+        insertionKey,
+        currentPractice.target,
+      )
+    ) {
+      setPracticeFeedback(
+        "That key needs the prepared glowing gap. Hint: " + currentPractice.hint,
+      );
+      return;
+    }
+
+    practiceBlockPositionsRef.current = capturePracticeBlockPositions();
+    const nextValues = [...currentPractice.target];
+    setPracticeValues(nextValues);
+    setInsertionKeyHeld(false);
+    setInsertionKeySelected(false);
+    setPracticeSolved(true);
+
+    if (
+      practiceStepIndex >= practiceSteps.length - 1 ||
+      isPracticeRowFinished(nextValues, currentPractice.target)
+    ) {
+      completePracticeWalkthrough();
+      return;
+    }
+
+    setPracticeFeedback("Correct. The key filled its gap; the next key is loading.");
+    schedulePracticeAdvance();
+  }
+
+  function getPreparedInsertionGapTarget(
+    clientX: number,
+    clientY: number,
+  ): PracticeDropTarget | null {
+    const board = practiceBoardRef.current;
+    const gapIndex = preparedInsertionKeyDrop?.gapIndex;
+    const gap = board?.querySelector<HTMLElement>("[data-practice-insertion-gap]");
+    if (!board || gapIndex === undefined || !gap) return null;
+
+    const boardRect = board.getBoundingClientRect();
+    if (
+      clientX < boardRect.left ||
+      clientX > boardRect.right ||
+      clientY < boardRect.top ||
+      clientY > boardRect.bottom
+    ) {
+      return null;
+    }
+
+    const region = getPracticeDropRegion(gap, gapIndex, PRACTICE_DIRECT_DROP_HIT_SLOP);
+    return clientX >= region.left &&
+      clientX <= region.right &&
+      clientY >= region.top &&
+      clientY <= region.bottom
+        ? { index: gapIndex, mode: "insert" }
+        : null;
+  }
+
+  function clearPreparedInsertionKeyDrag() {
+    insertionKeyPointerRef.current = null;
+    setPracticeDraggingId(null);
+    setPracticeDragOffset({ x: 0, y: 0 });
+    setPracticeDropTarget(null);
+  }
+
+  function handlePreparedInsertionKeyPointerDown(event: ReactPointerEvent<HTMLButtonElement>) {
+    if (
+      !isPreparedInsertionPractice ||
+      practiceFinished ||
+      practiceUndoPending ||
+      event.button !== 0
+    ) {
+      return;
+    }
+
+    event.currentTarget.getAnimations().forEach((animation) => animation.cancel());
+    event.currentTarget.setPointerCapture(event.pointerId);
+    const bounds = event.currentTarget.getBoundingClientRect();
+    insertionKeyPointerRef.current = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      anchorX: event.clientX - (bounds.left + bounds.width / 2),
+      anchorY: event.clientY - (bounds.top + bounds.height / 2),
+      moved: false,
+    };
+    setPracticeDraggingId(null);
+    setPracticeDragOffset({ x: 0, y: 0 });
+    setPracticeDropTarget(null);
+  }
+
+  function handlePreparedInsertionKeyPointerMove(event: ReactPointerEvent<HTMLButtonElement>) {
+    const drag = insertionKeyPointerRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+
+    const deltaX = event.clientX - drag.startX;
+    const deltaY = event.clientY - drag.startY;
+    if (Math.abs(deltaX) + Math.abs(deltaY) > 5 && !drag.moved) {
+      drag.moved = true;
+      setPracticeDraggingId("insertion-key");
+    }
+    if (!drag.moved) return;
+
+    event.preventDefault();
+    setPracticeDragOffset({ x: deltaX + drag.anchorX, y: deltaY + drag.anchorY });
+    setPracticeDropTarget(getPreparedInsertionGapTarget(event.clientX, event.clientY));
+  }
+
+  function finishPreparedInsertionKeyDrag(
+    event?: ReactPointerEvent<HTMLButtonElement>,
+    cancelled = false,
+  ) {
+    const drag = insertionKeyPointerRef.current;
+    if (!drag || (event && event.pointerId !== drag.pointerId)) return;
+
+    const target =
+      !cancelled && event
+        ? getPreparedInsertionGapTarget(event.clientX, event.clientY)
+        : null;
+    if (drag.moved) suppressPracticeClickAfterDrag();
+    clearPreparedInsertionKeyDrag();
+    if (target) placePreparedInsertionKey();
+  }
+
+  function handlePreparedInsertionKeyClick() {
+    if (!isPreparedInsertionPractice || practiceFinished || practiceUndoPending) return;
+    if (suppressPracticeClickRef.current) {
+      suppressPracticeClickRef.current = false;
+      return;
+    }
+
+    setInsertionKeySelected((selected) => {
+      setPracticeFeedback(
+        selected
+          ? "The key is back in hand. Pick it up when you are ready to place it."
+          : "Key picked up. Drop it into the one glowing gap.",
+      );
+      return !selected;
+    });
+  }
+
+  function handlePreparedInsertionGapClick() {
+    if (!isPreparedInsertionPractice || practiceFinished || practiceUndoPending) return;
+    if (!insertionKeySelected) {
+      setPracticeFeedback("Pick up the yellow key first, then place it in this glowing gap.");
+      return;
+    }
+    placePreparedInsertionKey();
+  }
+
   function handlePracticeBlockClick(index: number) {
     if (practiceFinished || practiceUndoPending) return;
+    if (isPreparedInsertionPractice) {
+      setPracticeFeedback(
+        "The row is ready. Pick up the held yellow key and place it in the one glowing gap.",
+      );
+      return;
+    }
     if (suppressPracticeClickRef.current) {
       suppressPracticeClickRef.current = false;
       return;
@@ -3667,6 +3811,9 @@ export default function Home() {
     setPracticeDropIndex(null);
     setPracticeDropMode(null);
     practicePointerRef.current = null;
+    insertionKeyPointerRef.current = null;
+    setInsertionKeyHeld(nextStep.insertingKey !== undefined);
+    setInsertionKeySelected(false);
     practiceDropTargetRef.current = null;
     setPracticeSolved(false);
     setPracticeFeedback(null);
@@ -4661,7 +4808,6 @@ export default function Home() {
             <p className="eyebrow">{algorithmDetails.eyebrow}</p>
             <h2 id="learn-title">
               <span className="learn-copy__algorithm-name">{algorithmLabel}</span>
-              <br />
               {algorithmDetails.learnTitle}
             </h2>
             <div className="learn-copy__explanation">
@@ -4799,7 +4945,7 @@ export default function Home() {
             {isInsertionPractice && !practiceFinished && insertionKey !== null && (
               <div className="practice-quick-status practice-insertion-status" aria-label="Current insertion sort key">
                 <span><strong>Key</strong> {insertionKey}</span>
-                <span><strong>Rule</strong> slide the yellow key one neighboring position left at a time</span>
+                <span><strong>Rule</strong> larger values shift right, then the key fills one gap</span>
               </div>
             )}
             {currentPractice.decision && !practiceFinished && (
@@ -4844,13 +4990,53 @@ export default function Home() {
                 : isQuickPractice
                 ? "The gold block is the parked pivot. Drop onto a block to swap it, or into a glowing gap to shift the row. Only the safe partition move stays, so the next pivot can never become stuck."
                 : isInsertionPractice
-                  ? "The yellow block is the key being inserted. Only its next neighboring move left can advance this step: swap that pair from either block, or drag the key into the adjacent gap."
+                  ? "The yellow key is held outside the row while every larger value has already shifted right. Drag it—or click it and then the gap—directly into the one glowing empty slot. The other blocks are not draggable in this step."
                 : "Click two blocks or drop one directly onto another to swap them. Drop into any glowing gap to shift the row instead. The final arrangement—not which value you started with—decides whether the move stays."}
             </p>
+            {isPreparedInsertionPractice && insertionKey !== null && preparedInsertionKeyDrop && (
+              <div className="practice-insertion-key-tray" aria-label={"Held insertion key " + insertionKey}>
+                <span className="practice-insertion-key-tray__label">HELD KEY</span>
+                <button
+                  className={
+                    "practice-block practice-block--insertion-key practice-insertion-key-tray__key " +
+                    (insertionKeySelected ? "practice-block--selected " : "") +
+                    (practiceDraggingId === "insertion-key" ? "practice-block--dragging " : "")
+                  }
+                  type="button"
+                  onPointerDown={handlePreparedInsertionKeyPointerDown}
+                  onPointerMove={handlePreparedInsertionKeyPointerMove}
+                  onPointerUp={(event) => finishPreparedInsertionKeyDrag(event)}
+                  onPointerCancel={(event) => finishPreparedInsertionKeyDrag(event, true)}
+                  onClick={handlePreparedInsertionKeyClick}
+                  aria-pressed={insertionKeySelected}
+                  aria-grabbed={practiceDraggingId === "insertion-key"}
+                  aria-label={"Held key " + insertionKey + ". Drag it into the glowing insertion gap."}
+                  style={
+                    practiceDraggingId === "insertion-key"
+                      ? {
+                          transform:
+                            "translate(" +
+                            practiceDragOffset.x +
+                            "px, " +
+                            practiceDragOffset.y +
+                            "px) scale(1.04)",
+                        }
+                      : undefined
+                  }
+                >
+                  <span className="practice-block__value">{insertionKey}</span>
+                  <span className="practice-block__badge">key</span>
+                </button>
+                <span className="practice-insertion-key-tray__instruction">
+                  Drop into slot {preparedInsertionKeyDrop.gapIndex + 1}
+                </span>
+              </div>
+            )}
             <div
               className={
                 "practice-board " +
                 (isBogoPractice ? "practice-board--bogo " : "") +
+                (isPreparedInsertionPractice ? "practice-board--prepared-insertion " : "") +
                 (isBogoPractice && !bogoPracticeEntered ? "practice-board--bogo-entry " : "") +
                 (bogoPracticeRolling ? "practice-board--bogo-rolling " : "") +
                 (practiceDraggingId ? "practice-board--dragging " : "") +
@@ -4912,6 +5098,49 @@ export default function Home() {
                       )}
                     </div>
                   ))
+                )
+              ) : isPreparedInsertionPractice && preparedInsertionKeyDrop && insertionKey !== null ? (
+                preparedInsertionKeyDrop.slots.map((value, index) =>
+                  value === null ? (
+                    <button
+                      className={
+                        "practice-insertion-gap " +
+                        (practiceDraggingId === "insertion-key" &&
+                        practiceDropMode === "insert" &&
+                        practiceDropIndex === index
+                          ? "practice-insertion-gap--target "
+                          : "") +
+                        (insertionKeySelected ? "practice-insertion-gap--ready " : "")
+                      }
+                      type="button"
+                      key={"insertion-gap-" + index}
+                      data-practice-insertion-gap
+                      onClick={handlePreparedInsertionGapClick}
+                      aria-label={
+                        "Open insertion gap at slot " +
+                        String(index + 1) +
+                        ". Place held key " +
+                        insertionKey +
+                        " here."
+                      }
+                    >
+                      <span aria-hidden="true">open gap</span>
+                    </button>
+                  ) : (
+                    <button
+                      className="practice-block practice-block--insertion-shifted"
+                      type="button"
+                      key={"insertion-slot-" + index + "-" + value}
+                      ref={(element) => setPracticeBlockRef("value-" + value, element)}
+                      data-practice-index={index}
+                      disabled
+                      aria-label={
+                        "Value " + value + ", shifted right while key " + insertionKey + " is held"
+                      }
+                    >
+                      <span className="practice-block__value">{value}</span>
+                    </button>
+                  ),
                 )
               ) : (
                 <>
