@@ -167,6 +167,7 @@ const BOGO_STANDARD_MAX_ATTEMPTS = 999_999_999;
 // browser's measured rate once a Bogo session has run long enough to sample.
 const BOGO_FAST_ESTIMATED_SHUFFLES_PER_SECOND = 2_500_000;
 const BOGO_RATE_SAMPLE_INTERVAL = 250;
+const BOGO_EXPECTED_RATE_FREEZE_AFTER = 2_500;
 const INITIAL_VALUES = [
   17, 5, 22, 8, 19, 3, 14, 24, 1, 12, 7, 20, 10, 23, 4, 16, 9, 21, 2, 18,
   6, 15, 11, 13,
@@ -285,6 +286,25 @@ function formatBogoExpectedTime(shuffles: number, shufflesPerSecond: number) {
     amount >= 100 ? Math.round(amount) : amount >= 10 ? Math.round(amount * 10) / 10 : Math.round(amount * 100) / 100;
 
   return rounded.toLocaleString("en-US") + " " + (rounded === 1 ? unit.singular : unit.plural);
+}
+
+function formatBogoElapsedTime(milliseconds: number) {
+  const totalMilliseconds = Math.max(0, Math.round(milliseconds));
+
+  if (totalMilliseconds < 60_000) {
+    const seconds = totalMilliseconds / 1_000;
+    return (seconds < 10 ? seconds.toFixed(1) : Math.round(seconds).toString()) + "s";
+  }
+
+  const totalSeconds = Math.floor(totalMilliseconds / 1_000);
+  const days = Math.floor(totalSeconds / 86_400);
+  const hours = Math.floor((totalSeconds % 86_400) / 3_600);
+  const minutes = Math.floor((totalSeconds % 3_600) / 60);
+  const seconds = totalSeconds % 60;
+
+  if (days > 0) return days + "d " + hours + "h " + minutes + "m";
+  if (hours > 0) return hours + "h " + String(minutes).padStart(2, "0") + "m " + String(seconds).padStart(2, "0") + "s";
+  return minutes + "m " + String(seconds).padStart(2, "0") + "s";
 }
 
 type AlgorithmInsight = {
@@ -1288,6 +1308,11 @@ export default function Home() {
   const [runState, setRunState] = useState<RunState>("ready");
   const [bogoLiveStep, setBogoLiveStep] = useState<SortStep | null>(null);
   const [bogoMeasuredShuffleRate, setBogoMeasuredShuffleRate] = useState<number | null>(null);
+  const [bogoFrozenExpectedShuffleRate, setBogoFrozenExpectedShuffleRate] = useState<number | null>(null);
+  const [bogoExpectedRateSource, setBogoExpectedRateSource] = useState<
+    "calibrating" | "measured" | "modeled"
+  >("calibrating");
+  const [bogoElapsedMilliseconds, setBogoElapsedMilliseconds] = useState(0);
   const [bogoCelebration, setBogoCelebration] = useState(false);
   const [completionSweepActive, setCompletionSweepActive] = useState(false);
   const [soundVolume, setSoundVolume] = useState(50);
@@ -1336,6 +1361,19 @@ export default function Home() {
     startingAttempts: number;
     lastReportedAt: number;
   } | null>(null);
+  const bogoElapsedTimerRef = useRef<{
+    accumulatedMilliseconds: number;
+    startedAt: number | null;
+    generation: number;
+  }>({
+    accumulatedMilliseconds: 0,
+    startedAt: null,
+    generation: 0,
+  });
+  const bogoExpectedRateSampleRef = useRef<{
+    startingAttempts: number;
+    finalized: boolean;
+  } | null>(null);
   const [meanSlideOffsets, setMeanSlideOffsets] = useState<Record<number, number>>({});
   const [meanSlideStage, setMeanSlideStage] = useState<"idle" | "prepare" | "animate">("idle");
   const [motionSlideOffsets, setMotionSlideOffsets] = useState<Record<string, number>>({});
@@ -1348,10 +1386,31 @@ export default function Home() {
   const bogoSliderStep = 1;
   const bogoExpectedShuffles = isBogo ? getBogoExpectedShuffles(arraySize) : 0;
   const bogoModeledShuffleRate = isBogo ? getBogoEstimatedShuffleRate(speed) : 0;
-  const bogoShuffleRate = bogoMeasuredShuffleRate ?? bogoModeledShuffleRate;
+  const bogoExpectedShuffleRate =
+    bogoFrozenExpectedShuffleRate ?? bogoMeasuredShuffleRate ?? bogoModeledShuffleRate;
   const bogoExpectedTime = isBogo
-    ? formatBogoExpectedTime(bogoExpectedShuffles, bogoShuffleRate)
+    ? formatBogoExpectedTime(bogoExpectedShuffles, bogoExpectedShuffleRate)
     : "";
+  const bogoExpectedMilliseconds = isBogo
+    ? (bogoExpectedShuffles / Math.max(bogoExpectedShuffleRate, 1)) * 1_000
+    : 0;
+  const bogoAverageProgress = isBogo
+    ? bogoElapsedMilliseconds / Math.max(bogoExpectedMilliseconds, 1)
+    : 0;
+  const bogoTimerTone =
+    bogoAverageProgress > 1 ? "over" : bogoAverageProgress > 0.5 ? "on-track" : "lucky";
+  const bogoTimerRangeStatus =
+    bogoTimerTone === "over"
+      ? "Past the expected average"
+      : bogoTimerTone === "on-track"
+        ? "Within the expected average"
+        : "Lucky — under half the expected average";
+  const bogoTimerStatus =
+    runState === "ready"
+      ? "Ready — lucky range is under half the average"
+      : runState === "paused"
+        ? bogoTimerRangeStatus + " — paused"
+        : bogoTimerRangeStatus;
   const soundEnabled = soundVolume > 0;
   const algorithmDetails = ALGORITHM_DETAILS[algorithm];
   const practiceSteps = algorithmDetails.practice;
@@ -1799,6 +1858,17 @@ export default function Home() {
             (isBogo && bogoRunsUntilSolved ? " with no shuffle cap." : " of " + totalStages + ".")
           : "Ready to demonstrate " + algorithmLabel + ".";
 
+  function resetBogoElapsedTimer() {
+    const stopwatch = bogoElapsedTimerRef.current;
+    stopwatch.generation += 1;
+    stopwatch.accumulatedMilliseconds = 0;
+    stopwatch.startedAt = null;
+    bogoExpectedRateSampleRef.current = null;
+    setBogoFrozenExpectedShuffleRate(null);
+    setBogoExpectedRateSource("calibrating");
+    setBogoElapsedMilliseconds(0);
+  }
+
   function resetCompletionSweep() {
     if (completionSweepStartTimerRef.current !== null) {
       window.clearTimeout(completionSweepStartTimerRef.current);
@@ -2142,6 +2212,27 @@ export default function Home() {
         }
       }
 
+      const expectedRateSample = bogoExpectedRateSampleRef.current;
+      if (expectedRateSample && !expectedRateSample.finalized) {
+        const stopwatch = bogoElapsedTimerRef.current;
+        const elapsedMilliseconds =
+          stopwatch.accumulatedMilliseconds +
+          (stopwatch.startedAt === null ? 0 : Math.max(0, now - stopwatch.startedAt));
+        const attempts = session.attempts - expectedRateSample.startingAttempts;
+        const hasMeasuredOpeningRate =
+          elapsedMilliseconds >= BOGO_EXPECTED_RATE_FREEZE_AFTER && attempts > 0;
+
+        if (hasMeasuredOpeningRate || session.done) {
+          expectedRateSample.finalized = true;
+          setBogoFrozenExpectedShuffleRate(
+            hasMeasuredOpeningRate
+              ? (attempts * 1_000) / elapsedMilliseconds
+              : bogoModeledShuffleRate,
+          );
+          setBogoExpectedRateSource(hasMeasuredOpeningRate ? "measured" : "modeled");
+        }
+      }
+
       setBogoLiveStep(getBogoSessionStep(session));
       if (session.done) {
         setRunState("complete");
@@ -2156,7 +2247,39 @@ export default function Home() {
       cancelled = true;
       if (timer !== undefined) window.clearTimeout(timer);
     };
-  }, [bogoSlowMotionDelay, isBogo, runState]);
+  }, [bogoModeledShuffleRate, bogoSlowMotionDelay, isBogo, runState]);
+
+  useEffect(() => {
+    if (!isBogo || runState !== "running") return;
+
+    const stopwatch = bogoElapsedTimerRef.current;
+    const generation = stopwatch.generation;
+    stopwatch.startedAt = performance.now();
+
+    const updateElapsedTime = () => {
+      if (stopwatch.generation !== generation || stopwatch.startedAt === null) {
+        return;
+      }
+
+      setBogoElapsedMilliseconds(
+        stopwatch.accumulatedMilliseconds + Math.max(0, performance.now() - stopwatch.startedAt),
+      );
+    };
+
+    updateElapsedTime();
+    const timer = window.setInterval(updateElapsedTime, 100);
+
+    return () => {
+      window.clearInterval(timer);
+      if (stopwatch.generation !== generation || stopwatch.startedAt === null) {
+        return;
+      }
+
+      stopwatch.accumulatedMilliseconds += Math.max(0, performance.now() - stopwatch.startedAt);
+      stopwatch.startedAt = null;
+      setBogoElapsedMilliseconds(stopwatch.accumulatedMilliseconds);
+    };
+  }, [isBogo, runState]);
 
   useEffect(() => {
     if (isBogo || runState !== "running" || steps.length === 0) return;
@@ -2179,6 +2302,7 @@ export default function Home() {
 
   function createNewArray(size = arraySize) {
     resetCompletionSweep();
+    resetBogoElapsedTimer();
     const nextValues = makeRandomArray(size);
     setBogoCelebration(false);
     bogoSessionRef.current = null;
@@ -2194,6 +2318,7 @@ export default function Home() {
 
   function resetArray() {
     resetCompletionSweep();
+    resetBogoElapsedTimer();
     setBogoCelebration(false);
     bogoSessionRef.current = null;
     bogoRateSampleRef.current = null;
@@ -2531,6 +2656,7 @@ export default function Home() {
 
   function handleAlgorithmChange(nextAlgorithm: AlgorithmId) {
     resetCompletionSweep();
+    resetBogoElapsedTimer();
     setBogoCelebration(false);
     bogoSessionRef.current = null;
     bogoRateSampleRef.current = null;
@@ -2575,6 +2701,7 @@ export default function Home() {
 
     const audioContext = soundEnabled ? ensureAudioContext() : null;
     resetCompletionSweep();
+    resetBogoElapsedTimer();
     setBogoCelebration(false);
     if (algorithm === "bogo") {
       if (audioContext) {
@@ -2592,6 +2719,15 @@ export default function Home() {
         startingAttempts: session.attempts,
         lastReportedAt: 0,
       };
+      bogoExpectedRateSampleRef.current = {
+        startingAttempts: session.attempts,
+        finalized: false,
+      };
+      if (session.done) {
+        bogoExpectedRateSampleRef.current.finalized = true;
+        setBogoFrozenExpectedShuffleRate(bogoModeledShuffleRate);
+        setBogoExpectedRateSource("modeled");
+      }
       setBogoMeasuredShuffleRate(null);
       setValues([...originalValues]);
       setSteps([]);
@@ -2636,14 +2772,31 @@ export default function Home() {
 
   function handleArraySizeInputChange(input: string) {
     setArraySizeInput(input);
+
+    // Number steppers report a complete integer immediately. Commit that
+    // value right away so their arrows (and a valid pasted value) redraw the
+    // board just like the range slider. Keep partial or out-of-range typing
+    // in place until blur so someone can still finish editing a larger value.
+    const candidate = Number(input);
+    if (
+      input.trim() !== "" &&
+      Number.isFinite(candidate) &&
+      Number.isInteger(candidate) &&
+      candidate >= minimumArraySize &&
+      candidate <= maximumArraySize
+    ) {
+      handleArraySizeChange(candidate);
+    }
   }
 
   function normalizeArraySizeInput() {
-    const candidate = Math.round(Number(arraySizeInput));
-    if (!Number.isFinite(candidate)) {
+    const trimmedInput = arraySizeInput.trim();
+    const numericValue = Number(trimmedInput);
+    if (trimmedInput === "" || !Number.isFinite(numericValue)) {
       setArraySizeInput(String(arraySize));
       return;
     }
+    const candidate = Math.round(numericValue);
     const clampedSize = Math.min(maximumArraySize, Math.max(minimumArraySize, candidate));
     if (clampedSize !== arraySize) {
       handleArraySizeChange(clampedSize);
@@ -2795,11 +2948,27 @@ export default function Home() {
         </section>
 
         <section id="visualizer" className="visualizer" aria-labelledby="visualizer-title">
-          <div className="control-deck">
+          <div className={"control-deck " + (isBogo ? "control-deck--bogo" : "")}>
             <div className="control-deck__intro">
               <p className="eyebrow">CONTROL ROOM</p>
               <h2 id="visualizer-title">{algorithmDetails.controlTitle}</h2>
             </div>
+
+            {isBogo && (
+              <aside
+                className={
+                  "bogo-run-timer bogo-run-timer--" + bogoTimerTone +
+                  (runState === "paused" ? " bogo-run-timer--paused" : "")
+                }
+                aria-label={
+                  "Bogo Sort run timer: " + formatBogoElapsedTime(bogoElapsedMilliseconds) + ". " + bogoTimerStatus + "."
+                }
+              >
+                <span>RUN TIMER</span>
+                <strong>{formatBogoElapsedTime(bogoElapsedMilliseconds)}</strong>
+                <small>{bogoTimerStatus}</small>
+              </aside>
+            )}
 
             <div className={"controls " + (isBogo ? "controls--bogo" : "")} aria-label="Visualizer controls">
               <div className="algorithm-controls">
@@ -2881,9 +3050,15 @@ export default function Home() {
                       <strong>{bogoExpectedTime}</strong>
                       <small>
                         One sorted order in {formatBogoShuffleEstimate(bogoExpectedShuffles)} shuffles on average. {" "}
-                        {bogoMeasuredShuffleRate !== null
-                          ? "This browser measured " + formatBogoShuffleRate(bogoShuffleRate) + " during this run."
-                          : "At " + speed + "% speed, the runner is modeled at " + formatBogoShuffleRate(bogoShuffleRate) + "."}{" "}
+                        {bogoExpectedRateSource === "measured"
+                          ? "Locked from the first 2.5 seconds at " + formatBogoShuffleRate(bogoExpectedShuffleRate) + "."
+                          : bogoExpectedRateSource === "modeled"
+                            ? "This run ended before calibration, so this estimate is locked to the start-up model at " + formatBogoShuffleRate(bogoExpectedShuffleRate) + "."
+                            : runState === "paused"
+                              ? "Calibration is paused with the run and locks after 2.5 seconds of active time."
+                              : runState === "running"
+                                ? "Calibrating the first 2.5 seconds at a provisional " + formatBogoShuffleRate(bogoExpectedShuffleRate) + "."
+                                : "At " + speed + "% speed, the runner is modeled at " + formatBogoShuffleRate(bogoExpectedShuffleRate) + ". It locks after the first 2.5 seconds of a run."}{" "}
                         Individual runs can be much luckier or unluckier.
                       </small>
                       {runState === "complete" && currentStep.phase === "complete" && currentStep.pass > 0 && (
@@ -2920,7 +3095,6 @@ export default function Home() {
                     onKeyDown={(event) => {
                       if (event.key === "Enter") event.currentTarget.blur();
                     }}
-                    disabled={isLocked}
                     aria-label="Array size exact value"
                   />
                 </span>
@@ -2931,7 +3105,6 @@ export default function Home() {
                   step="1"
                   value={arraySize}
                   onChange={(event) => handleArraySizeChange(Number(event.target.value))}
-                  disabled={isLocked}
                   aria-label="Array size"
                 />
               </label>

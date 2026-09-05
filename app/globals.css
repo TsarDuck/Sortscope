@@ -238,6 +238,29 @@ button:disabled {
   background: rgba(255, 255, 255, 0.018);
 }
 
+/* Bogo's tall control stack leaves a useful visual lane on the left. */
+.control-deck--bogo {
+  display: grid;
+  grid-template-columns: minmax(220px, 0.72fr) minmax(0, 2.28fr);
+  grid-template-rows: minmax(0, 1fr) auto;
+  grid-template-areas:
+    "timer controls"
+    "intro controls";
+  align-items: stretch;
+  gap: 18px 28px;
+}
+
+.control-deck--bogo .control-deck__intro {
+  grid-area: intro;
+  align-self: end;
+}
+
+.control-deck--bogo .controls {
+  grid-area: controls;
+  min-width: 0;
+  align-self: end;
+}
+
 .control-deck__intro h2 {
   font-size: 1.34rem;
 }
@@ -258,6 +281,90 @@ button:disabled {
    to squeeze its native number spinner into the label. */
 .controls--bogo {
   flex-wrap: wrap;
+}
+
+.bogo-run-timer {
+  grid-area: timer;
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 3px 12px;
+  width: min(100%, 292px);
+  padding: 14px 15px;
+  border: 1px solid rgba(246, 195, 96, 0.72);
+  border-radius: 11px;
+  color: #ffe8ad;
+  background:
+    radial-gradient(circle at 84% 20%, rgba(255, 216, 112, 0.2), transparent 42%),
+    linear-gradient(135deg, rgba(113, 78, 31, 0.43), rgba(69, 49, 44, 0.45));
+  box-shadow: 0 0 24px rgba(249, 192, 84, 0.14), inset 0 1px rgba(255, 238, 190, 0.09);
+  transition: border-color 180ms ease, background 180ms ease, box-shadow 180ms ease, color 180ms ease;
+}
+
+.bogo-run-timer > span {
+  grid-column: 1 / -1;
+  color: #f2c879;
+  font-size: 0.6rem;
+  font-weight: 900;
+  letter-spacing: 0.14em;
+}
+
+.bogo-run-timer strong {
+  color: #fff2cb;
+  font-family: var(--font-display), serif;
+  font-size: clamp(1.28rem, 2.4vw, 1.86rem);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.035em;
+  line-height: 1;
+}
+
+.bogo-run-timer small {
+  align-self: end;
+  max-width: 138px;
+  color: #f3d9a3;
+  font-size: 0.62rem;
+  font-weight: 700;
+  line-height: 1.28;
+  text-align: right;
+}
+
+.bogo-run-timer--on-track {
+  border-color: rgba(112, 234, 166, 0.76);
+  color: #a8f6c8;
+  background:
+    radial-gradient(circle at 84% 20%, rgba(112, 234, 166, 0.22), transparent 42%),
+    linear-gradient(135deg, rgba(28, 99, 71, 0.45), rgba(31, 64, 57, 0.46));
+  box-shadow: 0 0 25px rgba(89, 234, 153, 0.16), inset 0 1px rgba(200, 255, 222, 0.1);
+}
+
+.bogo-run-timer--on-track > span,
+.bogo-run-timer--on-track small {
+  color: #b3f4cf;
+}
+
+.bogo-run-timer--on-track strong {
+  color: #e0ffe9;
+}
+
+.bogo-run-timer--over {
+  border-color: rgba(255, 113, 130, 0.88);
+  color: #ffc5ce;
+  background:
+    radial-gradient(circle at 84% 20%, rgba(255, 110, 128, 0.25), transparent 42%),
+    linear-gradient(135deg, rgba(132, 42, 63, 0.52), rgba(78, 30, 53, 0.5));
+  box-shadow: 0 0 26px rgba(248, 82, 107, 0.2), inset 0 1px rgba(255, 222, 226, 0.1);
+}
+
+.bogo-run-timer--over > span,
+.bogo-run-timer--over small {
+  color: #ffc1cb;
+}
+
+.bogo-run-timer--over strong {
+  color: #ffe0e5;
+}
+
+.bogo-run-timer--paused {
+  opacity: 0.78;
 }
 
 .control-field {
@@ -2259,6 +2366,11 @@ input:focus-visible {
     display: block;
   }
 
+  .control-deck--bogo .bogo-run-timer {
+    width: min(100%, 330px);
+    margin-top: 18px;
+  }
+
   .controls {
     flex-wrap: wrap;
     justify-content: flex-start;
@@ -2314,6 +2426,10 @@ input:focus-visible {
   .workbench {
     padding-right: 16px;
     padding-left: 16px;
+  }
+
+  .control-deck--bogo .bogo-run-timer {
+    width: 100%;
   }
 
   .controls {
