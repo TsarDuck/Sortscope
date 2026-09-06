@@ -7,6 +7,7 @@ import {
   createSmallArrayPianoToneMap,
   decodePcmWav,
   getContinuousToneFrequency,
+  getDenseTonePulseWindow,
   getSafeScheduledAudioTime,
   isCompletionSweepAudioFinished,
   usesContinuousDenseTone,
@@ -83,7 +84,7 @@ test("a 25-value row uses every piano semitone from C4 through C6", () => {
   assert.equal(ordered.at(-1), PIANO_TONE_LOW_FREQUENCY * 4);
 });
 
-test("short rows preserve a pitch for duplicate values and dense rows stay continuous", () => {
+test("short rows preserve duplicate pitches and dense rows stay unquantized", () => {
   const tones = createSmallArrayPianoToneMap([1, 3, 1, 2]);
 
   assert.ok(tones);
@@ -104,7 +105,24 @@ test("dense tone scheduling never starts in the current or a past audio quantum"
   assert.equal(getSafeScheduledAudioTime(1, 1, 0), 1);
 });
 
-test("dense rows use one continuous tone engine while piano rows retain note voices", () => {
+test("dense tone pulses keep an explicit silence gap and bounded cadence", () => {
+  const first = getDenseTonePulseWindow(null, 1, 0.006, 0.006, 0.018, 0.024);
+  assert.deepEqual(first, {
+    startTime: 1,
+    attackEndTime: 1.006,
+    releaseStartTime: 1.012,
+    endTime: 1.03,
+  });
+  assert.equal(
+    getDenseTonePulseWindow(first.endTime, 1.053, 0.006, 0.006, 0.018, 0.024),
+    null,
+  );
+  assert.ok(
+    getDenseTonePulseWindow(first.endTime, 1.054, 0.006, 0.006, 0.018, 0.024),
+  );
+});
+
+test("dense rows use the reusable pulse engine while piano rows retain note voices", () => {
   assert.equal(usesContinuousDenseTone(25), false);
   assert.equal(usesContinuousDenseTone(26), true);
   assert.equal(usesContinuousDenseTone(256), true);

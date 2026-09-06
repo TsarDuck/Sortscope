@@ -43,6 +43,7 @@ import {
   createSmallArrayPianoToneMap,
   decodePcmWav,
   getContinuousToneFrequency,
+  getDenseTonePulseWindow,
   getSafeScheduledAudioTime,
   isCompletionSweepAudioFinished,
   usesContinuousDenseTone,
@@ -52,6 +53,10 @@ import {
   makeArrayForArrangement,
   type ArrayArrangement,
 } from "./lib/array-arrangements";
+import type {
+  BogoWorkerEvent,
+  BogoWorkerPacing,
+} from "./lib/bogo-worker-protocol";
 
 type AlgorithmId =
   | "insertion"
@@ -118,7 +123,9 @@ type DenseLiveToneVoice = {
   context: AudioContext;
   oscillator: OscillatorNode;
   filter: BiquadFilterNode;
-  envelope: GainNode;
+  pulseEnvelope: GainNode;
+  releaseEnvelope: GainNode;
+  lastPulseEndTime: number;
 };
 
 type CompletionSweepAudioRun = {
@@ -129,6 +136,17 @@ type CompletionSweepAudioRun = {
   pendingVoiceCount: number;
   schedulingComplete: boolean;
   released: boolean;
+};
+
+type ActiveBogoWorkerRun = {
+  runId: number;
+  hasSnapshot: boolean;
+};
+
+type PendingBogoWorkerRateCalibration = {
+  runId: number;
+  configurationId: number;
+  modeledShuffleRate: number;
 };
 
 type PracticeGroupTone = "cyan" | "violet" | "mint" | "gold";
@@ -235,10 +253,18 @@ const COMPLETION_SWEEP_OUTPUT_RELEASE_SECONDS = 0.018;
 const LIVE_TONE_OUTPUT_RELEASE_SECONDS = 0.018;
 const AUDIO_SOURCE_STOP_PADDING_SECONDS = 0.008;
 const MAX_LIVE_TONE_SOURCES = 16;
-// Give dense Web Audio voices several render quanta to receive their attack
-// envelope. This is inaudible as timing latency, but prevents a busy frame
-// from starting an oscillator at its default (full) gain and clicking.
-const DENSE_TONE_SCHEDULE_LEAD_SECONDS = 0.008;
+// Give dense Web Audio voices a full native-output safety margin before a
+// control point reaches the render quantum. An 8 ms lead was enough in a
+// browser tab, but desktop WebKit can miss that window while its renderer is
+// busy and then repeatedly cancel/rewrite in-flight automation.
+const DENSE_TONE_SCHEDULE_LEAD_SECONDS = 0.032;
+// Dense rows reuse one silent oscillator internally, but every audible event
+// remains a discrete burst. A short attack/release prevents clicks, and the
+// explicit quiet gap stops fast playback from smearing into one long tone.
+const DENSE_TONE_PULSE_ATTACK_SECONDS = 0.006;
+const DENSE_TONE_PULSE_HOLD_SECONDS = 0.006;
+const DENSE_TONE_PULSE_RELEASE_SECONDS = 0.018;
+const DENSE_TONE_MIN_SILENCE_SECONDS = 0.024;
 // Above this size the learning value comes from the changing order and
 // highlights, not from keeping a separate DOM element for every value. A
 // canvas gives WebKit one composited surface instead of 64–256 independently
@@ -251,12 +277,10 @@ const DENSE_CANVAS_MAX_PIXEL_RATIO = 1.5;
 // settings, advance several already-recorded algorithm steps per paint rather
 // than asking macOS/Linux/Windows to render a frame for every tiny mutation.
 const DENSE_PLAYBACK_FRAME_INTERVAL = 32;
-// The canvas can advance every visual frame without asking React to reconcile
-// the rest of the teaching page at that same rate. Keep status text, counters,
-// and audible semantic snapshots responsive, but cap them at a modest 12.5 Hz
-// cadence. That remains smooth enough for pitch/status feedback while halving
-// reconciliation pressure on the desktop WebViews that struggled most.
-const DENSE_CANVAS_PARENT_UPDATE_INTERVAL = 80;
+// Dense canvas playback publishes audible/status milestones independently of
+// React. The page only commits the exact index at a semantic boundary (pause,
+// renderer handoff, or completion), avoiding a full teaching-page reconciliation
+// every 80ms on desktop WebViews.
 const BOGO_COMPLETION_SWEEP_DELAY = 720;
 // Keep the win message on screen long enough to read, then let its exit
 // animation finish before removing it from the DOM.
@@ -339,6 +363,7 @@ const BOGO_EXPECTED_RATE_FREEZE_AFTER = 2_500;
 // desktop WebView often enough to paint and accept pause/reset input.
 const BOGO_FAST_BATCH_BUDGET_MILLISECONDS = 8;
 const BOGO_FAST_COOPERATIVE_YIELD_MILLISECONDS = 34;
+const BOGO_WORKER_STARTUP_TIMEOUT = 1_000;
 // Fast Bogo batches can execute several times between display refreshes. Keep
 // the simulation hot, but only snapshot its mutable session at a readable
 // cadence; each snapshot otherwise re-renders the entire teaching surface.
@@ -2325,12 +2350,25 @@ type DenseBarCanvasFrame = {
   prefersReducedMotion: boolean;
 };
 
+type DensePlaybackTiming = {
+  stepDelay: number;
+  stepStride: number;
+};
+
+type DenseCanvasReadout = {
+  trace: SortStep[];
+  step: SortStep;
+  stepIndex: number;
+};
+
 type DenseBarCanvasPlayback = {
   steps: SortStep[];
   initialStepIndex: number;
   isRunning: boolean;
-  stepDelay: number;
-  stepStride: number;
+  getPlaybackTiming: (step: SortStep) => DensePlaybackTiming;
+  onPlaybackIndex: (stepIndex: number) => void;
+  onVisualStep: (step: SortStep, stepIndex: number) => void;
+  onAudioStep?: (step: SortStep) => void;
   onCheckpoint: (stepIndex: number, isComplete: boolean) => void;
   onContextUnavailable: () => void;
 };
@@ -2382,8 +2420,10 @@ const DenseBarCanvas = memo(function DenseBarCanvas({
   steps,
   initialStepIndex,
   isRunning,
-  stepDelay,
-  stepStride,
+  getPlaybackTiming,
+  onPlaybackIndex,
+  onVisualStep,
+  onAudioStep,
   onCheckpoint,
   onContextUnavailable,
 }: DenseBarCanvasProps) {
@@ -2408,8 +2448,10 @@ const DenseBarCanvas = memo(function DenseBarCanvas({
   const playbackStepIndexRef = useRef(initialStepIndex);
   const playbackConfigRef = useRef({
     initialStepIndex,
-    stepDelay,
-    stepStride,
+    getPlaybackTiming,
+    onPlaybackIndex,
+    onVisualStep,
+    onAudioStep,
     onCheckpoint,
   });
   // Insertion effects run before layout-effect teardown. That lets the old
@@ -2487,13 +2529,26 @@ const DenseBarCanvas = memo(function DenseBarCanvas({
   useLayoutEffect(() => {
     playbackConfigRef.current = {
       initialStepIndex,
-      stepDelay,
-      stepStride,
+      getPlaybackTiming,
+      onPlaybackIndex,
+      onVisualStep,
+      onAudioStep,
       onCheckpoint,
     };
-  }, [initialStepIndex, onCheckpoint, stepDelay, stepStride]);
+  }, [
+    initialStepIndex,
+    getPlaybackTiming,
+    onAudioStep,
+    onCheckpoint,
+    onPlaybackIndex,
+    onVisualStep,
+  ]);
 
-  const drawPlaybackStep = useCallback((nextStep: SortStep) => {
+  const drawPlaybackStep = useCallback((
+    nextStep: SortStep,
+    nextStepIndex: number,
+    isAdvance = false,
+  ) => {
     const settled = nextStep.settled ?? [];
     const visuallySettled = nextStep.visualSettled ?? [];
     frameRef.current = {
@@ -2513,6 +2568,12 @@ const DenseBarCanvas = memo(function DenseBarCanvas({
       prefersReducedMotion: frameRef.current.prefersReducedMotion,
     };
     drawRef.current();
+    playbackConfigRef.current.onPlaybackIndex(nextStepIndex);
+    if (isAdvance) {
+      const config = playbackConfigRef.current;
+      config.onVisualStep(nextStep, nextStepIndex);
+      config.onAudioStep?.(nextStep);
+    }
   }, [algorithm, largestValue]);
 
   useLayoutEffect(() => {
@@ -2566,27 +2627,38 @@ const DenseBarCanvas = memo(function DenseBarCanvas({
 
     let animationFrame = 0;
     let lastAdvanceAt = performance.now();
-    let lastCheckpointAt = lastAdvanceAt;
     const currentStepIndex = () => playbackStepIndexRef.current;
 
-    drawPlaybackStep(steps[currentStepIndex()]!);
+    drawPlaybackStep(steps[currentStepIndex()]!, currentStepIndex());
 
     const advance = (now: number) => {
       const {
-        stepDelay: latestStepDelay,
-        stepStride: latestStepStride,
+        getPlaybackTiming: latestPlaybackTiming,
         onCheckpoint: latestCheckpoint,
       } = playbackConfigRef.current;
-      const elapsed = now - lastAdvanceAt;
-      const advances = Math.floor(elapsed / Math.max(latestStepDelay, 1));
-      if (advances > 0) {
-        const nextStepIndex = Math.min(
+      let elapsed = now - lastAdvanceAt;
+      let nextStepIndex = currentStepIndex();
+
+      // Merge Sort deliberately gives each pass a shared visual duration.
+      // The local canvas runner cannot rely on React's stale `currentStep`,
+      // so consume timing one visible step at a time and re-read the pass
+      // policy whenever its local index crosses into a new merge pass.
+      while (nextStepIndex < finalStepIndex) {
+        const timing = latestPlaybackTiming(steps[nextStepIndex]!);
+        const nextDelay = Math.max(1, timing.stepDelay);
+        if (elapsed < nextDelay) break;
+
+        elapsed -= nextDelay;
+        lastAdvanceAt += nextDelay;
+        nextStepIndex = Math.min(
           finalStepIndex,
-          currentStepIndex() + advances * Math.max(1, latestStepStride),
+          nextStepIndex + Math.max(1, timing.stepStride),
         );
+      }
+
+      if (nextStepIndex !== currentStepIndex()) {
         playbackStepIndexRef.current = nextStepIndex;
-        lastAdvanceAt += advances * Math.max(latestStepDelay, 1);
-        drawPlaybackStep(steps[nextStepIndex]!);
+        drawPlaybackStep(steps[nextStepIndex]!, nextStepIndex, true);
 
         if (nextStepIndex === finalStepIndex) {
           latestCheckpoint(nextStepIndex, true);
@@ -2594,10 +2666,6 @@ const DenseBarCanvas = memo(function DenseBarCanvas({
         }
       }
 
-      if (now - lastCheckpointAt >= DENSE_CANVAS_PARENT_UPDATE_INTERVAL) {
-        lastCheckpointAt = now;
-        latestCheckpoint(currentStepIndex(), false);
-      }
       animationFrame = window.requestAnimationFrame(advance);
     };
 
@@ -2766,6 +2834,10 @@ export default function Home() {
   const [bogoExpectedRateSource, setBogoExpectedRateSource] = useState<
     "calibrating" | "measured" | "modeled"
   >("calibrating");
+  // A module Worker is the normal fast-run path. Keep the established
+  // main-thread scheduler as a compatibility fallback for older webviews or
+  // desktop policies that reject worker assets.
+  const [bogoWorkerUnavailable, setBogoWorkerUnavailable] = useState(false);
   const [bogoElapsedMilliseconds, setBogoElapsedMilliseconds] = useState(0);
   const [bogoCelebrationPhase, setBogoCelebrationPhase] = useState<
     "hidden" | "visible" | "fading"
@@ -2809,6 +2881,10 @@ export default function Home() {
   // here so every end path can release our visual-adjustment state without
   // taking pointer capture away from WebKit's slider implementation.
   const speedRangePointerIdRef = useRef<number | null>(null);
+  // Keyboard range adjustments do not have a pointer ID, and macOS can drop
+  // the final key-up when a WebView loses focus. Track them separately so a
+  // held arrow cannot leave the renderer policy frozen after focus changes.
+  const speedAdjustmentKeysRef = useRef(new Set<string>());
   const soundVolumeRef = useRef(soundVolume);
   const lastToneTimeRef = useRef(0);
   const lastBogoTextureTimeRef = useRef(0);
@@ -2824,6 +2900,10 @@ export default function Home() {
   const motionBarPositionsRef = useRef(new Map<string, number>());
   const motionBarTokensRef = useRef<string[]>([]);
   const motionBarInterpolationEnabledRef = useRef(false);
+  // A range drag keeps the renderer mode frozen at its pre-drag threshold.
+  // Remember that the FLIP work has been paused so individual playback steps
+  // do not repeatedly clear/cancel animation state while the thumb is held.
+  const motionBarInterpolationPausedRef = useRef(false);
   const setMotionBarRef = useCallback((token: string, element: HTMLDivElement | null) => {
     if (element) {
       motionBarElementsRef.current.set(token, element);
@@ -2886,6 +2966,29 @@ export default function Home() {
   const practiceCompletionRef = useRef(false);
   const practiceCelebrationRunRef = useRef(0);
   const bogoSessionRef = useRef<BogoSession | null>(null);
+  const bogoWorkerRef = useRef<Worker | null>(null);
+  const bogoWorkerRunIdRef = useRef(0);
+  const bogoWorkerConfigurationIdRef = useRef(0);
+  const activeBogoWorkerRunRef = useRef<ActiveBogoWorkerRun | null>(null);
+  const bogoWorkerStartupTimerRef = useRef<number | null>(null);
+  const pendingBogoWorkerRateCalibrationRef =
+    useRef<PendingBogoWorkerRateCalibration | null>(null);
+  // Dense canvas playback advances imperatively so the 7k-line teaching page
+  // is not reconciled at display-frame cadence. These small status nodes stay
+  // truthful between semantic React commits (pause, renderer handoff, finish).
+  const denseWorkbenchMessageRef = useRef<HTMLParagraphElement | null>(null);
+  const densePhaseChipRef = useRef<HTMLDivElement | null>(null);
+  const denseHeldKeyRef = useRef<HTMLDivElement | null>(null);
+  const denseHeldKeyValueRef = useRef<HTMLElement | null>(null);
+  const denseHeldKeyDetailRef = useRef<HTMLElement | null>(null);
+  const denseStagePassRef = useRef<HTMLElement | null>(null);
+  const denseComparisonCountRef = useRef<HTMLElement | null>(null);
+  const denseWriteCountRef = useRef<HTMLElement | null>(null);
+  const denseProgressValueRef = useRef<HTMLElement | null>(null);
+  const denseProgressFillRef = useRef<HTMLElement | null>(null);
+  const denseCanvasPlaybackStepIndexRef = useRef(0);
+  const denseCanvasPlaybackTraceRef = useRef<SortStep[] | null>(null);
+  const denseCanvasReadoutRef = useRef<DenseCanvasReadout | null>(null);
   const bogoUnlimitedConfirmationRef = useRef(false);
   const bogoRateSampleRef = useRef<{
     startedAt: number;
@@ -3285,20 +3388,37 @@ export default function Home() {
       return positions;
     };
 
+    const resetMotionInterpolation = () => {
+      motionBarInterpolationEnabledRef.current = false;
+      motionBarPositionsRef.current.clear();
+      motionBarTokensRef.current = [];
+      // This layout effect must synchronously clear the FLIP paint when its
+      // interpolation policy changes; deferring it produces a stale frame.
+      setMotionSlideOffsets((current) => (Object.keys(current).length === 0 ? current : {}));
+      setMotionSlideStage((stage) => (stage === "idle" ? stage : "idle"));
+    };
+
+    // The slider deliberately freezes the renderer policy until release, but
+    // it must not keep doing FLIP geometry or animation teardown at every
+    // logical step while the live speed value crosses its threshold. Clear
+    // any in-flight transform once, retain the same DOM renderer, and let the
+    // first settled low-speed frame establish a new baseline after release.
+    if (isAdjustingSpeedControl) {
+      if (!motionBarInterpolationPausedRef.current) {
+        motionBarInterpolationPausedRef.current = true;
+        resetMotionInterpolation();
+      }
+      return;
+    }
+
+    motionBarInterpolationPausedRef.current = false;
     if (!shouldInterpolateMoves) {
       // Geometry is only needed for the optional low-speed FLIP animation.
       // Calling getBoundingClientRect for every bar here forces a layout pass
       // on each Bogo snapshot and dense high-speed frame, even though no
       // interpolation can be painted. Reset the cache instead; the first
       // eligible slow-motion frame below establishes a fresh baseline.
-      motionBarInterpolationEnabledRef.current = false;
-      motionBarPositionsRef.current.clear();
-      motionBarTokensRef.current = [];
-      // This layout effect must synchronously clear the FLIP paint when its
-      // interpolation policy changes; deferring it produces a stale frame.
-      // eslint-disable-next-line react-hooks/set-state-in-effect -- Layout synchronization requires the reset before paint.
-      setMotionSlideOffsets((current) => (Object.keys(current).length === 0 ? current : {}));
-      setMotionSlideStage((stage) => (stage === "idle" ? stage : "idle"));
+      resetMotionInterpolation();
       return;
     }
 
@@ -3356,7 +3476,13 @@ export default function Home() {
       if (settleFrame !== undefined) window.cancelAnimationFrame(settleFrame);
       if (releaseTimer !== undefined) window.clearTimeout(releaseTimer);
     };
-  }, [currentStep, isSafeVisualMove, motionSlideDuration, shouldInterpolateMoves]);
+  }, [
+    currentStep,
+    isAdjustingSpeedControl,
+    isSafeVisualMove,
+    motionSlideDuration,
+    shouldInterpolateMoves,
+  ]);
 
   useLayoutEffect(() => {
     const previousPositions = practiceBlockPositionsRef.current;
@@ -3499,6 +3625,57 @@ export default function Home() {
       : 1;
   const deterministicPlaybackDelay =
     densePlaybackStepStride > 1 ? DENSE_PLAYBACK_FRAME_INTERVAL : delay;
+  // Canvas playback intentionally keeps its own step index so dense rows do
+  // not re-render the entire page. Merge's pacing depends on the *local*
+  // merge pass, though, not React's last committed step. Supply a timing
+  // resolver that can be consulted from the local runner at each boundary.
+  const getDenseCanvasPlaybackTiming = useCallback(
+    (candidateStep: SortStep): DensePlaybackTiming => {
+      const usesMergePassPacing =
+        algorithm === "merge" &&
+        candidateStep.phase !== "ready" &&
+        candidateStep.phase !== "complete";
+      const candidateDelay = prefersReducedMotion
+        ? 18
+        : usesMergePassPacing
+          ? Math.max(
+              minimumFrameDelay,
+              mergePassDuration / (mergePassFrameCounts.get(candidateStep.pass) ?? 1),
+            )
+          : Math.max(minimumFrameDelay, speedDelay / playbackDensity);
+      const candidateStride =
+        // Merge's shared pass duration is a teaching cue, not a generic
+        // high-speed sampling target. Advance each logical merge frame so a
+        // local Canvas runner cannot skip over a pass boundary using timing
+        // calculated for the prior pass.
+        algorithm !== "merge" &&
+        !isBogo &&
+        isLargeArray &&
+        candidateDelay < DENSE_PLAYBACK_FRAME_INTERVAL
+          ? Math.max(
+              1,
+              Math.round(DENSE_PLAYBACK_FRAME_INTERVAL / Math.max(candidateDelay, 1)),
+            )
+          : 1;
+
+      return {
+        stepDelay:
+          candidateStride > 1 ? DENSE_PLAYBACK_FRAME_INTERVAL : candidateDelay,
+        stepStride: candidateStride,
+      };
+    },
+    [
+      algorithm,
+      isBogo,
+      isLargeArray,
+      mergePassDuration,
+      mergePassFrameCounts,
+      minimumFrameDelay,
+      playbackDensity,
+      prefersReducedMotion,
+      speedDelay,
+    ],
+  );
   const shouldInterpolateDenseBars =
     isLargeArray &&
     !isBogo &&
@@ -3572,9 +3749,105 @@ export default function Home() {
             (isBogo && bogoRunsUntilSolved ? " with no shuffle cap." : " of " + totalStages + ".")
           : "Ready to demonstrate " + algorithmLabel + ".";
 
-  // The dense canvas owns high-speed visual ticks. React receives a compact
-  // semantic checkpoint for the visible counters, narration, and sound rather
-  // than reconciling the whole page for every painted canvas frame.
+  // The dense canvas owns high-speed visual ticks. Its status nodes update
+  // imperatively alongside the one canvas draw; React only receives the exact
+  // index when playback stops or completes. This avoids reconciling the whole
+  // teaching page every 80ms on WebKit while leaving controls and semantics
+  // unchanged at every stable boundary.
+  function applyDenseCanvasReadout(nextStep: SortStep, nextStepIndex: number) {
+    if (denseWorkbenchMessageRef.current) {
+      denseWorkbenchMessageRef.current.textContent = nextStep.message;
+    }
+
+    const phaseChip = densePhaseChipRef.current;
+    if (phaseChip) {
+      phaseChip.className = "phase-chip phase-chip--" + nextStep.phase;
+      const labelNode = phaseChip.lastChild;
+      if (labelNode) labelNode.textContent = getPhaseLabel(nextStep.phase);
+    }
+
+    if (denseHeldKeyRef.current) {
+      const isHoldingKey = nextStep.key !== null && nextStep.gapIndex !== null;
+      denseHeldKeyRef.current.classList.toggle("held-key--reserved", !isHoldingKey);
+      if (denseHeldKeyValueRef.current) {
+        denseHeldKeyValueRef.current.textContent = nextStep.key === null ? "" : String(nextStep.key);
+      }
+      if (denseHeldKeyDetailRef.current) {
+        denseHeldKeyDetailRef.current.textContent =
+          nextStep.gapIndex === null
+            ? "gap ready for the next key"
+            : "gap at slot " + (nextStep.gapIndex + 1);
+      }
+    }
+
+    if (denseStagePassRef.current) {
+      denseStagePassRef.current.textContent = String(nextStep.pass);
+    }
+    if (denseComparisonCountRef.current) {
+      denseComparisonCountRef.current.textContent = String(nextStep.comparisons);
+    }
+    if (denseWriteCountRef.current) {
+      denseWriteCountRef.current.textContent = String(nextStep.writes);
+    }
+
+    const nextProgress =
+      steps.length > 1
+        ? Math.round((nextStepIndex / (steps.length - 1)) * 100)
+        : 0;
+    if (denseProgressValueRef.current) {
+      denseProgressValueRef.current.textContent = String(nextProgress);
+    }
+    if (denseProgressFillRef.current) {
+      denseProgressFillRef.current.style.width = String(nextProgress) + "%";
+    }
+  }
+
+  const handleDenseCanvasPlaybackVisualStep = (nextStep: SortStep, nextStepIndex: number) => {
+    denseCanvasReadoutRef.current = {
+      trace: steps,
+      step: nextStep,
+      stepIndex: nextStepIndex,
+    };
+    applyDenseCanvasReadout(nextStep, nextStepIndex);
+  };
+
+  const handleDenseCanvasAudioStep = (nextStep: SortStep) => {
+    // Dense playback intentionally maps every visible working phase to the
+    // reusable pulse voice. Unlike the small-row voice, it is cadence-capped
+    // inside the audio engine, so run/power/select milestones stay audible
+    // without creating a source per canvas frame.
+    if (
+      nextStep.phase !== "ready" &&
+      nextStep.phase !== "complete" &&
+      nextStep.phase !== "limited"
+    ) {
+      playSortingTone(nextStep);
+    }
+  };
+
+  const handleDenseCanvasPlaybackIndex = (nextStepIndex: number) => {
+    denseCanvasPlaybackStepIndexRef.current = nextStepIndex;
+    denseCanvasPlaybackTraceRef.current = steps;
+  };
+
+  // A control update (for example volume or a live speed change) can make
+  // React commit the last semantic `currentStep` while Canvas has already
+  // painted a newer local step. Reapply the cached readout in layout before
+  // paint, so that commit never visibly rewinds the narration or counters.
+  useLayoutEffect(() => {
+    const readout = denseCanvasReadoutRef.current;
+    if (
+      !useCanvasBarRenderer ||
+      !isRunning ||
+      !readout ||
+      readout.trace !== steps
+    ) {
+      return;
+    }
+
+    applyDenseCanvasReadout(readout.step, readout.stepIndex);
+  });
+
   const handleDenseCanvasPlaybackCheckpoint = useCallback(
     (nextStepIndex: number, isComplete: boolean) => {
       setStepIndex((current) => (current === nextStepIndex ? current : nextStepIndex));
@@ -3641,6 +3914,216 @@ export default function Home() {
     };
   }
 
+  function getBogoWorkerPacing(): BogoWorkerPacing {
+    return {
+      attemptDelayMs: bogoSlowMotionDelay,
+      batchBudgetMs: BOGO_FAST_BATCH_BUDGET_MILLISECONDS,
+      snapshotIntervalMs: BOGO_VISUAL_UPDATE_INTERVAL,
+    };
+  }
+
+  function clearBogoWorkerStartupTimer() {
+    if (bogoWorkerStartupTimerRef.current === null) return;
+    window.clearTimeout(bogoWorkerStartupTimerRef.current);
+    bogoWorkerStartupTimerRef.current = null;
+  }
+
+  function applyBogoWorkerSession(session: BogoSession, now = performance.now()) {
+    bogoSessionRef.current = session;
+
+    const rateSample = bogoRateSampleRef.current;
+    if (
+      rateSample &&
+      (session.done || now - rateSample.lastReportedAt >= BOGO_RATE_SAMPLE_INTERVAL)
+    ) {
+      const elapsed = now - rateSample.startedAt;
+      const attempts = session.attempts - rateSample.startingAttempts;
+
+      if (elapsed >= BOGO_RATE_SAMPLE_INTERVAL && attempts > 0) {
+        rateSample.lastReportedAt = now;
+        setBogoMeasuredShuffleRate((attempts * 1_000) / elapsed);
+      }
+    }
+
+    const expectedRateSample = bogoExpectedRateSampleRef.current;
+    if (expectedRateSample && !expectedRateSample.finalized) {
+      const elapsedMilliseconds = Math.max(
+        0,
+        getBogoActiveElapsedMilliseconds(now) - expectedRateSample.startingElapsedMilliseconds,
+      );
+      const attempts = session.attempts - expectedRateSample.startingAttempts;
+      const hasMeasuredOpeningRate =
+        elapsedMilliseconds >= BOGO_EXPECTED_RATE_FREEZE_AFTER && attempts > 0;
+
+      if (hasMeasuredOpeningRate || session.done) {
+        expectedRateSample.finalized = true;
+        setBogoFrozenExpectedShuffleRate(
+          hasMeasuredOpeningRate
+            ? (attempts * 1_000) / elapsedMilliseconds
+            : expectedRateSample.modeledShuffleRate,
+        );
+        setBogoExpectedRateSource(hasMeasuredOpeningRate ? "measured" : "modeled");
+      }
+    }
+
+    setBogoLiveStep(getBogoSessionStep(session));
+  }
+
+  function beginBogoRateCalibrationFromWorkerSnapshot(
+    session: BogoSession,
+    pending: PendingBogoWorkerRateCalibration,
+    now = performance.now(),
+  ) {
+    pendingBogoWorkerRateCalibrationRef.current = null;
+    bogoRateSampleRef.current =
+      !session.done && bogoElapsedTimerRef.current.startedAt !== null
+        ? {
+            startedAt: now,
+            startingAttempts: session.attempts,
+            lastReportedAt: 0,
+          }
+        : null;
+    restartBogoExpectedRateCalibration(session, pending.modeledShuffleRate);
+
+    if (session.done) {
+      setBogoFrozenExpectedShuffleRate(pending.modeledShuffleRate);
+      setBogoExpectedRateSource("modeled");
+    }
+  }
+
+  function disableBogoWorker() {
+    const pendingCalibration = pendingBogoWorkerRateCalibrationRef.current;
+    const latestSession = bogoSessionRef.current;
+    if (
+      pendingCalibration &&
+      latestSession &&
+      pendingCalibration.runId === bogoWorkerRunIdRef.current
+    ) {
+      beginBogoRateCalibrationFromWorkerSnapshot(
+        latestSession,
+        pendingCalibration,
+      );
+    } else {
+      pendingBogoWorkerRateCalibrationRef.current = null;
+    }
+    clearBogoWorkerStartupTimer();
+    activeBogoWorkerRunRef.current = null;
+    const worker = bogoWorkerRef.current;
+    bogoWorkerRef.current = null;
+    if (worker) worker.terminate();
+    setBogoWorkerUnavailable(true);
+  }
+
+  function handleBogoWorkerEvent(event: BogoWorkerEvent) {
+    if (event.type === "ready") return;
+
+    const activeRun = activeBogoWorkerRunRef.current;
+    if (
+      !activeRun ||
+      event.runId !== activeRun.runId ||
+      event.runId !== bogoWorkerRunIdRef.current
+    ) {
+      return;
+    }
+
+    if (event.type === "error") {
+      if (event.session) applyBogoWorkerSession(event.session);
+      disableBogoWorker();
+      return;
+    }
+
+    activeRun.hasSnapshot = true;
+    clearBogoWorkerStartupTimer();
+    applyBogoWorkerSession(event.session);
+
+    if (event.type === "configured") {
+      const pendingCalibration = pendingBogoWorkerRateCalibrationRef.current;
+      if (
+        pendingCalibration &&
+        pendingCalibration.runId === event.runId &&
+        pendingCalibration.configurationId === event.configurationId
+      ) {
+        beginBogoRateCalibrationFromWorkerSnapshot(
+          event.session,
+          pendingCalibration,
+        );
+      }
+      return;
+    }
+
+    if (event.type === "complete") {
+      activeBogoWorkerRunRef.current = null;
+      setRunState("complete");
+    }
+  }
+
+  function getOrCreateBogoWorker() {
+    if (bogoWorkerUnavailable) return null;
+    if (bogoWorkerRef.current) return bogoWorkerRef.current;
+    if (typeof Worker === "undefined") {
+      setBogoWorkerUnavailable(true);
+      return null;
+    }
+
+    try {
+      const worker = new Worker(new URL("./lib/bogo.worker.ts", import.meta.url), {
+        type: "module",
+        name: "sortscope-bogo",
+      });
+      worker.onmessage = (message: MessageEvent<BogoWorkerEvent>) => {
+        handleBogoWorkerEvent(message.data);
+      };
+      worker.onerror = () => {
+        // A module worker can be blocked by an older WKWebView policy even
+        // after the constructor succeeds. Fall back to the prior scheduler
+        // from the latest structured-clone snapshot instead of leaving a run
+        // silently stalled.
+        disableBogoWorker();
+      };
+      bogoWorkerRef.current = worker;
+      return worker;
+    } catch {
+      setBogoWorkerUnavailable(true);
+      return null;
+    }
+  }
+
+  function cancelActiveBogoWorkerRun() {
+    const activeRun = activeBogoWorkerRunRef.current;
+    clearBogoWorkerStartupTimer();
+    pendingBogoWorkerRateCalibrationRef.current = null;
+    if (!activeRun) return;
+
+    bogoWorkerRef.current?.postMessage({
+      type: "cancel",
+      runId: activeRun.runId,
+    });
+    activeBogoWorkerRunRef.current = null;
+    bogoWorkerRunIdRef.current += 1;
+  }
+
+  function beginBogoWorkerRun() {
+    // Invalidate messages from a paused or just-finished predecessor before
+    // the fresh session is published to React. A structured-clone snapshot can
+    // otherwise arrive between state updates and briefly resurrect old values.
+    cancelActiveBogoWorkerRun();
+    bogoWorkerRunIdRef.current += 1;
+  }
+
+  useEffect(() => {
+    return () => {
+      if (bogoWorkerStartupTimerRef.current !== null) {
+        window.clearTimeout(bogoWorkerStartupTimerRef.current);
+        bogoWorkerStartupTimerRef.current = null;
+      }
+      bogoWorkerRunIdRef.current += 1;
+      activeBogoWorkerRunRef.current = null;
+      pendingBogoWorkerRateCalibrationRef.current = null;
+      bogoWorkerRef.current?.terminate();
+      bogoWorkerRef.current = null;
+    };
+  }, []);
+
   function resetCompletionSweep() {
     if (completionSweepStartTimerRef.current !== null) {
       window.clearTimeout(completionSweepStartTimerRef.current);
@@ -3680,8 +4163,9 @@ export default function Home() {
     try {
       // Never sever an audible oscillator graph at an arbitrary waveform
       // point. That hard discontinuity is the characteristic click that was
-      // still audible after a reset, mute, or late completion callback.
-      output.gain.cancelScheduledValues(now);
+      // still audible after a reset, mute, or late completion callback. This
+      // output bus is constant until release, so it needs no automation
+      // cancellation before receiving its one terminal fade.
       output.gain.setValueAtTime(Math.max(0.0001, output.gain.value), now);
       output.gain.exponentialRampToValueAtTime(0.0001, now + releaseSeconds);
     } catch {
@@ -3779,7 +4263,8 @@ export default function Home() {
     try {
       voice.oscillator.disconnect();
       voice.filter.disconnect();
-      voice.envelope.disconnect();
+      voice.pulseEnvelope.disconnect();
+      voice.releaseEnvelope.disconnect();
     } catch {
       // The source may have already been released by its own ended callback.
     }
@@ -3802,12 +4287,11 @@ export default function Home() {
 
     const now = voice.context.currentTime;
     try {
-      voice.envelope.gain.cancelScheduledValues(now);
-      voice.envelope.gain.setValueAtTime(
-        Math.max(0.0001, voice.envelope.gain.value),
-        now,
-      );
-      voice.envelope.gain.exponentialRampToValueAtTime(0.0001, now + releaseSeconds);
+      // The pulse envelope may contain a short event just ahead of the audio
+      // clock. Fade a separate fixed-gain stage instead of cancelling that
+      // native automation queue, which is where WebKit produced hard edges.
+      voice.releaseEnvelope.gain.setValueAtTime(1, now);
+      voice.releaseEnvelope.gain.linearRampToValueAtTime(0, now + releaseSeconds);
       voice.oscillator.stop(now + releaseSeconds + AUDIO_SOURCE_STOP_PADDING_SECONDS);
     } catch {
       // A closed native context cannot honour a release envelope. It is safe
@@ -3816,7 +4300,7 @@ export default function Home() {
     }
   }
 
-  function playContinuousDenseTone(
+  function playDenseTonePulse(
     context: AudioContext,
     startTime: number,
     frequency: number,
@@ -3832,14 +4316,31 @@ export default function Home() {
     }
 
     if (voice) {
+      const pulse = getDenseTonePulseWindow(
+        voice.lastPulseEndTime,
+        startTime,
+        DENSE_TONE_PULSE_ATTACK_SECONDS,
+        DENSE_TONE_PULSE_HOLD_SECONDS,
+        DENSE_TONE_PULSE_RELEASE_SECONDS,
+        DENSE_TONE_MIN_SILENCE_SECONDS,
+      );
+      if (!pulse) return;
       try {
-        // AudioParam automation is phase-continuous. Updating this one voice
-        // at every dense semantic checkpoint avoids the source-per-frame
-        // allocation and start/stop gaps that made large-array audio vanish.
-        voice.oscillator.frequency.cancelScheduledValues(startTime);
-        voice.oscillator.frequency.setTargetAtTime(frequency, startTime, 0.008);
-        voice.envelope.gain.cancelScheduledValues(startTime);
-        voice.envelope.gain.setTargetAtTime(peakGain, startTime, 0.01);
+        // Retune only while the pulse is silent, then gate a short envelope.
+        // The oscillator stays phase-continuous and no source is allocated or
+        // stopped for an individual sorting event.
+        voice.oscillator.frequency.setValueAtTime(frequency, pulse.startTime);
+        voice.pulseEnvelope.gain.setValueAtTime(0, pulse.startTime);
+        voice.pulseEnvelope.gain.linearRampToValueAtTime(
+          peakGain,
+          pulse.attackEndTime,
+        );
+        voice.pulseEnvelope.gain.setValueAtTime(
+          peakGain,
+          pulse.releaseStartTime,
+        );
+        voice.pulseEnvelope.gain.linearRampToValueAtTime(0, pulse.endTime);
+        voice.lastPulseEndTime = pulse.endTime;
       } catch {
         // A context that is in the middle of closing is handled by the next
         // user gesture, which creates a fresh voice through ensureAudioContext.
@@ -3849,13 +4350,25 @@ export default function Home() {
 
     const oscillator = context.createOscillator();
     const filter = context.createBiquadFilter();
-    const envelope = context.createGain();
+    const pulseEnvelope = context.createGain();
+    const releaseEnvelope = context.createGain();
     const output = getLiveToneOutput(context);
+    const firstPulse = getDenseTonePulseWindow(
+      null,
+      startTime,
+      DENSE_TONE_PULSE_ATTACK_SECONDS,
+      DENSE_TONE_PULSE_HOLD_SECONDS,
+      DENSE_TONE_PULSE_RELEASE_SECONDS,
+      DENSE_TONE_MIN_SILENCE_SECONDS,
+    );
+    if (!firstPulse) return;
     const createdVoice: DenseLiveToneVoice = {
       context,
       oscillator,
       filter,
-      envelope,
+      pulseEnvelope,
+      releaseEnvelope,
+      lastPulseEndTime: firstPulse.endTime,
     };
 
     oscillator.type = "triangle";
@@ -3863,11 +4376,19 @@ export default function Home() {
     filter.type = "lowpass";
     filter.frequency.setValueAtTime(2_000, startTime);
     filter.Q.setValueAtTime(0.35, startTime);
-    envelope.gain.setValueAtTime(0.0001, startTime);
-    envelope.gain.exponentialRampToValueAtTime(peakGain, startTime + 0.012);
+    pulseEnvelope.gain.setValueAtTime(0, context.currentTime);
+    pulseEnvelope.gain.setValueAtTime(0, firstPulse.startTime);
+    pulseEnvelope.gain.linearRampToValueAtTime(
+      peakGain,
+      firstPulse.attackEndTime,
+    );
+    pulseEnvelope.gain.setValueAtTime(peakGain, firstPulse.releaseStartTime);
+    pulseEnvelope.gain.linearRampToValueAtTime(0, firstPulse.endTime);
+    releaseEnvelope.gain.setValueAtTime(1, context.currentTime);
     oscillator.connect(filter);
-    filter.connect(envelope);
-    envelope.connect(output);
+    filter.connect(pulseEnvelope);
+    pulseEnvelope.connect(releaseEnvelope);
+    releaseEnvelope.connect(output);
     denseLiveToneVoiceRef.current = createdVoice;
     oscillator.addEventListener("ended", () => {
       if (denseLiveToneVoiceRef.current === createdVoice) {
@@ -4175,8 +4696,8 @@ export default function Home() {
     const peakGain = basePeakGain * (volume / 100) ** 2.5;
     const frequency = getSortingToneFrequency(activeValue);
     // Preserve the immediate, musical response for the 4–25 note piano
-    // mapping. Dense continuous-tone rows receive a tiny scheduling lead so
-    // a lagged render cannot start an oscillator before its attack is ready.
+    // mapping. Dense pulse rows receive scheduling lead so a lagged render
+    // cannot reach the oscillator before its click-free attack is queued.
     const startTime = isDenseTone
       ? getSafeScheduledAudioTime(
           now,
@@ -4186,10 +4707,10 @@ export default function Home() {
       : now;
 
     if (isDenseTone) {
-      // Dense rows use one continuously tuned source rather than a new short
-      // oscillator for every render checkpoint. That keeps the pitch moving
-      // at max speed even when WebKit coalesces visual frames.
-      playContinuousDenseTone(
+      // Dense rows reuse one oscillator internally, but its gain gate makes
+      // every accepted checkpoint a separate short burst with silence after
+      // it. This avoids source churn without turning the run into one tone.
+      playDenseTonePulse(
         context,
         startTime,
         frequency,
@@ -4516,9 +5037,9 @@ export default function Home() {
     playSortingTone(currentStep);
   }, [currentStep, isBogo, originalValues.length, runState, soundEnabled, stepIndex]);
 
-  // A dense row owns one continuous audio voice while it is running. Release
-  // it as soon as the runner pauses, completes, or mutes; waiting for another
-  // React step would leave that source sustaining after the motion stopped.
+  // A dense row owns one reusable pulse graph while it is running. Release it
+  // as soon as the runner pauses, completes, or mutes; waiting for another
+  // React step would retain an unnecessary native source after motion stops.
   useEffect(() => {
     if (soundEnabled && runState === "running") return;
     stopLiveSortingToneSound();
@@ -4542,7 +5063,54 @@ export default function Home() {
   }, [isBogo, runState, soundEnabled, soundVolume]);
 
   useEffect(() => {
-    if (!isBogo || runState !== "running") return;
+    if (!isBogo) {
+      cancelActiveBogoWorkerRun();
+      return;
+    }
+
+    const session = bogoSessionRef.current;
+    if (!session || session.done) {
+      if (!session) cancelActiveBogoWorkerRun();
+      return;
+    }
+    if (bogoWorkerUnavailable) return;
+
+    const worker = bogoWorkerRef.current;
+    if (!worker) return;
+
+    const runId = bogoWorkerRunIdRef.current;
+    const pacing = getBogoWorkerPacing();
+    const activeRun = activeBogoWorkerRunRef.current;
+    if (!activeRun || activeRun.runId !== runId) {
+      activeBogoWorkerRunRef.current = { runId, hasSnapshot: false };
+      worker.postMessage({ type: "start", runId, session, pacing });
+      clearBogoWorkerStartupTimer();
+      bogoWorkerStartupTimerRef.current = window.setTimeout(() => {
+        const pendingRun = activeBogoWorkerRunRef.current;
+        if (pendingRun?.runId === runId && !pendingRun.hasSnapshot) {
+          disableBogoWorker();
+        }
+      }, BOGO_WORKER_STARTUP_TIMEOUT);
+      return;
+    }
+
+    worker.postMessage({
+      type: "configure",
+      runId,
+      configurationId: bogoWorkerConfigurationIdRef.current,
+      pacing,
+    });
+    worker.postMessage({
+      type: runState === "running" ? "resume" : "pause",
+      runId,
+    });
+  }, [bogoSlowMotionDelay, bogoWorkerUnavailable, isBogo, runState, speed]);
+
+  useEffect(() => {
+    // Keep the original event-loop runner as a compatibility path for hosts
+    // that reject a Vite module Worker. Normal desktop builds leave this path
+    // dormant, so their heavy Bogo loop never competes with paint or WebAudio.
+    if (!isBogo || !bogoWorkerUnavailable || runState !== "running") return;
 
     const session = bogoSessionRef.current;
     if (!session) return;
@@ -4658,7 +5226,7 @@ export default function Home() {
       if (timer !== undefined) window.clearTimeout(timer);
       if (animationFrame !== undefined) window.cancelAnimationFrame(animationFrame);
     };
-  }, [bogoModeledShuffleRate, bogoSlowMotionDelay, isBogo, runState]);
+  }, [bogoModeledShuffleRate, bogoSlowMotionDelay, bogoWorkerUnavailable, isBogo, runState]);
 
   useEffect(() => {
     if (!isBogo || runState !== "running") return;
@@ -4734,6 +5302,7 @@ export default function Home() {
     setBogoUnlimitedConfirmation(false);
     const nextValues = makeArrayForArrangement(size, arrangement);
     setBogoCelebrationPhase("hidden");
+    cancelActiveBogoWorkerRun();
     bogoSessionRef.current = null;
     bogoRateSampleRef.current = null;
     setBogoLiveStep(null);
@@ -4757,6 +5326,7 @@ export default function Home() {
     resetBogoElapsedTimer();
     setBogoUnlimitedConfirmation(false);
     setBogoCelebrationPhase("hidden");
+    cancelActiveBogoWorkerRun();
     bogoSessionRef.current = null;
     bogoRateSampleRef.current = null;
     setBogoLiveStep(null);
@@ -5909,6 +6479,7 @@ export default function Home() {
     resetBogoElapsedTimer();
     setBogoUnlimitedConfirmation(false);
     setBogoCelebrationPhase("hidden");
+    cancelActiveBogoWorkerRun();
     bogoSessionRef.current = null;
     bogoRateSampleRef.current = null;
     setBogoLiveStep(null);
@@ -5940,6 +6511,12 @@ export default function Home() {
     if (isBogo && (bogoUnlimitedConfirmationOpen || bogoUnlimitedConfirmationRef.current)) return;
 
     if (!startWithNewArray && runState === "running") {
+      if (isBogo) {
+        const activeRun = activeBogoWorkerRunRef.current;
+        if (activeRun) {
+          bogoWorkerRef.current?.postMessage({ type: "pause", runId: activeRun.runId });
+        }
+      }
       setRunState("paused");
       return;
     }
@@ -5953,6 +6530,10 @@ export default function Home() {
           lastReportedAt: 0,
         };
         setBogoMeasuredShuffleRate(null);
+        const activeRun = activeBogoWorkerRunRef.current;
+        if (activeRun) {
+          bogoWorkerRef.current?.postMessage({ type: "resume", runId: activeRun.runId });
+        }
       }
       setRunState("running");
       return;
@@ -5979,6 +6560,7 @@ export default function Home() {
         // before the normal interval has time to produce an audible note.
         void audioContext.resume().then(() => playBogoShuffleTexture(0)).catch(() => undefined);
       }
+      beginBogoWorkerRun();
       const session = createBogoSession(
         sortValues,
         bogoRunsUntilSolved ? null : bogoAttemptLimit,
@@ -6005,10 +6587,12 @@ export default function Home() {
       setSteps([]);
       setStepIndex(0);
       setBogoLiveStep(session.done ? getBogoSessionStep(session) : null);
+      if (!session.done) getOrCreateBogoWorker();
       setRunState(session.done ? "complete" : "running");
       return;
     }
 
+    cancelActiveBogoWorkerRun();
     bogoSessionRef.current = null;
     bogoRateSampleRef.current = null;
     setBogoLiveStep(null);
@@ -6096,11 +6680,24 @@ export default function Home() {
 
   const finishSpeedVisualAdjustment = useCallback(() => {
     if (isBogo) return;
+    // Commit the exact locally painted Canvas frame before changing the
+    // renderer predicate. React batches this state update with the speed
+    // release, so a Canvas-to-DOM handoff cannot briefly show the stale
+    // semantic checkpoint from before the drag.
+    if (
+      useCanvasBarRenderer &&
+      denseCanvasPlaybackTraceRef.current === steps
+    ) {
+      const latestCanvasStepIndex = denseCanvasPlaybackStepIndexRef.current;
+      setStepIndex((current) =>
+        current === latestCanvasStepIndex ? current : latestCanvasStepIndex,
+      );
+    }
     // `speedRef` is updated synchronously by handleSpeedChange, which also
     // covers a final native range input that arrives just before pointer-up.
     setSettledVisualSpeed(speedRef.current);
     setIsAdjustingSpeedControl(false);
-  }, [isBogo]);
+  }, [isBogo, steps, useCanvasBarRenderer]);
 
   const beginSpeedRangePointerInteraction = useCallback((pointerId: number) => {
     speedRangePointerIdRef.current = pointerId;
@@ -6118,7 +6715,9 @@ export default function Home() {
     }
 
     speedRangePointerIdRef.current = null;
-    finishSpeedVisualAdjustment();
+    if (speedAdjustmentKeysRef.current.size === 0) {
+      finishSpeedVisualAdjustment();
+    }
   }, [finishSpeedVisualAdjustment]);
 
   // Some Linux WebKit builds can lose an input range's pointer-up while the
@@ -6134,7 +6733,7 @@ export default function Home() {
       finishSpeedRangePointerInteraction(event.pointerId);
     };
     const finishOnWindowLoss = () => {
-      if (speedRangePointerIdRef.current === null) return;
+      speedAdjustmentKeysRef.current.clear();
       finishSpeedRangePointerInteraction();
     };
     const finishOnVisibilityChange = () => {
@@ -6157,19 +6756,73 @@ export default function Home() {
     return ["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End", "PageUp", "PageDown"].includes(key);
   }
 
+  function beginSpeedKeyboardInteraction(key: string) {
+    if (!isSpeedAdjustmentKey(key)) return;
+    const wasAdjustingWithKeyboard = speedAdjustmentKeysRef.current.size > 0;
+    speedAdjustmentKeysRef.current.add(key);
+    // Auto-repeat delivers additional key-down events while the key remains
+    // held. Capture the visual threshold only on the first one; otherwise a
+    // fast value change could quietly replace the frozen renderer policy.
+    if (!wasAdjustingWithKeyboard && speedRangePointerIdRef.current === null) {
+      beginSpeedVisualAdjustment();
+    }
+  }
+
+  function finishSpeedKeyboardInteraction(key: string) {
+    if (!isSpeedAdjustmentKey(key)) return;
+    speedAdjustmentKeysRef.current.delete(key);
+    if (speedAdjustmentKeysRef.current.size === 0 && speedRangePointerIdRef.current === null) {
+      finishSpeedVisualAdjustment();
+    }
+  }
+
+  function finishAllSpeedVisualAdjustments() {
+    speedRangePointerIdRef.current = null;
+    speedAdjustmentKeysRef.current.clear();
+    finishSpeedVisualAdjustment();
+  }
+
   function handleSpeedChange(nextSpeed: number) {
     const clampedSpeed = Math.min(maximumSpeed, Math.max(1, Math.round(nextSpeed)));
     if (isBogo && clampedSpeed !== speed) {
       const session = bogoSessionRef.current;
-      bogoRateSampleRef.current =
-        session && runState === "running"
-          ? {
-              startedAt: performance.now(),
-              startingAttempts: session.attempts,
-              lastReportedAt: 0,
-            }
-          : null;
-      restartBogoExpectedRateCalibration(session, getBogoEstimatedShuffleRate(clampedSpeed));
+      const modeledShuffleRate = getBogoEstimatedShuffleRate(clampedSpeed);
+      const activeWorkerRun = activeBogoWorkerRunRef.current;
+      const canUseWorkerConfigurationSnapshot =
+        session !== null &&
+        !session.done &&
+        activeWorkerRun !== null &&
+        bogoWorkerRef.current !== null &&
+        !bogoWorkerUnavailable;
+
+      if (canUseWorkerConfigurationSnapshot) {
+        const configurationId = bogoWorkerConfigurationIdRef.current + 1;
+        bogoWorkerConfigurationIdRef.current = configurationId;
+        pendingBogoWorkerRateCalibrationRef.current = {
+          runId: activeWorkerRun.runId,
+          configurationId,
+          modeledShuffleRate,
+        };
+        // Wait for the worker to acknowledge the new pacing from its exact
+        // mutable session. The last UI snapshot can trail a fast worker by
+        // tens of thousands of attempts and must not seed the new rate.
+        bogoRateSampleRef.current = null;
+        bogoExpectedRateSampleRef.current = null;
+        setBogoMeasuredShuffleRate(null);
+        setBogoFrozenExpectedShuffleRate(null);
+        setBogoExpectedRateSource("calibrating");
+      } else {
+        pendingBogoWorkerRateCalibrationRef.current = null;
+        bogoRateSampleRef.current =
+          session && runState === "running"
+            ? {
+                startedAt: performance.now(),
+                startingAttempts: session.attempts,
+                lastReportedAt: 0,
+              }
+            : null;
+        restartBogoExpectedRateCalibration(session, modeledShuffleRate);
+      }
     }
     speedRef.current = clampedSpeed;
     setSpeed(clampedSpeed);
@@ -6934,13 +7587,12 @@ export default function Home() {
                     finishSpeedRangePointerInteraction(event.pointerId);
                   }}
                   onPointerCancel={(event) => finishSpeedRangePointerInteraction(event.pointerId)}
-                  onLostPointerCapture={(event) => finishSpeedRangePointerInteraction(event.pointerId)}
-                  onBlur={() => finishSpeedRangePointerInteraction()}
+                  onBlur={finishAllSpeedVisualAdjustments}
                   onKeyDown={(event) => {
-                    if (isSpeedAdjustmentKey(event.key)) beginSpeedVisualAdjustment();
+                    beginSpeedKeyboardInteraction(event.key);
                   }}
                   onKeyUp={(event) => {
-                    if (isSpeedAdjustmentKey(event.key)) finishSpeedVisualAdjustment();
+                    finishSpeedKeyboardInteraction(event.key);
                   }}
                   aria-label="Animation speed"
                 />
@@ -6997,9 +7649,9 @@ export default function Home() {
             <div className="workbench__topline">
               <div>
                 <p className="workbench__overline">LIVE ARRAY</p>
-                <p className="workbench__message">{currentStep.message}</p>
+                <p className="workbench__message" ref={denseWorkbenchMessageRef}>{currentStep.message}</p>
               </div>
-              <div className={"phase-chip phase-chip--" + currentStep.phase}>
+              <div className={"phase-chip phase-chip--" + currentStep.phase} ref={densePhaseChipRef}>
                 <span aria-hidden="true" />
                 {getPhaseLabel(currentStep.phase)}
               </div>
@@ -7007,6 +7659,7 @@ export default function Home() {
 
             {algorithm === "insertion" && (
               <div
+                ref={denseHeldKeyRef}
                 className={
                   "held-key " +
                   (currentStep.key !== null && currentStep.gapIndex !== null
@@ -7016,8 +7669,8 @@ export default function Home() {
                 aria-hidden="true"
               >
                 <span>stored key</span>
-                <strong>{currentStep.key ?? ""}</strong>
-                <em>
+                <strong ref={denseHeldKeyValueRef}>{currentStep.key ?? ""}</strong>
+                <em ref={denseHeldKeyDetailRef}>
                   {currentStep.gapIndex === null
                     ? "gap ready for the next key"
                     : "gap at slot " + (currentStep.gapIndex + 1)}
@@ -7039,8 +7692,10 @@ export default function Home() {
                   steps={steps}
                   initialStepIndex={stepIndex}
                   isRunning={isRunning}
-                  stepDelay={deterministicPlaybackDelay}
-                  stepStride={densePlaybackStepStride}
+                  getPlaybackTiming={getDenseCanvasPlaybackTiming}
+                  onPlaybackIndex={handleDenseCanvasPlaybackIndex}
+                  onVisualStep={handleDenseCanvasPlaybackVisualStep}
+                  onAudioStep={handleDenseCanvasAudioStep}
                   onCheckpoint={handleDenseCanvasPlaybackCheckpoint}
                   onContextUnavailable={handleDenseCanvasContextUnavailable}
                 />
@@ -7172,28 +7827,28 @@ export default function Home() {
             <div className="stat-card">
               <span>{stageLabel.toUpperCase()}</span>
               <strong>
-                {currentStep.pass}
+                <span ref={denseStagePassRef}>{currentStep.pass}</span>
                 <em>{isBogo && bogoRunsUntilSolved ? " / ∞" : " / " + totalStages}</em>
               </strong>
               <p>{algorithmDetails.stageDescription}</p>
             </div>
             <div className="stat-card">
               <span>{isBogo ? "ORDER CHECKS" : "COMPARISONS"}</span>
-              <strong>{currentStep.comparisons}</strong>
+              <strong ref={denseComparisonCountRef}>{currentStep.comparisons}</strong>
               <p>values checked</p>
             </div>
             <div className="stat-card">
               <span>{isBogo ? "SHUFFLE WRITES" : "ARRAY WRITES"}</span>
-              <strong>{currentStep.writes}</strong>
+              <strong ref={denseWriteCountRef}>{currentStep.writes}</strong>
               <p>{isBogo ? "random swaps" : "moves + writes"}</p>
             </div>
             <div className="stat-card stat-card--progress">
               <span>{isBogo && bogoRunsUntilSolved && runState !== "complete" ? "OPEN ENDED" : "PROGRESS"}</span>
               <strong>
-                {isBogo && bogoRunsUntilSolved && runState !== "complete" ? "∞" : progress}
+                <span ref={denseProgressValueRef}>{isBogo && bogoRunsUntilSolved && runState !== "complete" ? "∞" : progress}</span>
                 {!(isBogo && bogoRunsUntilSolved && runState !== "complete") && <em>%</em>}
               </strong>
-              <div className="progress-track" aria-hidden="true"><i style={{ width: String(progress) + "%" }} /></div>
+              <div className="progress-track" aria-hidden="true"><i ref={denseProgressFillRef} style={{ width: String(progress) + "%" }} /></div>
             </div>
           </div>
         </section>

@@ -10,8 +10,8 @@ export const PIANO_TONE_SEMITONE_SPAN = 24; // C4 through C6
 
 /**
  * Short rows are intentionally articulated as individual piano notes. Above
- * that range, a single continuously tuned voice is both clearer during fast
- * playback and dramatically cheaper for WebKit's native audio renderer.
+ * that range, one reusable oscillator is gated into discrete pulses, avoiding
+ * per-event source churn in WebKit while retaining silence between sounds.
  */
 export function usesContinuousDenseTone(valueCount: number) {
   return valueCount > PIANO_TONE_MAX_ARRAY_SIZE;
@@ -166,6 +166,40 @@ export function getSafeScheduledAudioTime(
   minimumLeadSeconds: number,
 ) {
   return Math.max(requestedTime, currentTime + Math.max(0, minimumLeadSeconds));
+}
+
+export type DenseTonePulseWindow = {
+  startTime: number;
+  attackEndTime: number;
+  releaseStartTime: number;
+  endTime: number;
+};
+
+/**
+ * Build one non-overlapping dense-tone pulse, or coalesce a checkpoint that
+ * arrives before the preceding pulse has had an audible silence gap. Keeping
+ * this decision on the AudioContext timeline makes the cadence independent of
+ * delayed/coalesced WebKit rendering while bounding AudioParam automation.
+ */
+export function getDenseTonePulseWindow(
+  lastPulseEndTime: number | null,
+  requestedStartTime: number,
+  attackSeconds: number,
+  holdSeconds: number,
+  releaseSeconds: number,
+  minimumSilenceSeconds: number,
+): DenseTonePulseWindow | null {
+  const minimumNextStart =
+    lastPulseEndTime === null
+      ? Number.NEGATIVE_INFINITY
+      : lastPulseEndTime + Math.max(0, minimumSilenceSeconds);
+  if (requestedStartTime < minimumNextStart) return null;
+
+  const startTime = requestedStartTime;
+  const attackEndTime = startTime + Math.max(0, attackSeconds);
+  const releaseStartTime = attackEndTime + Math.max(0, holdSeconds);
+  const endTime = releaseStartTime + Math.max(0, releaseSeconds);
+  return { startTime, attackEndTime, releaseStartTime, endTime };
 }
 
 /**

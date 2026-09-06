@@ -1,6 +1,6 @@
 {
   "name": "sortscope",
-  "version": "1.0.6",
+  "version": "1.0.7",
   "description": "An interactive desktop visualizer for learning sorting algorithms.",
   "license": "PolyForm-Noncommercial-1.0.0",
   "private": true,

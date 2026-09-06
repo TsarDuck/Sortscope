@@ -26,6 +26,7 @@ import {
   getBogoSessionStep,
   isNonDecreasing,
 } from "../app/lib/sorting";
+import type { BogoWorkerCommand, BogoWorkerEvent } from "../app/lib/bogo-worker-protocol";
 
 function finalValues(steps: Array<{ values: number[] }>) {
   return steps.at(-1)?.values ?? [];
@@ -190,6 +191,53 @@ test("bogo sessions can yield between attempts without losing their selected lim
   assert.equal(unlimited.done, true);
   assert.equal(unlimited.limited, false);
   assert.equal(getBogoSessionStep(unlimited).phase, "complete");
+});
+
+test("Bogo worker protocol snapshots are structured-clone-safe and isolated", () => {
+  const session = createBogoSession([3, 1, 2], 7);
+  const command: BogoWorkerCommand = {
+    type: "start",
+    runId: 42,
+    session,
+    pacing: {
+      attemptDelayMs: 0,
+      batchBudgetMs: 8,
+      snapshotIntervalMs: 50,
+    },
+  };
+  const clonedCommand = structuredClone(command);
+  const configureCommand = structuredClone<BogoWorkerCommand>({
+    type: "configure",
+    runId: clonedCommand.runId,
+    configurationId: 9,
+    pacing: clonedCommand.pacing,
+  });
+  const snapshot = structuredClone<BogoWorkerEvent>({
+    type: "snapshot",
+    runId: clonedCommand.runId,
+    session: clonedCommand.session,
+  });
+  const configured = structuredClone<BogoWorkerEvent>({
+    type: "configured",
+    runId: clonedCommand.runId,
+    configurationId: 9,
+    session: clonedCommand.session,
+  });
+
+  advanceBogoSession(clonedCommand.session, () => 0.999);
+
+  assert.equal(snapshot.type, "snapshot");
+  assert.equal(snapshot.runId, 42);
+  assert.equal(snapshot.session.attempts, 0);
+  assert.equal(configureCommand.type, "configure");
+  assert.equal(configureCommand.configurationId, 9);
+  assert.equal(configured.type, "configured");
+  assert.equal(configured.configurationId, 9);
+  assert.equal(configured.session.attempts, 0);
+  assert.deepEqual(session.values, [3, 1, 2]);
+  assert.equal(session.attempts, 0);
+  assert.equal(clonedCommand.session.attempts, 1);
+  assert.equal(clonedCommand.session.attemptLimit, 7);
 });
 
 test("the default Bogo session path keeps its Fisher-Yates result and write count", () => {
