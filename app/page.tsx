@@ -253,6 +253,8 @@ const AUDIBLE_PHASES: StepPhase[] = [
 const INITIAL_ARRAY_SIZE = 4;
 const DEFAULT_ARRAY_SIZE = 24;
 const DEFAULT_SPEED = 50;
+const DEFAULT_SOUND_VOLUME = 50;
+const INITIAL_WORKLOAD_BAR_SIZE = 65_536;
 // The interface stays on a familiar 1–100% scale while deterministic sorts
 // keep the wider playback range that makes the top end feel responsive.
 const MAX_SPEED = 200;
@@ -1485,7 +1487,7 @@ const ALGORITHM_DETAILS: Record<AlgorithmId, AlgorithmDetails> = {
   bogo: {
     label: "Bogo sort",
     number: "01",
-    heroCopy: "Shuffle the whole row and hope it lands in order—a deliberately impractical sorting experiment.",
+    heroCopy: "The algorithmic equivalent of blindfolding yourself and throwing darts at the dartboard until you get a hit.",
     controlTitle: "Shuffle and hope",
     stageLabel: "shuffle",
     stageDescription: "random attempt",
@@ -2894,7 +2896,7 @@ export default function Home() {
     useState<WorkloadBarTransitionMap>({});
   const [enteringWorkloadBarAlgorithms, setEnteringWorkloadBarAlgorithms] =
     useState<WorkloadBarTransitionMap>({});
-  const [workloadBarSize, setWorkloadBarSize] = useState(65_536);
+  const [workloadBarSize, setWorkloadBarSize] = useState(INITIAL_WORKLOAD_BAR_SIZE);
   const [originalValues, setOriginalValues] = useState(INITIAL_VALUES);
   const [values, setValues] = useState(INITIAL_VALUES);
   const [steps, setSteps] = useState<SortStep[]>([]);
@@ -2923,10 +2925,10 @@ export default function Home() {
     "hidden" | "visible" | "fading"
   >("hidden");
   const [completionSweepActive, setCompletionSweepActive] = useState(false);
-  const [soundVolume, setSoundVolume] = useState(50);
+  const [soundVolume, setSoundVolume] = useState(DEFAULT_SOUND_VOLUME);
   const [practiceStepIndex, setPracticeStepIndex] = useState(0);
   const [practiceValues, setPracticeValues] = useState(
-    () => [...normalizePracticeSteps(ALGORITHM_DETAILS.insertion.practice)[0].start],
+    () => [...BOGO_PRACTICE_INITIAL_VALUES],
   );
   const [practiceSelectedIndex, setPracticeSelectedIndex] = useState<number | null>(null);
   const [practiceDragIndex, setPracticeDragIndex] = useState<number | null>(null);
@@ -2934,7 +2936,7 @@ export default function Home() {
   const [practiceDragOffset, setPracticeDragOffset] = useState({ x: 0, y: 0 });
   const [practiceDropIndex, setPracticeDropIndex] = useState<number | null>(null);
   const [practiceDropMode, setPracticeDropMode] = useState<PracticeDropMode | null>(null);
-  const [insertionKeyHeld, setInsertionKeyHeld] = useState(true);
+  const [insertionKeyHeld, setInsertionKeyHeld] = useState(false);
   const [insertionKeySelected, setInsertionKeySelected] = useState(false);
   const [practiceSolved, setPracticeSolved] = useState(false);
   const [bogoPracticeEntered, setBogoPracticeEntered] = useState(false);
@@ -7196,10 +7198,85 @@ export default function Home() {
     document.body.scrollTop = 0;
   }
 
-  function reopenIntro(returnFocusTarget: HTMLElement | null) {
+  function resetProgramToOpeningState(returnFocusTarget: HTMLElement | null) {
     clearIntroDismissTimer();
     introReturnFocusRef.current = returnFocusTarget ?? brandButtonRef.current;
+
+    // Stop every asynchronous subsystem before restoring React state. This
+    // prevents a worker snapshot, casino cue, practice timer, or completion
+    // callback from repainting stale progress behind the welcome screen.
+    resetCompletionSweep();
+    resetBogoElapsedTimer();
+    setBogoUnlimitedConfirmation(false);
+    setBogoCelebrationPhase("hidden");
+    cancelActiveBogoWorkerRun();
+    bogoSessionRef.current = null;
+    bogoRateSampleRef.current = null;
+    bogoExpectedRateSampleRef.current = null;
+    pendingBogoWorkerRateCalibrationRef.current = null;
+    activeBogoWorkerRunRef.current = null;
+    bogoWorkerRunIdRef.current += 1;
+    bogoWorkerConfigurationIdRef.current = 0;
+    bogoWorkerRef.current?.terminate();
+    bogoWorkerRef.current = null;
+    resetPractice("bogo");
+    stopLiveSortingToneSound();
+    // Victory notes are deliberately independent one-shots. Detaching their
+    // shared output makes the reset immediately silent without closing the
+    // AudioContext that macOS unlocked through the person's earlier gesture.
+    disconnectSynthMasterOutput();
+    lastToneTimeRef.current = 0;
+    lastBogoTextureTimeRef.current = 0;
+
+    speedRef.current = DEFAULT_SPEED;
+    soundVolumeRef.current = DEFAULT_SOUND_VOLUME;
+    speedRangePointerIdRef.current = null;
+    speedAdjustmentKeysRef.current.clear();
+    motionBarElementsRef.current.forEach((element) => {
+      element.getAnimations().forEach((animation) => animation.cancel());
+    });
+    motionBarPositionsRef.current.clear();
+    motionBarTokensRef.current = [];
+    motionBarInterpolationEnabledRef.current = false;
+    motionBarInterpolationPausedRef.current = false;
+    denseCanvasPlaybackStepIndexRef.current = 0;
+    denseCanvasPlaybackTraceRef.current = null;
+    denseCanvasReadoutRef.current = null;
+    practiceBlockPositionsRef.current.clear();
+    workloadBarTransitionRunRef.current += 1;
+
+    setAlgorithm("bogo");
     setIsAlgorithmPickerOpen(false);
+    setAlgorithmCardTab("walkthrough");
+    setArraySize(INITIAL_ARRAY_SIZE);
+    setArraySizeInput(String(INITIAL_ARRAY_SIZE));
+    setSpeed(DEFAULT_SPEED);
+    setSpeedInput(String(DEFAULT_SPEED));
+    setIsAdjustingSpeedControl(false);
+    setSettledVisualSpeed(DEFAULT_SPEED);
+    setBogoAttemptLimit(BOGO_MAX_ATTEMPTS);
+    setBogoAttemptInput(String(BOGO_MAX_ATTEMPTS));
+    setBogoRunsUntilSolved(false);
+    setArrayArrangement("random");
+    setBenchmarkPattern("random");
+    setBenchmarkTab("table");
+    setVisibleWorkloadBarAlgorithms({ ...DEFAULT_WORKLOAD_BAR_ALGORITHM_VISIBILITY });
+    setExitingWorkloadBarAlgorithms({});
+    setEnteringWorkloadBarAlgorithms({});
+    setWorkloadBarSize(INITIAL_WORKLOAD_BAR_SIZE);
+    setOriginalValues([...INITIAL_VALUES]);
+    setValues([...INITIAL_VALUES]);
+    setSteps([]);
+    setStepIndex(0);
+    setRunState("ready");
+    setBogoLiveStep(null);
+    setBogoMeasuredShuffleRate(null);
+    setBogoFrozenExpectedShuffleRate(null);
+    setBogoExpectedRateSource("calibrating");
+    setSoundVolume(DEFAULT_SOUND_VOLUME);
+    setMotionSlideOffsets({});
+    setMotionSlideStage("idle");
+
     resetViewportForIntro();
     setIntroPhaseImmediately("visible");
   }
@@ -7369,8 +7446,8 @@ export default function Home() {
             ref={brandButtonRef}
             className="brand"
             type="button"
-            onClick={(event) => reopenIntro(event.currentTarget)}
-            aria-label="Return to the Sortscope welcome screen"
+            onClick={(event) => resetProgramToOpeningState(event.currentTarget)}
+            aria-label="Reset Sortscope and return to the welcome screen"
           >
             <span className="brand-mark" aria-hidden="true" />
             <span>sortscope</span>
