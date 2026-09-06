@@ -80,8 +80,8 @@ type AlgorithmId =
   | "powersort"
   | "bogo";
 
-// Keep the learning path in one place so the hero's previous/next controls
-// and its direct-picker menu always agree on the same progression.
+// Keep the learning path in one place for the hero's previous/next controls.
+// The direct picker is ordered separately by its visible lesson numbers.
 const ALGORITHM_ORDER: readonly AlgorithmId[] = [
   "bogo",
   "selection",
@@ -1526,6 +1526,11 @@ const ALGORITHM_DETAILS: Record<AlgorithmId, AlgorithmDetails> = {
     ],
   },
 };
+
+const ALGORITHM_PICKER_ORDER: readonly AlgorithmId[] = [...ALGORITHM_ORDER].sort(
+  (left, right) =>
+    Number(ALGORITHM_DETAILS[left].number) - Number(ALGORITHM_DETAILS[right].number),
+);
 
 // These are deliberately written as complete, runnable Python functions instead
 // of pseudo-code. They mirror the decisions used by the visualizer; the React
@@ -3137,7 +3142,7 @@ export default function Home() {
     ] ?? algorithm;
   const nextAlgorithm =
     ALGORITHM_ORDER[(algorithmOrderIndex + 1) % ALGORITHM_ORDER.length] ?? algorithm;
-  const algorithmPickerOptions = ALGORITHM_ORDER.filter(
+  const algorithmPickerOptions = ALGORITHM_PICKER_ORDER.filter(
     (candidate) => candidate !== algorithm,
   );
   const practiceSteps = useMemo(
