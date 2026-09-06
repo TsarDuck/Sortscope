@@ -1917,6 +1917,14 @@ input:focus-visible {
   transition: width 200ms ease;
 }
 
+/* Canvas publishes dense progress imperatively at the display cadence. A
+   200 ms CSS tween for every update keeps an otherwise static workbench in a
+   perpetual paint cycle, so use the already-rendered value directly while
+   that high-frequency renderer is active. */
+.workbench--canvas-running .progress-track i {
+  transition: none;
+}
+
 .learn-grid {
   display: grid;
   grid-template-columns: minmax(0, 1.14fr) minmax(330px, 0.96fr);

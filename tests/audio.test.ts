@@ -8,6 +8,7 @@ import {
   decodePcmWav,
   getContinuousToneFrequency,
   getDenseTonePulseWindow,
+  getOneShotAudioEnvelopeWindow,
   getSafeScheduledAudioTime,
   isCompletionSweepAudioFinished,
   usesContinuousDenseTone,
@@ -103,6 +104,25 @@ test("dense tone scheduling never starts in the current or a past audio quantum"
   assert.equal(getSafeScheduledAudioTime(1.25, 1, 0.008), 1.25);
   assert.equal(getSafeScheduledAudioTime(0.95, 1, 0.008), 1.008);
   assert.equal(getSafeScheduledAudioTime(1, 1, 0), 1);
+});
+
+test("one-shot envelopes reserve scheduling lead and an exact-zero tail", () => {
+  assert.deepEqual(
+    getOneShotAudioEnvelopeWindow(0.99, 1, 0.052, 0.012, 0.004),
+    {
+      startTime: 1.012,
+      releaseCurveEndTime: 1.06,
+      endTime: 1.064,
+    },
+  );
+  assert.deepEqual(
+    getOneShotAudioEnvelopeWindow(1.25, 1, 0.034, 0.012, 0.004),
+    {
+      startTime: 1.25,
+      releaseCurveEndTime: 1.28,
+      endTime: 1.284,
+    },
+  );
 });
 
 test("dense tone pulses keep an explicit silence gap and bounded cadence", () => {

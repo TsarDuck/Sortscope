@@ -1,6 +1,7 @@
 import {
   Fragment,
   memo,
+  startTransition,
   type CSSProperties,
   type KeyboardEvent as ReactKeyboardEvent,
   type PointerEvent as ReactPointerEvent,
@@ -16,6 +17,7 @@ import {
   BOGO_MAX_ATTEMPTS,
   type BogoSession,
   advanceBogoSession,
+  advanceBogoSessionBatch,
   buildCocktailSteps,
   buildBubbleSteps,
   buildHeapSortSteps,
@@ -44,6 +46,7 @@ import {
   decodePcmWav,
   getContinuousToneFrequency,
   getDenseTonePulseWindow,
+  getOneShotAudioEnvelopeWindow,
   getSafeScheduledAudioTime,
   isCompletionSweepAudioFinished,
   usesContinuousDenseTone,
@@ -53,6 +56,13 @@ import {
   makeArrayForArrangement,
   type ArrayArrangement,
 } from "./lib/array-arrangements";
+import {
+  advanceDensePlaybackTimeline,
+  createDenseCanvasPresentationState,
+  recordDenseCanvasAnimationFrame,
+  shouldPresentDenseCanvasFrame,
+  type DensePlaybackTiming,
+} from "./lib/dense-playback";
 import type {
   BogoWorkerEvent,
   BogoWorkerPacing,
@@ -126,6 +136,12 @@ type DenseLiveToneVoice = {
   pulseEnvelope: GainNode;
   releaseEnvelope: GainNode;
   lastPulseEndTime: number;
+};
+
+type SynthMasterOutput = {
+  context: AudioContext;
+  input: GainNode;
+  limiter: DynamicsCompressorNode;
 };
 
 type CompletionSweepAudioRun = {
@@ -253,6 +269,11 @@ const COMPLETION_SWEEP_OUTPUT_RELEASE_SECONDS = 0.018;
 const LIVE_TONE_OUTPUT_RELEASE_SECONDS = 0.018;
 const AUDIO_SOURCE_STOP_PADDING_SECONDS = 0.008;
 const MAX_LIVE_TONE_SOURCES = 16;
+// Every source-based synth voice starts ahead of the current audio quantum.
+// This is short enough to retain responsive input while giving WebKit time to
+// apply its zero-gain attack before an oscillator becomes audible.
+const ONE_SHOT_TONE_SCHEDULE_LEAD_SECONDS = 0.012;
+const ONE_SHOT_TONE_TERMINAL_FADE_SECONDS = 0.004;
 // Give dense Web Audio voices a full native-output safety margin before a
 // control point reaches the render quantum. An 8 ms lead was enough in a
 // browser tab, but desktop WebKit can miss that window while its renderer is
@@ -272,11 +293,11 @@ const DENSE_TONE_MIN_SILENCE_SECONDS = 0.024;
 // for smaller rows and careful slow-motion inspection.
 const CANVAS_BAR_RENDERER_MIN_ARRAY_SIZE = 64;
 const DENSE_CANVAS_MAX_PIXEL_RATIO = 1.5;
-// A full React tree and 256 bar nodes cannot be repainted meaningfully more
-// than about 30 times per second on every desktop WebView. At the fastest
-// settings, advance several already-recorded algorithm steps per paint rather
-// than asking macOS/Linux/Windows to render a frame for every tiny mutation.
-const DENSE_PLAYBACK_FRAME_INTERVAL = 32;
+// The DOM fallback still needs a conservative sampling interval: rendering
+// 256 individually styled elements for every recorded mutation is expensive.
+// The Canvas renderer deliberately does not use this cap; it presents on the
+// host's native requestAnimationFrame cadence instead.
+const DOM_DENSE_PLAYBACK_FRAME_INTERVAL = 32;
 // Dense canvas playback publishes audible/status milestones independently of
 // React. The page only commits the exact index at a semantic boundary (pause,
 // renderer handoff, or completion), avoiding a full teaching-page reconciliation
@@ -2359,7 +2380,6 @@ const SortingBarSlot = memo(function SortingBarSlot({
 });
 
 type DenseBarCanvasFrame = {
-  items: RenderedBarItem[];
   largestValue: number;
   step: SortStep;
   algorithm: AlgorithmId;
@@ -2367,11 +2387,6 @@ type DenseBarCanvasFrame = {
   completionSweepActive: boolean;
   completionSweepStepDuration: number;
   prefersReducedMotion: boolean;
-};
-
-type DensePlaybackTiming = {
-  stepDelay: number;
-  stepStride: number;
 };
 
 type DenseCanvasReadout = {
@@ -2428,7 +2443,6 @@ function getDenseCanvasBarColor(barClassName: string, isCompletionScan: boolean)
 // a single low-overhead surface. It intentionally only serves the fast dense
 // mode: the DOM path remains responsible for slow FLIP movement and labels.
 const DenseBarCanvas = memo(function DenseBarCanvas({
-  items,
   largestValue,
   step,
   algorithm,
@@ -2450,7 +2464,6 @@ const DenseBarCanvas = memo(function DenseBarCanvas({
   const contextRef = useRef<CanvasRenderingContext2D | null>(null);
   const surfaceRef = useRef<DenseCanvasSurface>({ width: 0, height: 0, pixelRatio: 1 });
   const frameRef = useRef<DenseBarCanvasFrame>({
-    items,
     largestValue,
     step,
     algorithm,
@@ -2462,6 +2475,12 @@ const DenseBarCanvas = memo(function DenseBarCanvas({
   const drawRef = useRef<(now?: number) => void>(() => undefined);
   const completionStartedAtRef = useRef<number | null>(null);
   const playbackTraceRef = useRef<SortStep[] | null>(null);
+  // Canvas does not need the DOM renderer's persistent bar tokens. Reusing
+  // this lookup also avoids allocating a merged array and Set for every
+  // displayed dense frame, which otherwise creates steady GC pressure at
+  // maximum speed on WebKit.
+  const playbackSettledIndicesRef = useRef<Set<number>>(new Set());
+  const presentationStateRef = useRef(createDenseCanvasPresentationState());
   const contextUnavailableReportedRef = useRef(false);
   const latestStepsRef = useRef(steps);
   const playbackStepIndexRef = useRef(initialStepIndex);
@@ -2482,19 +2501,18 @@ const DenseBarCanvas = memo(function DenseBarCanvas({
 
   const draw = useCallback((now = performance.now()) => {
     const canvas = canvasRef.current;
-    const { width, height, pixelRatio } = surfaceRef.current;
+    const { width, height } = surfaceRef.current;
     if (!canvas || width <= 0 || height <= 0) return;
 
     const context = contextRef.current;
     if (!context) return;
 
     const frame = frameRef.current;
-    const itemCount = frame.items.length;
+    const { values } = frame.step;
+    const itemCount = values.length;
     if (itemCount === 0) return;
 
-    context.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
     context.clearRect(0, 0, width, height);
-    context.imageSmoothingEnabled = false;
 
     const completionStartedAt = completionStartedAtRef.current;
     const completionElapsed =
@@ -2518,12 +2536,15 @@ const DenseBarCanvas = memo(function DenseBarCanvas({
     const gap = itemCount > 1 && width / itemCount >= 3 ? 1 : 0;
     const barWidth = Math.max(1, (width - gap * (itemCount - 1)) / itemCount);
     const maximum = Math.max(frame.largestValue, 1);
+    // Canvas state setters cross the JS/native boundary. Dense frames usually
+    // contain long runs of the same idle/sorted color, so only update the
+    // native fill style when a visible state actually changes.
+    let activeFillStyle = "";
 
     for (let index = 0; index < itemCount; index += 1) {
-      const item = frame.items[index]!;
       const x = index * (barWidth + gap);
 
-      if (item.isGap) {
+      if (index === frame.step.gapIndex && frame.step.key !== null) {
         const gapHeight = Math.max(16, height * 0.1);
         context.save();
         context.strokeStyle = "rgba(183, 174, 255, 0.86)";
@@ -2534,9 +2555,13 @@ const DenseBarCanvas = memo(function DenseBarCanvas({
         continue;
       }
 
-      const barHeight = Math.max(0, Math.min(height, (item.value / maximum) * height));
+      const barHeight = Math.max(0, Math.min(height, (values[index]! / maximum) * height));
       const barClassName = getBarClass(index, frame.step, frame.algorithm, frame.settledIndices);
-      context.fillStyle = getDenseCanvasBarColor(barClassName, index === completionIndex);
+      const fillStyle = getDenseCanvasBarColor(barClassName, index === completionIndex);
+      if (fillStyle !== activeFillStyle) {
+        context.fillStyle = fillStyle;
+        activeFillStyle = fillStyle;
+      }
       context.fillRect(x, height - barHeight, barWidth, barHeight);
     }
   }, []);
@@ -2567,18 +2592,21 @@ const DenseBarCanvas = memo(function DenseBarCanvas({
     nextStep: SortStep,
     nextStepIndex: number,
     isAdvance = false,
+    shouldDraw = true,
   ) => {
-    const settled = nextStep.settled ?? [];
-    const visuallySettled = nextStep.visualSettled ?? [];
+    const playbackSettledIndices = playbackSettledIndicesRef.current;
+    playbackSettledIndices.clear();
+    for (const index of nextStep.settled ?? []) {
+      playbackSettledIndices.add(index);
+    }
+    for (const index of nextStep.visualSettled ?? []) {
+      playbackSettledIndices.add(index);
+    }
     frameRef.current = {
-      items: getRenderedBarItems(nextStep),
       largestValue,
       step: nextStep,
       algorithm,
-      settledIndices:
-        settled.length === 0 && visuallySettled.length === 0
-          ? null
-          : new Set([...settled, ...visuallySettled]),
+      settledIndices: playbackSettledIndices.size > 0 ? playbackSettledIndices : null,
       // A live dense run cannot be in its completion sweep yet. Preserve the
       // current props nevertheless so the ordinary React sync owns the final
       // red scan once the terminal checkpoint commits.
@@ -2586,11 +2614,13 @@ const DenseBarCanvas = memo(function DenseBarCanvas({
       completionSweepStepDuration: frameRef.current.completionSweepStepDuration,
       prefersReducedMotion: frameRef.current.prefersReducedMotion,
     };
-    drawRef.current();
-    playbackConfigRef.current.onPlaybackIndex(nextStepIndex);
+    const config = playbackConfigRef.current;
+    config.onPlaybackIndex(nextStepIndex);
+    if (shouldDraw) {
+      drawRef.current();
+      if (isAdvance) config.onVisualStep(nextStep, nextStepIndex);
+    }
     if (isAdvance) {
-      const config = playbackConfigRef.current;
-      config.onVisualStep(nextStep, nextStepIndex);
       config.onAudioStep?.(nextStep);
     }
   }, [algorithm, largestValue]);
@@ -2607,7 +2637,6 @@ const DenseBarCanvas = memo(function DenseBarCanvas({
       step !== localPlaybackStep;
     if ((isRunning && steps.length > 0) || isAwaitingPlaybackFlush) return;
     frameRef.current = {
-      items,
       largestValue,
       step,
       algorithm,
@@ -2622,7 +2651,6 @@ const DenseBarCanvas = memo(function DenseBarCanvas({
     completionSweepActive,
     completionSweepStepDuration,
     draw,
-    items,
     largestValue,
     prefersReducedMotion,
     settledIndices,
@@ -2645,9 +2673,13 @@ const DenseBarCanvas = memo(function DenseBarCanvas({
     }
 
     let animationFrame = 0;
+    const presentationState = createDenseCanvasPresentationState();
+    presentationStateRef.current = presentationState;
     let lastAdvanceAt = performance.now();
     const currentStepIndex = () => playbackStepIndexRef.current;
 
+    recordDenseCanvasAnimationFrame(presentationState, lastAdvanceAt);
+    shouldPresentDenseCanvasFrame(presentationState, lastAdvanceAt, true);
     drawPlaybackStep(steps[currentStepIndex()]!, currentStepIndex());
 
     const advance = (now: number) => {
@@ -2655,31 +2687,32 @@ const DenseBarCanvas = memo(function DenseBarCanvas({
         getPlaybackTiming: latestPlaybackTiming,
         onCheckpoint: latestCheckpoint,
       } = playbackConfigRef.current;
-      let elapsed = now - lastAdvanceAt;
-      let nextStepIndex = currentStepIndex();
-
+      recordDenseCanvasAnimationFrame(presentationState, now);
       // Merge Sort deliberately gives each pass a shared visual duration.
-      // The local canvas runner cannot rely on React's stale `currentStep`,
-      // so consume timing one visible step at a time and re-read the pass
-      // policy whenever its local index crosses into a new merge pass.
-      while (nextStepIndex < finalStepIndex) {
-        const timing = latestPlaybackTiming(steps[nextStepIndex]!);
-        const nextDelay = Math.max(1, timing.stepDelay);
-        if (elapsed < nextDelay) break;
-
-        elapsed -= nextDelay;
-        lastAdvanceAt += nextDelay;
-        nextStepIndex = Math.min(
-          finalStepIndex,
-          nextStepIndex + Math.max(1, timing.stepStride),
-        );
-      }
+      // The elapsed-time helper re-reads its timing policy at each local
+      // boundary and bounds a badly overdue frame, so a pause/background
+      // hitch cannot turn its first returned rAF into another long task.
+      const timeline = advanceDensePlaybackTimeline({
+        currentStepIndex: currentStepIndex(),
+        finalStepIndex,
+        lastAdvanceAt,
+        now,
+        getPlaybackTiming: (stepIndex) => latestPlaybackTiming(steps[stepIndex]!),
+      });
+      lastAdvanceAt = timeline.lastAdvanceAt;
+      const nextStepIndex = timeline.stepIndex;
 
       if (nextStepIndex !== currentStepIndex()) {
         playbackStepIndexRef.current = nextStepIndex;
-        drawPlaybackStep(steps[nextStepIndex]!, nextStepIndex, true);
+        const isFinalStep = nextStepIndex === finalStepIndex;
+        drawPlaybackStep(
+          steps[nextStepIndex]!,
+          nextStepIndex,
+          true,
+          shouldPresentDenseCanvasFrame(presentationState, now, isFinalStep),
+        );
 
-        if (nextStepIndex === finalStepIndex) {
+        if (isFinalStep) {
           latestCheckpoint(nextStepIndex, true);
           return;
         }
@@ -2738,6 +2771,11 @@ const DenseBarCanvas = memo(function DenseBarCanvas({
       surfaceRef.current = { width, height, pixelRatio };
       if (canvas.width !== backingWidth) canvas.width = backingWidth;
       if (canvas.height !== backingHeight) canvas.height = backingHeight;
+      // Backing-store writes reset Canvas state. Re-establish the logical CSS
+      // coordinate system only when that surface changes instead of crossing
+      // the JS/native boundary on every animation frame.
+      context.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
+      context.imageSmoothingEnabled = false;
       drawRef.current();
     };
 
@@ -2765,11 +2803,20 @@ const DenseBarCanvas = memo(function DenseBarCanvas({
     }
 
     completionStartedAtRef.current = performance.now();
+    const presentationState = presentationStateRef.current;
+    // The terminal draw may have happened just before React committed this
+    // effect. Do not treat that one state transition as evidence that the
+    // host is slow; observe the completion animation's own rAF cadence.
+    presentationState.lastAnimationFrameAt = null;
     const animationEnd =
-      COMPLETION_SWEEP_AUDIO_VISUAL_LEAD + completionSweepStepDuration * Math.max(items.length, 1);
+      COMPLETION_SWEEP_AUDIO_VISUAL_LEAD +
+      completionSweepStepDuration * Math.max(step.values.length, 1);
     let animationFrame = 0;
     const animate = (now: number) => {
-      drawRef.current(now);
+      recordDenseCanvasAnimationFrame(presentationState, now);
+      if (shouldPresentDenseCanvasFrame(presentationState, now)) {
+        drawRef.current(now);
+      }
       if (now - completionStartedAtRef.current! < animationEnd) {
         animationFrame = window.requestAnimationFrame(animate);
       }
@@ -2777,7 +2824,7 @@ const DenseBarCanvas = memo(function DenseBarCanvas({
     animationFrame = window.requestAnimationFrame(animate);
 
     return () => window.cancelAnimationFrame(animationFrame);
-  }, [completionSweepActive, completionSweepStepDuration, items.length, prefersReducedMotion]);
+  }, [completionSweepActive, completionSweepStepDuration, prefersReducedMotion, step.values.length]);
 
   return <canvas className="bars-canvas" ref={canvasRef} aria-hidden="true" />;
 });
@@ -2802,6 +2849,12 @@ function getPhaseLabel(phase: StepPhase) {
   };
 
   return labels[phase];
+}
+
+function setTextContentIfChanged(element: Node | null, value: string) {
+  if (element && element.textContent !== value) {
+    element.textContent = value;
+  }
 }
 
 export default function Home() {
@@ -2914,6 +2967,7 @@ export default function Home() {
   const completionSweepAudioRunRef = useRef<CompletionSweepAudioRun | null>(null);
   const liveToneSourcesRef = useRef(new Set<OscillatorNode>());
   const liveToneOutputRef = useRef<GainNode | null>(null);
+  const synthMasterOutputRef = useRef<SynthMasterOutput | null>(null);
   const denseLiveToneVoiceRef = useRef<DenseLiveToneVoice | null>(null);
   const motionBarElementsRef = useRef(new Map<string, HTMLDivElement>());
   const motionBarPositionsRef = useRef(new Map<string, number>());
@@ -3576,6 +3630,12 @@ export default function Home() {
   }, [isRunning]);
 
   const isLargeArray = originalValues.length > DEFAULT_ARRAY_SIZE;
+  const canUseCanvasBarRenderer =
+    !isBogo &&
+    supportsCanvas2D &&
+    !canvasRendererUnavailable &&
+    originalValues.length >= CANVAS_BAR_RENDERER_MIN_ARRAY_SIZE &&
+    !shouldInterpolateMoves;
   const playbackDensity = isBogo ? 48 : 1;
   // Use the internal 1–200 playback range for deterministic sorts, while the
   // visible control remains a simple 1–100% scale.
@@ -3610,7 +3670,15 @@ export default function Home() {
     Math.min(1, (DEFAULT_ARRAY_SIZE - originalValues.length) / (DEFAULT_ARRAY_SIZE - 4)),
   );
   const smallRowHighSpeedFloor = 8 + 32 * compactRowRatio ** 1.35;
-  const highSpeedMinimumFrameDelay = isLargeArray ? 8 : smallRowHighSpeedFloor;
+  // The native Canvas path can faithfully present a 4 ms logical cadence on
+  // high-refresh displays. Its elapsed-time runner catches up identically at
+  // 60 Hz; retain the 8 ms floor for the DOM fallback so that route never
+  // turns 256 individual elements into a paint bottleneck.
+  const highSpeedMinimumFrameDelay = isLargeArray
+    ? canUseCanvasBarRenderer
+      ? 4
+      : 8
+    : smallRowHighSpeedFloor;
   const minimumFrameDelay = !isBogo && playbackSpeed > 100
     ? Math.round(
         16 + (highSpeedMinimumFrameDelay - 16) * highSpeedProgress,
@@ -3639,11 +3707,11 @@ export default function Home() {
       : Math.max(minimumFrameDelay, speedDelay / playbackDensity);
   const delay = baseDelay;
   const densePlaybackStepStride =
-    !isBogo && isLargeArray && delay < DENSE_PLAYBACK_FRAME_INTERVAL
-      ? Math.max(1, Math.round(DENSE_PLAYBACK_FRAME_INTERVAL / Math.max(delay, 1)))
+    !isBogo && isLargeArray && delay < DOM_DENSE_PLAYBACK_FRAME_INTERVAL
+      ? Math.max(1, Math.round(DOM_DENSE_PLAYBACK_FRAME_INTERVAL / Math.max(delay, 1)))
       : 1;
   const deterministicPlaybackDelay =
-    densePlaybackStepStride > 1 ? DENSE_PLAYBACK_FRAME_INTERVAL : delay;
+    densePlaybackStepStride > 1 ? DOM_DENSE_PLAYBACK_FRAME_INTERVAL : delay;
   // Canvas playback intentionally keeps its own step index so dense rows do
   // not re-render the entire page. Merge's pacing depends on the *local*
   // merge pass, though, not React's last committed step. Supply a timing
@@ -3662,31 +3730,18 @@ export default function Home() {
               mergePassDuration / (mergePassFrameCounts.get(candidateStep.pass) ?? 1),
             )
           : Math.max(minimumFrameDelay, speedDelay / playbackDensity);
-      const candidateStride =
-        // Merge's shared pass duration is a teaching cue, not a generic
-        // high-speed sampling target. Advance each logical merge frame so a
-        // local Canvas runner cannot skip over a pass boundary using timing
-        // calculated for the prior pass.
-        algorithm !== "merge" &&
-        !isBogo &&
-        isLargeArray &&
-        candidateDelay < DENSE_PLAYBACK_FRAME_INTERVAL
-          ? Math.max(
-              1,
-              Math.round(DENSE_PLAYBACK_FRAME_INTERVAL / Math.max(candidateDelay, 1)),
-            )
-          : 1;
-
       return {
-        stepDelay:
-          candidateStride > 1 ? DENSE_PLAYBACK_FRAME_INTERVAL : candidateDelay,
-        stepStride: candidateStride,
+        // The local Canvas runner consumes this elapsed-time schedule from
+        // requestAnimationFrame. It never maps one logical move to one frame
+        // and it does not impose the DOM fallback's former 32 ms frame cap.
+        // Merge still advances one frame at a time so its pass-aware timing
+        // cannot cross a boundary with stale timing data.
+        stepDelay: candidateDelay,
+        stepStride: 1,
       };
     },
     [
       algorithm,
-      isBogo,
-      isLargeArray,
       mergePassDuration,
       mergePassFrameCounts,
       minimumFrameDelay,
@@ -3703,12 +3758,7 @@ export default function Home() {
   // Dense fast playback does not need individual DOM boxes or FLIP geometry.
   // Preserve those more tactile details for slow inspection and every row up
   // to 63 values; switch only the 64–256 high-speed path to one canvas.
-  const useCanvasBarRenderer =
-    !isBogo &&
-    supportsCanvas2D &&
-    !canvasRendererUnavailable &&
-    originalValues.length >= CANVAS_BAR_RENDERER_MIN_ARRAY_SIZE &&
-    !shouldInterpolateMoves;
+  const useCanvasBarRenderer = canUseCanvasBarRenderer;
   const denseBarTransitionStyle = shouldInterpolateDenseBars
     ? ({
         "--bar-transition-duration": String(Math.min(260, Math.max(90, delay * 0.75))) + "ms",
@@ -3774,50 +3824,48 @@ export default function Home() {
   // teaching page every 80ms on WebKit while leaving controls and semantics
   // unchanged at every stable boundary.
   function applyDenseCanvasReadout(nextStep: SortStep, nextStepIndex: number) {
-    if (denseWorkbenchMessageRef.current) {
-      denseWorkbenchMessageRef.current.textContent = nextStep.message;
-    }
+    setTextContentIfChanged(denseWorkbenchMessageRef.current, nextStep.message);
 
     const phaseChip = densePhaseChipRef.current;
     if (phaseChip) {
-      phaseChip.className = "phase-chip phase-chip--" + nextStep.phase;
-      const labelNode = phaseChip.lastChild;
-      if (labelNode) labelNode.textContent = getPhaseLabel(nextStep.phase);
+      const nextClassName = "phase-chip phase-chip--" + nextStep.phase;
+      if (phaseChip.className !== nextClassName) phaseChip.className = nextClassName;
+      setTextContentIfChanged(phaseChip.lastChild, getPhaseLabel(nextStep.phase));
     }
 
-    if (denseHeldKeyRef.current) {
+    const heldKey = denseHeldKeyRef.current;
+    if (heldKey) {
       const isHoldingKey = nextStep.key !== null && nextStep.gapIndex !== null;
-      denseHeldKeyRef.current.classList.toggle("held-key--reserved", !isHoldingKey);
-      if (denseHeldKeyValueRef.current) {
-        denseHeldKeyValueRef.current.textContent = nextStep.key === null ? "" : String(nextStep.key);
+      const shouldReserveKeySlot = !isHoldingKey;
+      if (heldKey.classList.contains("held-key--reserved") !== shouldReserveKeySlot) {
+        heldKey.classList.toggle("held-key--reserved", shouldReserveKeySlot);
       }
-      if (denseHeldKeyDetailRef.current) {
-        denseHeldKeyDetailRef.current.textContent =
-          nextStep.gapIndex === null
-            ? "gap ready for the next key"
-            : "gap at slot " + (nextStep.gapIndex + 1);
-      }
+      setTextContentIfChanged(
+        denseHeldKeyValueRef.current,
+        nextStep.key === null ? "" : String(nextStep.key),
+      );
+      setTextContentIfChanged(
+        denseHeldKeyDetailRef.current,
+        nextStep.gapIndex === null
+          ? "gap ready for the next key"
+          : "gap at slot " + (nextStep.gapIndex + 1),
+      );
     }
 
-    if (denseStagePassRef.current) {
-      denseStagePassRef.current.textContent = String(nextStep.pass);
-    }
-    if (denseComparisonCountRef.current) {
-      denseComparisonCountRef.current.textContent = String(nextStep.comparisons);
-    }
-    if (denseWriteCountRef.current) {
-      denseWriteCountRef.current.textContent = String(nextStep.writes);
-    }
+    setTextContentIfChanged(denseStagePassRef.current, String(nextStep.pass));
+    setTextContentIfChanged(denseComparisonCountRef.current, String(nextStep.comparisons));
+    setTextContentIfChanged(denseWriteCountRef.current, String(nextStep.writes));
 
     const nextProgress =
       steps.length > 1
         ? Math.round((nextStepIndex / (steps.length - 1)) * 100)
         : 0;
-    if (denseProgressValueRef.current) {
-      denseProgressValueRef.current.textContent = String(nextProgress);
-    }
+    setTextContentIfChanged(denseProgressValueRef.current, String(nextProgress));
     if (denseProgressFillRef.current) {
-      denseProgressFillRef.current.style.width = String(nextProgress) + "%";
+      const nextProgressWidth = String(nextProgress) + "%";
+      if (denseProgressFillRef.current.style.width !== nextProgressWidth) {
+        denseProgressFillRef.current.style.width = nextProgressWidth;
+      }
     }
   }
 
@@ -3947,6 +3995,22 @@ export default function Home() {
     bogoWorkerStartupTimerRef.current = null;
   }
 
+  function publishBogoLiveStep(session: BogoSession) {
+    const nextStep = getBogoSessionStep(session);
+    if (session.done) {
+      // The terminal snapshot drives the normal completion/celebration
+      // effects, so keep it synchronous and exact.
+      setBogoLiveStep(nextStep);
+      return;
+    }
+
+    // Worker snapshots are presentation-only; the authoritative session is
+    // already in a ref. Let React coalesce a burst of 20 Hz snapshots if the
+    // desktop WebView is busy, so visual reporting can never throttle Bogo's
+    // worker or make an input click wait behind a full Home reconciliation.
+    startTransition(() => setBogoLiveStep(nextStep));
+  }
+
   function applyBogoWorkerSession(session: BogoSession, now = performance.now()) {
     bogoSessionRef.current = session;
 
@@ -3985,7 +4049,7 @@ export default function Home() {
       }
     }
 
-    setBogoLiveStep(getBogoSessionStep(session));
+    publishBogoLiveStep(session);
   }
 
   function beginBogoRateCalibrationFromWorkerSnapshot(
@@ -4185,8 +4249,14 @@ export default function Home() {
       // still audible after a reset, mute, or late completion callback. This
       // output bus is constant until release, so it needs no automation
       // cancellation before receiving its one terminal fade.
+      const releaseEndTime = now + releaseSeconds;
+      const releaseCurveEndTime = Math.max(
+        now,
+        releaseEndTime - Math.min(ONE_SHOT_TONE_TERMINAL_FADE_SECONDS, releaseSeconds / 2),
+      );
       output.gain.setValueAtTime(Math.max(0.0001, output.gain.value), now);
-      output.gain.exponentialRampToValueAtTime(0.0001, now + releaseSeconds);
+      output.gain.exponentialRampToValueAtTime(0.0001, releaseCurveEndTime);
+      output.gain.linearRampToValueAtTime(0, releaseEndTime);
     } catch {
       // A closed context cannot be automated, but its graph can still be
       // released below without retaining native audio resources.
@@ -4259,6 +4329,40 @@ export default function Home() {
     stopTrackedToneSources(liveToneSourcesRef.current, LIVE_TONE_OUTPUT_RELEASE_SECONDS);
   }
 
+  function disconnectSynthMasterOutput(context?: AudioContext) {
+    const master = synthMasterOutputRef.current;
+    if (!master || (context && master.context !== context)) return;
+    synthMasterOutputRef.current = null;
+    try {
+      master.input.disconnect();
+      master.limiter.disconnect();
+    } catch {
+      // A closing native audio graph may already have detached these nodes.
+    }
+  }
+
+  function getSynthMasterInput(context: AudioContext) {
+    const existing = synthMasterOutputRef.current;
+    if (existing?.context === context) return existing.input;
+    if (existing) disconnectSynthMasterOutput();
+
+    const input = context.createGain();
+    const limiter = context.createDynamicsCompressor();
+    input.gain.setValueAtTime(1, context.currentTime);
+    // A single piano voice remains below this knee and therefore keeps the
+    // established triangle+sine sound. Only coincident voices are reduced,
+    // preventing the eight-voice cap from summing beyond the output range.
+    limiter.threshold.setValueAtTime(-6, context.currentTime);
+    limiter.knee.setValueAtTime(6, context.currentTime);
+    limiter.ratio.setValueAtTime(4, context.currentTime);
+    limiter.attack.setValueAtTime(0.003, context.currentTime);
+    limiter.release.setValueAtTime(0.08, context.currentTime);
+    input.connect(limiter);
+    limiter.connect(context.destination);
+    synthMasterOutputRef.current = { context, input, limiter };
+    return input;
+  }
+
   function getLiveToneOutput(context: AudioContext) {
     const existing = liveToneOutputRef.current;
     if (existing?.context === context) return existing;
@@ -4273,7 +4377,7 @@ export default function Home() {
 
     const output = context.createGain();
     output.gain.setValueAtTime(1, context.currentTime);
-    output.connect(context.destination);
+    output.connect(getSynthMasterInput(context));
     liveToneOutputRef.current = output;
     return output;
   }
@@ -4506,6 +4610,7 @@ export default function Home() {
     stopCompletionSweepSound();
     stopLiveSortingToneSound();
     clearBogoPracticeInteraction();
+    disconnectSynthMasterOutput(closedContext);
     lastToneTimeRef.current = 0;
     lastBogoTextureTimeRef.current = 0;
     audioContextRef.current = null;
@@ -4586,7 +4691,23 @@ export default function Home() {
     // octave reinforcement that stays clear on laptop speakers.
     const duration = Math.min(0.12, Math.max(targetDuration, 4.5 / Math.max(frequency, 1)));
     const attack = Math.min(0.006, Math.max(0.002, duration * 0.11));
-    const bodyTime = Math.max(attack + 0.008, duration * 0.5);
+    const envelopeWindow = getOneShotAudioEnvelopeWindow(
+      startTime,
+      context.currentTime,
+      duration,
+      ONE_SHOT_TONE_SCHEDULE_LEAD_SECONDS,
+      ONE_SHOT_TONE_TERMINAL_FADE_SECONDS,
+    );
+    const scheduledStartTime = envelopeWindow.startTime;
+    const attackEndTime = scheduledStartTime + attack;
+    const latestBodyTime = Math.max(
+      attackEndTime,
+      envelopeWindow.releaseCurveEndTime - 0.001,
+    );
+    const bodyTime = Math.min(
+      latestBodyTime,
+      scheduledStartTime + Math.max(attack + 0.008, duration * 0.5),
+    );
     const fundamental = context.createOscillator();
     const octave = context.createOscillator();
     const fundamentalLevel = context.createGain();
@@ -4596,25 +4717,30 @@ export default function Home() {
     const envelope = context.createGain();
 
     fundamental.type = "triangle";
-    fundamental.frequency.setValueAtTime(frequency, startTime);
+    fundamental.frequency.setValueAtTime(frequency, scheduledStartTime);
     octave.type = "sine";
-    octave.frequency.setValueAtTime(frequency * 2, startTime);
-    fundamentalLevel.gain.setValueAtTime(0.82, startTime);
-    octaveLevel.gain.setValueAtTime(0.46, startTime);
+    octave.frequency.setValueAtTime(frequency * 2, scheduledStartTime);
+    fundamentalLevel.gain.setValueAtTime(0.82, scheduledStartTime);
+    octaveLevel.gain.setValueAtTime(0.46, scheduledStartTime);
     // Remove sub-bass rumble, while the C3 harmonic makes the C2 root clear.
     rumbleFilter.type = "highpass";
-    rumbleFilter.frequency.setValueAtTime(52, startTime);
-    rumbleFilter.Q.setValueAtTime(0.45, startTime);
+    rumbleFilter.frequency.setValueAtTime(52, scheduledStartTime);
+    rumbleFilter.Q.setValueAtTime(0.45, scheduledStartTime);
     toneFilter.type = "lowpass";
-    toneFilter.frequency.setValueAtTime(2_200, startTime);
-    toneFilter.Q.setValueAtTime(0.45, startTime);
-    envelope.gain.setValueAtTime(0.0001, startTime);
-    envelope.gain.exponentialRampToValueAtTime(peakGain, startTime + attack);
+    toneFilter.frequency.setValueAtTime(2_200, scheduledStartTime);
+    toneFilter.Q.setValueAtTime(0.45, scheduledStartTime);
+    envelope.gain.setValueAtTime(0, context.currentTime);
+    envelope.gain.setValueAtTime(0, scheduledStartTime);
+    envelope.gain.linearRampToValueAtTime(peakGain, attackEndTime);
     envelope.gain.exponentialRampToValueAtTime(
       Math.max(0.0001, peakGain * 0.66),
-      startTime + bodyTime,
+      bodyTime,
     );
-    envelope.gain.exponentialRampToValueAtTime(0.0001, startTime + duration);
+    envelope.gain.exponentialRampToValueAtTime(
+      0.0001,
+      envelopeWindow.releaseCurveEndTime,
+    );
+    envelope.gain.linearRampToValueAtTime(0, envelopeWindow.endTime);
 
     fundamental.connect(fundamentalLevel);
     octave.connect(octaveLevel);
@@ -4659,10 +4785,10 @@ export default function Home() {
     trackedSources?.add(fundamental);
     trackedSources?.add(octave);
 
-    fundamental.start(startTime);
-    octave.start(startTime);
-    fundamental.stop(startTime + duration + 0.015);
-    octave.stop(startTime + duration + 0.015);
+    fundamental.start(scheduledStartTime);
+    octave.start(scheduledStartTime);
+    fundamental.stop(envelopeWindow.endTime + AUDIO_SOURCE_STOP_PADDING_SECONDS);
+    octave.stop(envelopeWindow.endTime + AUDIO_SOURCE_STOP_PADDING_SECONDS);
   }
 
   function getSortingToneFrequency(value: number) {
@@ -4714,9 +4840,9 @@ export default function Home() {
     const basePeakGain = isImpact ? 0.2 : 0.14;
     const peakGain = basePeakGain * (volume / 100) ** 2.5;
     const frequency = getSortingToneFrequency(activeValue);
-    // Preserve the immediate, musical response for the 4–25 note piano
-    // mapping. Dense pulse rows receive scheduling lead so a lagged render
-    // cannot reach the oscillator before its click-free attack is queued.
+    // Dense pulse rows need a longer lead because their reusable automation
+    // queue can already contain work. Source-based piano voices apply their
+    // shorter one-shot lead inside `playMusicalVoice`.
     const startTime = isDenseTone
       ? getSafeScheduledAudioTime(
           now,
@@ -4773,31 +4899,45 @@ export default function Home() {
     const oscillator = context.createOscillator();
     const filter = context.createBiquadFilter();
     const envelope = context.createGain();
-    const spacing = duration / 1_000 / valuesToScan.length;
+    const durationSeconds = duration / 1_000;
+    const spacing = durationSeconds / valuesToScan.length;
     const attack = Math.min(0.012, Math.max(0.004, spacing * 0.75));
     const release = 0.02;
-    const endTime = startTime + duration / 1_000;
-    const bodyEnd = Math.max(startTime + attack, endTime - release);
+    const envelopeWindow = getOneShotAudioEnvelopeWindow(
+      startTime,
+      context.currentTime,
+      durationSeconds + release,
+      ONE_SHOT_TONE_SCHEDULE_LEAD_SECONDS,
+      ONE_SHOT_TONE_TERMINAL_FADE_SECONDS,
+    );
+    const scheduledStartTime = envelopeWindow.startTime;
+    const endTime = scheduledStartTime + durationSeconds;
+    const bodyEnd = Math.max(scheduledStartTime + attack, endTime - release);
 
     oscillator.type = "triangle";
     oscillator.frequency.setValueAtTime(
       getSortingToneFrequency(valuesToScan[0] ?? 1),
-      startTime,
+      scheduledStartTime,
     );
     valuesToScan.forEach((value, index) => {
-      const noteTime = startTime + (index + 0.5) * spacing;
+      const noteTime = scheduledStartTime + (index + 0.5) * spacing;
       const frequency = getSortingToneFrequency(value);
       // Linear ramps keep phase continuous—unlike restarting hundreds of
       // oscillators—while each value still contributes its own pitch point.
       oscillator.frequency.linearRampToValueAtTime(frequency, noteTime);
     });
     filter.type = "lowpass";
-    filter.frequency.setValueAtTime(2_000, startTime);
-    filter.Q.setValueAtTime(0.4, startTime);
-    envelope.gain.setValueAtTime(0.0001, startTime);
-    envelope.gain.exponentialRampToValueAtTime(peakGain, startTime + attack);
+    filter.frequency.setValueAtTime(2_000, scheduledStartTime);
+    filter.Q.setValueAtTime(0.4, scheduledStartTime);
+    envelope.gain.setValueAtTime(0, context.currentTime);
+    envelope.gain.setValueAtTime(0, scheduledStartTime);
+    envelope.gain.linearRampToValueAtTime(peakGain, scheduledStartTime + attack);
     envelope.gain.setValueAtTime(peakGain, bodyEnd);
-    envelope.gain.exponentialRampToValueAtTime(0.0001, endTime + release);
+    envelope.gain.exponentialRampToValueAtTime(
+      0.0001,
+      envelopeWindow.releaseCurveEndTime,
+    );
+    envelope.gain.linearRampToValueAtTime(0, envelopeWindow.endTime);
 
     oscillator.connect(filter);
     filter.connect(envelope);
@@ -4814,8 +4954,8 @@ export default function Home() {
       }
       onVoiceEnded();
     }, { once: true });
-    oscillator.start(startTime);
-    oscillator.stop(endTime + release + AUDIO_SOURCE_STOP_PADDING_SECONDS);
+    oscillator.start(scheduledStartTime);
+    oscillator.stop(envelopeWindow.endTime + AUDIO_SOURCE_STOP_PADDING_SECONDS);
   }
 
   function playCompletionSweepSound(
@@ -4842,7 +4982,7 @@ export default function Home() {
     // current tone smoothly rather than stopping a waveform at a hard edge.
     const output = context.createGain();
     output.gain.setValueAtTime(1, context.currentTime);
-    output.connect(context.destination);
+    output.connect(getSynthMasterInput(context));
     const run: CompletionSweepAudioRun = {
       id: sweepRun,
       context,
@@ -4942,13 +5082,26 @@ export default function Home() {
     if (!context || context.state !== "running" || soundVolume <= 0) return;
 
     const now = context.currentTime;
+    const firstNoteTime = getSafeScheduledAudioTime(
+      now,
+      context.currentTime,
+      ONE_SHOT_TONE_SCHEDULE_LEAD_SECONDS,
+    );
+    const output = getSynthMasterInput(context);
     const notes = [523.25, 659.25, 783.99, 1_046.5];
 
     notes.forEach((frequency, index) => {
       const oscillator = context.createOscillator();
       const gain = context.createGain();
-      const startTime = now + index * 0.1;
       const duration = index === notes.length - 1 ? 0.38 : 0.14;
+      const envelopeWindow = getOneShotAudioEnvelopeWindow(
+        firstNoteTime + index * 0.1,
+        context.currentTime,
+        duration,
+        ONE_SHOT_TONE_SCHEDULE_LEAD_SECONDS,
+        ONE_SHOT_TONE_TERMINAL_FADE_SECONDS,
+      );
+      const startTime = envelopeWindow.startTime;
       // A victory note is a single oscillator, whereas sorting notes have an
       // octave reinforcement. Lift its envelope to the equivalent perceived
       // range so a successful Bogo run does not fall behind the live texture.
@@ -4956,11 +5109,16 @@ export default function Home() {
 
       oscillator.type = index === notes.length - 1 ? "triangle" : "sine";
       oscillator.frequency.setValueAtTime(frequency, startTime);
-      gain.gain.setValueAtTime(0.0001, startTime);
-      gain.gain.exponentialRampToValueAtTime(peakGain, startTime + 0.012);
-      gain.gain.exponentialRampToValueAtTime(0.0001, startTime + duration);
+      gain.gain.setValueAtTime(0, context.currentTime);
+      gain.gain.setValueAtTime(0, startTime);
+      gain.gain.linearRampToValueAtTime(peakGain, startTime + 0.012);
+      gain.gain.exponentialRampToValueAtTime(
+        0.0001,
+        envelopeWindow.releaseCurveEndTime,
+      );
+      gain.gain.linearRampToValueAtTime(0, envelopeWindow.endTime);
       oscillator.connect(gain);
-      gain.connect(context.destination);
+      gain.connect(output);
       oscillator.addEventListener("ended", () => {
         try {
           oscillator.disconnect();
@@ -4970,7 +5128,7 @@ export default function Home() {
         }
       }, { once: true });
       oscillator.start(startTime);
-      oscillator.stop(startTime + duration + 0.02);
+      oscillator.stop(envelopeWindow.endTime + AUDIO_SOURCE_STOP_PADDING_SECONDS);
     });
   }
 
@@ -5001,6 +5159,7 @@ export default function Home() {
       }
       completionSweepRunRef.current += 1;
       stopCompletionSweepSound();
+      disconnectSynthMasterOutput();
       void audioContextRef.current?.close();
     };
   }, []);
@@ -5180,7 +5339,7 @@ export default function Home() {
       } else {
         const deadline = performance.now() + BOGO_FAST_BATCH_BUDGET_MILLISECONDS;
         do {
-          advanceBogoSession(session);
+          advanceBogoSessionBatch(session, 64);
         } while (!session.done && performance.now() < deadline);
       }
 
@@ -5229,7 +5388,7 @@ export default function Home() {
       // the exact winning (or limited) shuffle.
       if (session.done || now >= nextVisualUpdateAt) {
         nextVisualUpdateAt = now + BOGO_VISUAL_UPDATE_INTERVAL;
-        setBogoLiveStep(getBogoSessionStep(session));
+        publishBogoLiveStep(session);
       }
       if (session.done) {
         setRunState("complete");
@@ -7664,7 +7823,12 @@ export default function Home() {
             </div>
           </div>
 
-          <div className="workbench">
+          <div
+            className={
+              "workbench " +
+              (useCanvasBarRenderer && isRunning ? "workbench--canvas-running" : "")
+            }
+          >
             <div className="workbench__topline">
               <div>
                 <p className="workbench__overline">LIVE ARRAY</p>
@@ -7700,7 +7864,6 @@ export default function Home() {
               <div className="chart-grid" aria-hidden="true" />
               {useCanvasBarRenderer ? (
                 <DenseBarCanvas
-                  items={renderedBarItems}
                   largestValue={largestValue}
                   step={currentStep}
                   algorithm={algorithm}

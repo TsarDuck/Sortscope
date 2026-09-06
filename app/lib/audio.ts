@@ -168,6 +168,45 @@ export function getSafeScheduledAudioTime(
   return Math.max(requestedTime, currentTime + Math.max(0, minimumLeadSeconds));
 }
 
+export type OneShotAudioEnvelopeWindow = {
+  startTime: number;
+  releaseCurveEndTime: number;
+  endTime: number;
+};
+
+/**
+ * Place an audible one-shot safely ahead of the current render quantum and
+ * reserve a short terminal interval for a linear fade to exact zero. Web
+ * Audio's exponential ramps cannot target zero, so stopping at their usual
+ * epsilon leaves a small waveform discontinuity that some desktop WebViews
+ * reproduce as a click.
+ */
+export function getOneShotAudioEnvelopeWindow(
+  requestedStartTime: number,
+  currentTime: number,
+  durationSeconds: number,
+  minimumLeadSeconds: number,
+  terminalFadeSeconds: number,
+): OneShotAudioEnvelopeWindow {
+  const startTime = getSafeScheduledAudioTime(
+    requestedStartTime,
+    currentTime,
+    minimumLeadSeconds,
+  );
+  const duration = Math.max(0.001, durationSeconds);
+  const endTime = startTime + duration;
+  const terminalFade = Math.min(
+    duration / 2,
+    Math.max(0.001, terminalFadeSeconds),
+  );
+
+  return {
+    startTime,
+    releaseCurveEndTime: endTime - terminalFade,
+    endTime,
+  };
+}
+
 export type DenseTonePulseWindow = {
   startTime: number;
   attackEndTime: number;

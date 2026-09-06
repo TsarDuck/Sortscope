@@ -1,4 +1,8 @@
-import { advanceBogoSession, type BogoSession } from "./sorting";
+import {
+  advanceBogoSession,
+  advanceBogoSessionBatch,
+  type BogoSession,
+} from "./sorting";
 import type {
   BogoWorkerCommand,
   BogoWorkerEvent,
@@ -26,6 +30,11 @@ type ActiveBogoWorkerRun = {
 
 const workerScope = globalThis as unknown as BogoWorkerScope;
 let activeRun: ActiveBogoWorkerRun | null = null;
+// `performance.now()` is surprisingly expensive in the hottest Bogo loop,
+// especially in JavaScriptCore. Check the batch deadline once per small chunk
+// instead of once per permutation. Each individual attempt still observes its
+// exact cap and sorted result inside `advanceBogoSessionBatch`.
+const FAST_DEADLINE_CHECK_ATTEMPTS = 64;
 
 // Nested zero-delay timers are aggressively clamped in WebKit workers, which
 // turns an otherwise fast Bogo loop into repeated idle gaps. A MessagePort
@@ -85,7 +94,10 @@ function pump(run: ActiveBogoWorkerRun) {
     } else {
       const deadline = performance.now() + Math.max(1, run.pacing.batchBudgetMs);
       do {
-        advanceBogoSession(run.session);
+        advanceBogoSessionBatch(
+          run.session,
+          FAST_DEADLINE_CHECK_ATTEMPTS,
+        );
       } while (!run.session.done && performance.now() < deadline);
     }
 

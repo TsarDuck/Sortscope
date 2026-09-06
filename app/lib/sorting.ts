@@ -648,6 +648,28 @@ export function advanceBogoSession(
   }
 }
 
+/**
+ * Advance several independent Bogo attempts without consulting the wall clock
+ * between every shuffle. The worker uses this small chunk as its scheduling
+ * unit; attempt limits and a lucky completion are still checked by
+ * `advanceBogoSession` after every permutation.
+ */
+export function advanceBogoSessionBatch(
+  session: BogoSession,
+  maximumAttempts: number,
+  random?: () => number,
+) {
+  const batchLimit = Math.max(1, Math.floor(maximumAttempts));
+  let advanced = 0;
+
+  while (!session.done && advanced < batchLimit) {
+    advanceBogoSession(session, random);
+    advanced += 1;
+  }
+
+  return advanced;
+}
+
 export function getBogoSessionStep(session: BogoSession): SortStep {
   if (session.done && !session.limited) {
     return makeStep(session.values, {

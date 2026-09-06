@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   BOGO_MAX_ATTEMPTS,
   advanceBogoSession,
+  advanceBogoSessionBatch,
   analyzeBubbleSort,
   analyzeCocktailSort,
   analyzeHeapSort,
@@ -255,6 +256,24 @@ test("the default Bogo session path keeps its Fisher-Yates result and write coun
   } finally {
     Math.random = originalRandom;
   }
+});
+
+test("Bogo batches preserve exact completion and attempt limits", () => {
+  const limited = createBogoSession([3, 2, 1], 7);
+  const limitedAttempts = advanceBogoSessionBatch(limited, 64, () => 0.999);
+
+  assert.equal(limitedAttempts, 7);
+  assert.equal(limited.attempts, 7);
+  assert.equal(limited.done, true);
+  assert.equal(limited.limited, true);
+
+  const success = createBogoSession([2, 1], null);
+  const successfulAttempts = advanceBogoSessionBatch(success, 64, () => 0);
+
+  assert.equal(successfulAttempts, 1);
+  assert.deepEqual(success.values, [1, 2]);
+  assert.equal(success.done, true);
+  assert.equal(success.limited, false);
 });
 
 test("dense algorithms retain a bounded number of useful render snapshots", () => {
