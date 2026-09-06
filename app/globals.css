@@ -3257,8 +3257,7 @@ input:focus-visible {
 }
 
 .benchmark-tab:focus-visible,
-.workload-bars-toggle:focus-visible,
-.workload-bars-size-control select:focus-visible {
+.workload-bars-toggle:focus-visible {
   outline: 2px solid #9debf8;
   outline-offset: 2px;
 }
@@ -3296,32 +3295,6 @@ input:focus-visible {
   color: #9ba6c8;
   font-size: 0.72rem;
   line-height: 1.52;
-}
-
-.workload-bars-size-control {
-  display: grid;
-  gap: 6px;
-  color: #8f9abc;
-  font-size: 0.58rem;
-  font-weight: 850;
-  letter-spacing: 0.085em;
-  text-transform: uppercase;
-}
-
-.workload-bars-size-control select {
-  min-width: 0;
-  height: 36px;
-  padding: 0 28px 0 10px;
-  border: 1px solid rgba(173, 188, 244, 0.32);
-  border-radius: 8px;
-  color: #e7ecff;
-  background: rgba(9, 13, 32, 0.7);
-  font: inherit;
-  font-size: 0.72rem;
-  font-weight: 750;
-  letter-spacing: normal;
-  text-transform: none;
-  cursor: pointer;
 }
 
 .workload-bars-toggle-list {
@@ -4129,9 +4102,6 @@ input:focus-visible {
     grid-template-columns: 1fr;
   }
 
-  .workload-bars-size-control {
-    max-width: 270px;
-  }
 }
 
 @media (max-width: 700px) {

@@ -8756,7 +8756,7 @@ export default function Home() {
                   </p>
                 </div>
 
-                <label className="workload-bars-size-control">
+                <label className="benchmark-select">
                   <span>Theoretical array size, N</span>
                   <select
                     value={workloadBarSize}
