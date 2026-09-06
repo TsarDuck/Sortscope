@@ -3562,6 +3562,30 @@ input:focus-visible {
   font-weight: 800;
 }
 
+.benchmark-algorithm-label {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+}
+
+.benchmark-algorithm-label strong {
+  overflow: hidden;
+  font: inherit;
+  line-height: 1.1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.benchmark-algorithm-label small {
+  color: #9ea8c8;
+  font-family: var(--font-geist-mono), monospace;
+  font-size: 0.58rem;
+  font-weight: 750;
+  letter-spacing: 0.025em;
+  line-height: 1;
+  white-space: nowrap;
+}
+
 .benchmark-matrix__cell {
   display: grid;
   gap: 6px;

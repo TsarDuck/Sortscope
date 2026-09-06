@@ -307,6 +307,25 @@ const BENCHMARK_ALGORITHMS = [
 ] as const;
 type BenchmarkAlgorithm = (typeof BENCHMARK_ALGORITHMS)[number]["key"];
 type BenchmarkWork = Record<BenchmarkAlgorithm, number>;
+const BENCHMARK_BIG_O: Record<
+  BenchmarkAlgorithm,
+  { random: string; reverse?: string; "nearly-sorted"?: string }
+> = {
+  bubble: { random: "O(n²)" },
+  insertion: { random: "O(n²)" },
+  cocktail: { random: "O(n²)" },
+  selection: { random: "O(n²)" },
+  heap: { random: "O(n log n)" },
+  quick: { random: "O(n log n)", reverse: "O(n²)", "nearly-sorted": "O(n²)" },
+  pdq: { random: "O(n log n)", "nearly-sorted": "O(n)" },
+  merge: { random: "O(n log n)" },
+  powersort: { random: "O(n log n)", "nearly-sorted": "O(n)" },
+};
+
+function getBenchmarkBigO(algorithm: BenchmarkAlgorithm, pattern: BenchmarkPattern) {
+  return BENCHMARK_BIG_O[algorithm][pattern] ?? BENCHMARK_BIG_O[algorithm].random;
+}
+
 const BENCHMARK_COLORS: Record<BenchmarkAlgorithm, string> = {
   bubble: "#e58bc3",
   insertion: "#9789ff",
@@ -8494,7 +8513,20 @@ export default function Home() {
               <div
                 className="benchmark-chart"
                 role="img"
-                aria-label={"Illustrative work growth, ordered from highest to lowest modeled work, for " + benchmarkPattern + " arrays from 256 through 1,048,576 values."}
+                aria-label={
+                  "Illustrative work growth, ordered from highest to lowest modeled work, for " +
+                  benchmarkPattern +
+                  " arrays from 256 through 1,048,576 values. Big O: " +
+                  orderedBenchmarkAlgorithms
+                    .map(
+                      (benchmarkAlgorithm) =>
+                        benchmarkAlgorithm.label +
+                        " " +
+                        getBenchmarkBigO(benchmarkAlgorithm.key, benchmarkPattern),
+                    )
+                    .join(", ") +
+                  "."
+                }
               >
                 <p className="benchmark-chart__note">
                   This view illustrates each algorithm&apos;s growth shape for the selected arrangement.
@@ -8514,8 +8546,14 @@ export default function Home() {
                   {orderedBenchmarkAlgorithms.map((benchmarkAlgorithm) => (
                     <div className="benchmark-matrix__row" key={benchmarkAlgorithm.key}>
                       <span className="benchmark-matrix__label">
-                        <i className={"benchmark-legend__swatch benchmark-legend__swatch--" + benchmarkAlgorithm.className} />
-                        {benchmarkAlgorithm.label}
+                        <i
+                          className={"benchmark-legend__swatch benchmark-legend__swatch--" + benchmarkAlgorithm.className}
+                          aria-hidden="true"
+                        />
+                        <span className="benchmark-algorithm-label">
+                          <strong>{benchmarkAlgorithm.label}</strong>
+                          <small>{getBenchmarkBigO(benchmarkAlgorithm.key, benchmarkPattern)}</small>
+                        </span>
                       </span>
                       {theoreticalBenchmarkData.map((entry) => {
                         const work = entry.work[benchmarkAlgorithm.key];
@@ -8612,6 +8650,7 @@ export default function Home() {
                     {renderedWorkloadBarRows.map((row) => {
                       const ratio = row.work / workloadBarMaximum;
                       const multiplier = row.work / workloadBarFastest;
+                      const bigO = getBenchmarkBigO(row.key, benchmarkPattern);
                       const relativeLabel =
                         multiplier === 1
                           ? "fastest selected algorithm"
@@ -8652,15 +8691,21 @@ export default function Home() {
                           >
                             <div className="workload-bar-row__heading">
                               <span>
-                                <i className={"benchmark-legend__swatch benchmark-legend__swatch--" + row.className} />
-                                {row.label}
+                                <i
+                                  className={"benchmark-legend__swatch benchmark-legend__swatch--" + row.className}
+                                  aria-hidden="true"
+                                />
+                                <span className="benchmark-algorithm-label">
+                                  <strong>{row.label}</strong>
+                                  <small>{bigO}</small>
+                                </span>
                               </span>
                               <strong>{formatCount(row.work)}</strong>
                             </div>
                             <div
                               className="workload-bar-row__track"
                               role="progressbar"
-                              aria-label={row.label + ": " + formatCount(row.work) + " modeled work, " + relativeLabel}
+                              aria-label={row.label + ", " + bigO + ": " + formatCount(row.work) + " modeled work, " + relativeLabel}
                               aria-valuemin={0}
                               aria-valuemax={Math.round(workloadBarMaximum)}
                               aria-valuenow={Math.round(row.work)}
